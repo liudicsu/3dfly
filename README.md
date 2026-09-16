@@ -101,17 +101,40 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### Option 1: Run with Bundled Demo Subgraph
+### Option 1: Interactive 3D God's-Eye View (Recommended)
+
+**🎮 Full interactive 3D visualization with orbit/pan/zoom controls**
 
 ```bash
 # Create small demo subgraph (500 neurons, synthetic)
 python scripts/create_demo_subgraph.py
 
-# Run demo
+# Run interactive demo
+threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
+
+# Open your browser to http://localhost:8080
+# Use mouse to orbit, pan, and zoom the 3D scene
+# Use UI controls to play/pause, step, and reset
+```
+
+**Interactive features:**
+- **3D god's-eye view**: See the fly, trajectory, and point cloud together
+- **Orbit/pan/zoom**: Use mouse to explore the scene from any angle
+- **Playback controls**: Play, pause, step frame-by-frame, or reset
+- **Live stereo views**: See what the fly's eyes observe in real-time
+- **Adjustable speed**: Control simulation playback speed
+
+### Option 2: Run with Static Visualization
+
+```bash
+# Create small demo subgraph (500 neurons, synthetic)
+python scripts/create_demo_subgraph.py
+
+# Run demo with matplotlib plots
 threedfly run --subgraph data/demo_subgraph.npz --steps 1000 --viz-mode matplotlib
 ```
 
-### Option 2: Download Full Connectome and Extract Subgraph
+### Option 3: Download Full Connectome and Extract Subgraph
 
 **Warning**: Downloads ~1.1 GB of data.
 
@@ -122,7 +145,10 @@ threedfly download
 # Extract visual-flight subgraph (may take a few minutes)
 threedfly extract --output data/subgraph.npz
 
-# Run with extracted subgraph
+# Run with extracted subgraph (interactive)
+threedfly run-interactive --subgraph data/subgraph.npz --steps 5000
+
+# Or run with static visualization
 threedfly run --subgraph data/subgraph.npz --steps 2000
 ```
 
@@ -157,7 +183,7 @@ threedfly extract --demo
 ```
 
 #### `threedfly run`
-Run the simulation.
+Run the simulation with static visualization.
 
 ```bash
 threedfly run [OPTIONS]
@@ -170,6 +196,31 @@ Options:
   --save-output DIR            Output directory [default: output]
   --simulator-type TYPE        rate|lif [default: rate]
   --seed N                     Random seed [default: 42]
+```
+
+#### `threedfly run-interactive`
+Run the simulation with interactive 3D god's-eye visualization.
+
+```bash
+threedfly run-interactive [OPTIONS]
+
+Options:
+  --subgraph PATH              Path to subgraph file [default: data/demo_subgraph.npz]
+  --steps N                    Maximum simulation steps [default: 5000]
+  --save-output DIR            Output directory [default: output]
+  --simulator-type TYPE        rate|lif [default: rate]
+  --seed N                     Random seed [default: 42]
+  --host HOST                  Visualization server host [default: 0.0.0.0]
+  --port PORT                  Visualization server port [default: 8080]
+
+Features:
+  - Interactive 3D view with orbit/pan/zoom
+  - Play/pause/step/reset controls
+  - Real-time trajectory and point cloud
+  - Live stereo camera views
+  - Adjustable playback speed
+
+After starting, open your browser to http://localhost:8080
 ```
 
 #### `threedfly demo`
@@ -412,8 +463,11 @@ And cite the MaleCNS connectome:
 - 双目视觉深度估计和3D点云建图
 - MuJoCo物理仿真环境
 - 基于好奇心的探索策略
+- **交互式3D上帝视角可视化**
 
 ### 快速开始
+
+#### 方式一：交互式3D可视化（推荐）
 
 ```bash
 # 安装
@@ -422,7 +476,25 @@ pip install -e ".[dev]"
 # 创建演示子图
 python scripts/create_demo_subgraph.py
 
-# 运行模拟
+# 运行交互式模拟
+threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
+
+# 在浏览器中打开 http://localhost:8080
+# 使用鼠标旋转、平移和缩放3D场景
+# 使用界面控制播放、暂停、单步和重置
+```
+
+**交互功能：**
+- **3D上帝视角**：同时看到果蝇、飞行轨迹和点云地图
+- **自由视角控制**：用鼠标从任意角度观察场景
+- **播放控制**：播放、暂停、单步前进、重置模拟
+- **实时双目视觉**：查看果蝇眼睛实时观测到的画面
+- **速度调节**：控制模拟播放速度
+
+#### 方式二：静态可视化
+
+```bash
+# 运行模拟（静态matplotlib图表）
 threedfly run --subgraph data/demo_subgraph.npz --steps 1000
 ```
 

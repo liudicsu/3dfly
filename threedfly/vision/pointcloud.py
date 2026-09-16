@@ -108,8 +108,9 @@ class PointCloudMapper:
         if len(points_world) == 0:
             return 0
         
-        # Get colors
-        rgb = rgb_image[valid_mask][in_bounds] / 255.0
+        # Get colors - need to flatten and filter properly
+        rgb_flat = rgb_image.reshape(-1, 3)  # Flatten to (H*W, 3)
+        rgb = rgb_flat[valid_mask.flatten()][in_bounds] / 255.0
         
         # Create point cloud
         new_cloud = o3d.geometry.PointCloud()
@@ -199,9 +200,12 @@ class PointCloudMapper:
         
         return float(score)
     
-    def downsample(self) -> o3d.geometry.PointCloud:
+    def downsample(self, voxel_size: Optional[float] = None) -> o3d.geometry.PointCloud:
         """
         Downsample global cloud for visualization.
+        
+        Args:
+            voxel_size: Voxel size for downsampling (default: use mapper's voxel_size)
         
         Returns:
             Downsampled point cloud
@@ -209,21 +213,43 @@ class PointCloudMapper:
         if len(self.global_cloud.points) == 0:
             return self.global_cloud
         
-        downsampled = self.global_cloud.voxel_down_sample(voxel_size=self.voxel_size)
+        if voxel_size is None:
+            voxel_size = self.voxel_size
+        
+        downsampled = self.global_cloud.voxel_down_sample(voxel_size=voxel_size)
         return downsampled
     
-    def save_point_cloud(self, filename: str):
-        """Save point cloud to file (PLY format)."""
-        downsampled = self.downsample()
+    def save_point_cloud(self, filename: str, voxel_size: Optional[float] = None):
+        """
+        Save point cloud to file (PLY format).
+        
+        Args:
+            filename: Output filename
+            voxel_size: Voxel size for downsampling (default: use 1/2 of mapper's voxel_size for denser export)
+        """
+        if voxel_size is None:
+            # Use smaller voxel size for export (denser than default downsample)
+            voxel_size = self.voxel_size / 2.0
+        
+        downsampled = self.downsample(voxel_size=voxel_size)
         o3d.io.write_point_cloud(filename, downsampled)
         print(f"✓ Saved point cloud: {filename} ({len(downsampled.points)} points)")
     
     def get_statistics(self) -> dict:
         """Get mapping statistics."""
+        occupied_voxels = int((self.occupancy_grid > 0).sum())
+        total_voxels = int(self.occupancy_grid.size)
+        
+        # Calculate exploration ratio as percentage of reachable space
+        # Use a more meaningful denominator: voxels within flying height
+        flying_height_voxels = int(self.map_bounds[2] / self.voxel_size)  # Height dimension
+        reachable_voxels = self.occupancy_grid.shape[0] * self.occupancy_grid.shape[1] * flying_height_voxels
+        exploration_ratio = occupied_voxels / max(1, reachable_voxels)
+        
         return {
             "total_points": len(self.global_cloud.points),
             "points_added": self.total_points_added,
-            "occupied_voxels": int((self.occupancy_grid > 0).sum()),
-            "total_voxels": int(self.occupancy_grid.size),
-            "exploration_ratio": float((self.occupancy_grid > 0).sum() / self.occupancy_grid.size),
+            "occupied_voxels": occupied_voxels,
+            "total_voxels": total_voxels,
+            "exploration_ratio": float(exploration_ratio),
         }

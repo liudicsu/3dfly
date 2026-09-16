@@ -142,7 +142,9 @@ class StereoVision:
                 - left_ommatidia: sampled left eye
                 - right_ommatidia: sampled right eye
                 - depth_estimate: mean depth
-                - motion_cue: frame difference (if tracking previous)
+                - depth_map: depth map (downsampled if downsample_factor > 1)
+                - confidence: confidence map (same size as depth_map)
+                - rgb_for_cloud: RGB image matching depth_map size
         """
         # Ommatidial sampling
         left_samples = self.ommatidial_sample(left_img)
@@ -150,6 +152,15 @@ class StereoVision:
         
         # Depth estimate
         depth_map, confidence = self.estimate_depth(left_img, right_img)
+        
+        # Downsample RGB to match depth map if needed
+        if self.downsample_factor > 1:
+            h, w = left_img.shape[:2]
+            new_h = h // self.downsample_factor
+            new_w = w // self.downsample_factor
+            rgb_for_cloud = cv2.resize(left_img, (new_w, new_h))
+        else:
+            rgb_for_cloud = left_img
         
         # Mean depth weighted by confidence
         if confidence.sum() > 0:
@@ -163,4 +174,5 @@ class StereoVision:
             "depth_estimate": mean_depth,
             "depth_map": depth_map,
             "confidence": confidence,
+            "rgb_for_cloud": rgb_for_cloud,
         }
