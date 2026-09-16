@@ -10,7 +10,7 @@ from threedfly.connectome.simulator import RateSimulator
 from threedfly.sim import FlyEnvironment
 from threedfly.vision import StereoVision, PointCloudMapper
 from threedfly.control import FlightController, ExplorationPolicy
-from threedfly.viz import Visualizer
+from threedfly.viz import Visualizer, WebVisualizer
 
 
 def run_simulation(
@@ -20,6 +20,8 @@ def run_simulation(
     save_output_dir: str = "output",
     simulator_type: str = "rate",
     seed: int = 42,
+    web_host: str = "127.0.0.1",
+    web_port: int = 8050,
 ):
     """
     Run complete 3dfly simulation.
@@ -27,10 +29,12 @@ def run_simulation(
     Args:
         subgraph_path: Path to subgraph npz file
         n_steps: Number of simulation steps
-        viz_mode: Visualization mode
+        viz_mode: Visualization mode (matplotlib|open3d|both|web|none)
         save_output_dir: Output directory
         simulator_type: "rate" or "lif"
         seed: Random seed
+        web_host: Host for web UI (when viz_mode="web")
+        web_port: Port for web UI (when viz_mode="web")
     """
     np.random.seed(seed)
     
@@ -67,7 +71,13 @@ def run_simulation(
     explorer = ExplorationPolicy(exploration_weight=0.5)
     
     print("\n[6/7] Initializing visualization...")
-    if viz_mode != "none":
+    if viz_mode == "web":
+        viz = WebVisualizer(host=web_host, port=web_port)
+        viz.run_async()
+        print(f"\n🌐 Web UI running at http://{web_host}:{web_port}")
+        print("Open your browser to interact with the simulation")
+        print("-" * 70)
+    elif viz_mode != "none":
         viz = Visualizer(mode=viz_mode, window_size=(12, 8))
         viz.show(block=False)
     else:
@@ -130,16 +140,29 @@ def run_simulation(
             brain_stats = brain.get_population_activity()
             control_stats = controller.get_status()
             
-            viz.update(
-                left_img=left_img,
-                right_img=right_img,
-                fly_position=fly_pos,
-                brain_activity=brain_activity,
-                control_action=action,
-                point_cloud_mapper=mapper,
-                brain_stats=brain_stats,
-                control_stats=control_stats,
-            )
+            if viz_mode == "web":
+                viz.update(
+                    step=step,
+                    left_img=left_img,
+                    right_img=right_img,
+                    fly_position=fly_pos,
+                    brain_activity=brain_activity,
+                    control_action=action,
+                    point_cloud_mapper=mapper,
+                    brain_stats=brain_stats,
+                    control_stats=control_stats,
+                )
+            else:
+                viz.update(
+                    left_img=left_img,
+                    right_img=right_img,
+                    fly_position=fly_pos,
+                    brain_activity=brain_activity,
+                    control_action=action,
+                    point_cloud_mapper=mapper,
+                    brain_stats=brain_stats,
+                    control_stats=control_stats,
+                )
         
         # Check collision
         if env.check_collision():
@@ -159,14 +182,27 @@ def run_simulation(
     
     # Final visualization
     if viz is not None:
-        fig_path = output_dir / "final_state.png"
-        viz.save_figure(str(fig_path))
-        print(f"✓ Saved figure: {fig_path}")
-        
-        # Show final visualization
-        print("\nClose the visualization window to exit.")
-        viz.show(block=True)
-        viz.close()
+        if viz_mode == "web":
+            print("\n" + "=" * 70)
+            print(f"Web UI still running at http://{web_host}:{web_port}")
+            print("Press Ctrl+C to stop the server")
+            print("=" * 70)
+            try:
+                # Keep server running
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nShutting down web server...")
+                viz.close()
+        else:
+            fig_path = output_dir / "final_state.png"
+            viz.save_figure(str(fig_path))
+            print(f"✓ Saved figure: {fig_path}")
+            
+            # Show final visualization
+            print("\nClose the visualization window to exit.")
+            viz.show(block=True)
+            viz.close()
     
     # Statistics
     map_stats = mapper.get_statistics()
