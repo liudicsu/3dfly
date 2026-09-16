@@ -119,7 +119,7 @@ def run_simulation(
             left_pose, right_pose = env.get_camera_poses()
             mapper.add_depth_observation(
                 visual_features["depth_map"],
-                left_img,
+                visual_features["rgb_for_cloud"],
                 left_pose,
                 visual_features["confidence"],
                 min_confidence=0.3

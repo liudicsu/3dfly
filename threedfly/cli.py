@@ -136,7 +136,7 @@ def extract(data_dir, output, max_neurons, demo):
     help="Random seed"
 )
 def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
-    """Run 3dfly exploration simulation."""
+    """Run 3dfly exploration simulation (static visualization)."""
     from threedfly.runner import run_simulation
     
     if headless:
@@ -164,6 +164,79 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
         click.echo("\n✓ Simulation complete!")
     except Exception as e:
         click.echo(f"\nError running simulation: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@main.command("run-interactive")
+@click.option(
+    "--subgraph",
+    type=click.Path(exists=True),
+    default="data/demo_subgraph.npz",
+    help="Path to subgraph file"
+)
+@click.option(
+    "--steps",
+    type=int,
+    default=5000,
+    help="Maximum simulation steps"
+)
+@click.option(
+    "--save-output",
+    type=click.Path(),
+    default="output",
+    help="Directory to save outputs"
+)
+@click.option(
+    "--simulator-type",
+    type=click.Choice(["rate", "lif"]),
+    default="rate",
+    help="Neural simulator type"
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=42,
+    help="Random seed"
+)
+@click.option(
+    "--host",
+    type=str,
+    default="0.0.0.0",
+    help="Visualization server host"
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8080,
+    help="Visualization server port"
+)
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port):
+    """Run 3dfly with interactive 3D god's-eye visualization.
+    
+    Features:
+    - Interactive 3D view (orbit/pan/zoom with mouse)
+    - Play/pause/step/reset controls
+    - Real-time trajectory and point cloud
+    - Adjustable playback speed
+    
+    Open your browser to http://localhost:8080 after starting.
+    """
+    from threedfly.runner_interactive import run_interactive_simulation
+    
+    try:
+        run_interactive_simulation(
+            subgraph_path=subgraph,
+            max_steps=steps,
+            save_output_dir=save_output,
+            simulator_type=simulator_type,
+            seed=seed,
+            host=host,
+            port=port,
+        )
+    except Exception as e:
+        click.echo(f"\nError running interactive simulation: {e}", err=True)
         import traceback
         traceback.print_exc()
         sys.exit(1)

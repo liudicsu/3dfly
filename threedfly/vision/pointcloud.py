@@ -108,8 +108,9 @@ class PointCloudMapper:
         if len(points_world) == 0:
             return 0
         
-        # Get colors
-        rgb = rgb_image[valid_mask][in_bounds] / 255.0
+        # Get colors - need to flatten and filter properly
+        rgb_flat = rgb_image.reshape(-1, 3)  # Flatten to (H*W, 3)
+        rgb = rgb_flat[valid_mask.flatten()][in_bounds] / 255.0
         
         # Create point cloud
         new_cloud = o3d.geometry.PointCloud()
