@@ -424,7 +424,7 @@ class InteractiveVisualizer:
             status_lines.append("")
             status_lines.append(f"Point Cloud: {self.map_stats.get('total_points', 0)} points")
             status_lines.append(f"Occupied Voxels: {self.map_stats.get('occupied_voxels', 0)}")
-            status_lines.append(f"Exploration: {100*self.map_stats.get('exploration_ratio', 0):.1f}%")
+            status_lines.append(f"Exploration: {100*self.map_stats.get('exploration_ratio', 0):.2f}%")
             
         if self.brain_stats:
             status_lines.append("")

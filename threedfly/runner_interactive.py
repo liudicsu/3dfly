@@ -224,7 +224,8 @@ def run_interactive_simulation(
     
     # Point cloud
     pc_path = output_dir / "point_cloud.ply"
-    mapper.save_point_cloud(str(pc_path), voxel_size=mapper.voxel_size / 4.0)  # Dense export
+    # Export with very dense voxel size for inspection (1cm instead of 5cm/1.25cm)
+    mapper.save_point_cloud(str(pc_path), voxel_size=0.01)
     
     # Statistics
     map_stats = mapper.get_statistics()
@@ -235,7 +236,7 @@ def run_interactive_simulation(
     print(f"Brain neurons: {n_neurons}")
     print(f"Point cloud points: {map_stats['total_points']}")
     print(f"Occupied voxels: {map_stats['occupied_voxels']}")
-    print(f"Exploration ratio: {100 * map_stats['exploration_ratio']:.1f}%")
+    print(f"Exploration ratio: {100 * map_stats['exploration_ratio']:.2f}%")
     print("=" * 70)
     
     # Keep visualization open
