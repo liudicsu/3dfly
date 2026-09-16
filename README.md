@@ -18,6 +18,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - **Motor**: Descending neuron activity maps to flight thrust and torques in a MuJoCo simulation
 - **Mapping**: Accumulates stereo depth into a global 3D point cloud
 - **Exploration**: Biases flight toward under-mapped regions using occupancy-based curiosity
+- **Interactive Web UI**: Real-time browser-based visualization with interactive 3D point cloud exploration
 
 **Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. The mapping from visual input to photoreceptor activity and from descending neurons to motor commands is hand-designed, not learned or biologically validated.
 
@@ -101,17 +102,39 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### Option 1: Run with Bundled Demo Subgraph
+### Option 1: Interactive Web UI (Recommended)
+
+The web UI provides a fully interactive 3D experience with real-time visualization and controls.
 
 ```bash
 # Create small demo subgraph (500 neurons, synthetic)
 python scripts/create_demo_subgraph.py
 
-# Run demo
+# Launch interactive web UI
+threedfly serve --subgraph data/demo_subgraph.npz --steps 2000
+
+# Open your browser to http://127.0.0.1:8050
+```
+
+**Web UI Features**:
+- 🎮 **Interactive 3D point cloud** - Orbit, zoom, pan to explore the reconstructed map
+- 👀 **Live stereo vision** - Real-time left/right eye views
+- 🧠 **Brain activity** - Visualize neural activity across the connectome
+- ✈️ **Flight commands** - See thrust, yaw, pitch, roll in real-time
+- 📊 **System stats** - Fly pose, trajectory, map statistics
+- ⏯️ **Playback controls** - Play, pause, speed adjustment
+
+### Option 2: Run with Static Visualizations
+
+```bash
+# Create small demo subgraph (500 neurons, synthetic)
+python scripts/create_demo_subgraph.py
+
+# Run demo with matplotlib
 threedfly run --subgraph data/demo_subgraph.npz --steps 1000 --viz-mode matplotlib
 ```
 
-### Option 2: Download Full Connectome and Extract Subgraph
+### Option 3: Download Full Connectome and Extract Subgraph
 
 **Warning**: Downloads ~1.1 GB of data.
 
@@ -139,6 +162,31 @@ threedfly run --subgraph data/demo_subgraph.npz --steps 500 --headless --save-ou
 
 ### CLI Commands
 
+#### `threedfly serve` (Interactive Web UI)
+Launch the interactive web interface (recommended).
+
+```bash
+threedfly serve [OPTIONS]
+
+Options:
+  --subgraph PATH              Path to subgraph file [default: data/demo_subgraph.npz]
+  --steps N                    Simulation steps [default: 2000]
+  --simulator-type TYPE        rate|lif [default: rate]
+  --seed N                     Random seed [default: 42]
+  --host ADDR                  Host address [default: 127.0.0.1]
+  --port N                     Port number [default: 8050]
+
+# Example: Custom port and more steps
+threedfly serve --port 8888 --steps 5000
+```
+
+The web UI will open at `http://127.0.0.1:8050` (or your custom port). Use your browser to:
+- Interact with the 3D point cloud (click and drag to orbit)
+- Play/pause the simulation
+- Adjust simulation speed
+- View real-time stereo camera feeds
+- Monitor brain activity and flight commands
+
 #### `threedfly download`
 Download MaleCNS v1.0 connectome data from Google Cloud Storage.
 
@@ -157,7 +205,7 @@ threedfly extract --demo
 ```
 
 #### `threedfly run`
-Run the simulation.
+Run the simulation with various visualization modes.
 
 ```bash
 threedfly run [OPTIONS]
@@ -165,11 +213,23 @@ threedfly run [OPTIONS]
 Options:
   --subgraph PATH              Path to subgraph file [default: data/demo_subgraph.npz]
   --steps N                    Simulation steps [default: 2000]
-  --viz-mode MODE              matplotlib|open3d|both|none [default: matplotlib]
+  --viz-mode MODE              matplotlib|open3d|both|web|none [default: matplotlib]
   --headless                   Run without visualization
   --save-output DIR            Output directory [default: output]
   --simulator-type TYPE        rate|lif [default: rate]
   --seed N                     Random seed [default: 42]
+  --web-host ADDR              Host for web UI (when viz-mode=web)
+  --web-port N                 Port for web UI (when viz-mode=web)
+
+# Examples:
+# Run with web UI (same as 'threedfly serve')
+threedfly run --viz-mode web --steps 2000
+
+# Run with matplotlib
+threedfly run --viz-mode matplotlib --steps 1000
+
+# Run headless (for CI/servers)
+threedfly run --headless --steps 500 --save-output output/
 ```
 
 #### `threedfly demo`
@@ -185,7 +245,19 @@ threedfly demo
 from threedfly import ConnectomeLoader, BrainSimulator, FlyEnvironment
 from threedfly.runner import run_simulation
 
-# Run complete simulation
+# Run complete simulation with web UI
+run_simulation(
+    subgraph_path="data/demo_subgraph.npz",
+    n_steps=2000,
+    viz_mode="web",
+    save_output_dir="output",
+    simulator_type="rate",
+    seed=42,
+    web_host="127.0.0.1",
+    web_port=8050,
+)
+
+# Or use matplotlib for static plots
 run_simulation(
     subgraph_path="data/demo_subgraph.npz",
     n_steps=2000,

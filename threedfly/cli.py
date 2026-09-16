@@ -108,7 +108,7 @@ def extract(data_dir, output, max_neurons, demo):
 )
 @click.option(
     "--viz-mode",
-    type=click.Choice(["matplotlib", "open3d", "both", "none"]),
+    type=click.Choice(["matplotlib", "open3d", "both", "web", "none"]),
     default="matplotlib",
     help="Visualization mode"
 )
@@ -135,7 +135,19 @@ def extract(data_dir, output, max_neurons, demo):
     default=42,
     help="Random seed"
 )
-def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
+@click.option(
+    "--web-host",
+    type=str,
+    default="127.0.0.1",
+    help="Host for web UI (when viz-mode=web)"
+)
+@click.option(
+    "--web-port",
+    type=int,
+    default=8050,
+    help="Port for web UI (when viz-mode=web)"
+)
+def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, web_host, web_port):
     """Run 3dfly exploration simulation."""
     from threedfly.runner import run_simulation
     
@@ -160,10 +172,85 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
             save_output_dir=save_output,
             simulator_type=simulator_type,
             seed=seed,
+            web_host=web_host,
+            web_port=web_port,
         )
         click.echo("\n✓ Simulation complete!")
     except Exception as e:
         click.echo(f"\nError running simulation: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@main.command()
+@click.option(
+    "--subgraph",
+    type=click.Path(exists=True),
+    default="data/demo_subgraph.npz",
+    help="Path to subgraph file"
+)
+@click.option(
+    "--steps",
+    type=int,
+    default=2000,
+    help="Number of simulation steps"
+)
+@click.option(
+    "--simulator-type",
+    type=click.Choice(["rate", "lif"]),
+    default="rate",
+    help="Neural simulator type (rate or LIF)"
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=42,
+    help="Random seed"
+)
+@click.option(
+    "--host",
+    type=str,
+    default="127.0.0.1",
+    help="Host address for web server"
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8050,
+    help="Port for web server"
+)
+def serve(subgraph, steps, simulator_type, seed, host, port):
+    """Start interactive web UI for 3dfly exploration."""
+    from threedfly.runner import run_simulation
+    
+    click.echo("=" * 70)
+    click.echo("🪰 3dfly: Interactive Web UI")
+    click.echo("=" * 70)
+    click.echo(f"Subgraph: {subgraph}")
+    click.echo(f"Steps: {steps}")
+    click.echo(f"Simulator: {simulator_type}")
+    click.echo(f"Web UI: http://{host}:{port}")
+    click.echo("=" * 70)
+    click.echo("\nStarting web server...")
+    click.echo("Open your browser to interact with the simulation")
+    click.echo("Press Ctrl+C to stop\n")
+    
+    try:
+        run_simulation(
+            subgraph_path=subgraph,
+            n_steps=steps,
+            viz_mode="web",
+            save_output_dir="output",
+            simulator_type=simulator_type,
+            seed=seed,
+            web_host=host,
+            web_port=port,
+        )
+    except KeyboardInterrupt:
+        click.echo("\n\n✓ Server stopped.")
+    except Exception as e:
+        click.echo(f"\nError running web UI: {e}", err=True)
         import traceback
         traceback.print_exc()
         sys.exit(1)
