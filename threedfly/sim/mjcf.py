@@ -48,7 +48,7 @@ FLY_MJCF = """
     
     <!-- Fruit fly body -->
     <body name="fly" pos="0 0 1.5">
-      <freejoint/>
+      <freejoint name="fly_joint"/>
       
       <!-- Main body (thorax) -->
       <geom name="thorax" type="ellipsoid" size="0.01 0.008 0.006" 
@@ -86,11 +86,11 @@ FLY_MJCF = """
   
   <actuator>
     <!-- Flight control: forces and torques on the fly body -->
-    <general name="thrust_forward" gear="1 0 0 0 0 0" joint="fly" gainprm="0.0001 0 0"/>
-    <general name="thrust_up" gear="0 0 1 0 0 0" joint="fly" gainprm="0.0001 0 0"/>
-    <general name="torque_roll" gear="0 0 0 1 0 0" joint="fly" gainprm="0.00001 0 0"/>
-    <general name="torque_pitch" gear="0 0 0 0 1 0" joint="fly" gainprm="0.00001 0 0"/>
-    <general name="torque_yaw" gear="0 0 0 0 0 1" joint="fly" gainprm="0.00001 0 0"/>
+    <general name="thrust_forward" gear="1 0 0 0 0 0" joint="fly_joint" gainprm="0.0001 0 0"/>
+    <general name="thrust_up" gear="0 0 1 0 0 0" joint="fly_joint" gainprm="0.0001 0 0"/>
+    <general name="torque_roll" gear="0 0 0 1 0 0" joint="fly_joint" gainprm="0.00001 0 0"/>
+    <general name="torque_pitch" gear="0 0 0 0 1 0" joint="fly_joint" gainprm="0.00001 0 0"/>
+    <general name="torque_yaw" gear="0 0 0 0 0 1" joint="fly_joint" gainprm="0.00001 0 0"/>
   </actuator>
   
   <sensor>
