@@ -155,7 +155,7 @@ def run_simulation(
     
     # Point cloud
     pc_path = output_dir / "point_cloud.ply"
-    mapper.save_point_cloud(str(pc_path))
+    mapper.save_point_cloud(str(pc_path), voxel_size=mapper.voxel_size / 4.0)  # Dense export
     
     # Final visualization
     if viz is not None:

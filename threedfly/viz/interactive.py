@@ -277,10 +277,14 @@ class InteractiveVisualizer:
             
         # Get point cloud data
         if point_cloud_mapper is not None:
-            downsampled = point_cloud_mapper.downsample()
-            if len(downsampled.points) > 0:
-                self.point_cloud_points = np.asarray(downsampled.points)
-                self.point_cloud_colors = np.asarray(downsampled.colors)
+            # Use smaller voxel size for visualization (denser cloud)
+            if len(point_cloud_mapper.global_cloud.points) > 0:
+                # Show denser cloud - use 1/3 of the mapper's voxel size
+                viz_voxel_size = point_cloud_mapper.voxel_size / 3.0
+                downsampled = point_cloud_mapper.global_cloud.voxel_down_sample(voxel_size=viz_voxel_size)
+                if len(downsampled.points) > 0:
+                    self.point_cloud_points = np.asarray(downsampled.points)
+                    self.point_cloud_colors = np.asarray(downsampled.colors)
             self.map_stats = point_cloud_mapper.get_statistics()
             
         # Render updates

@@ -172,7 +172,8 @@ class RateSimulator:
         dt: float = 0.010,  # 10ms timestep (coarser than LIF)
         tau: float = 0.050,  # 50ms time constant
         activation: str = "relu",  # relu, sigmoid, tanh
-        syn_weight_scale: float = 0.5,
+        syn_weight_scale: float = 0.1,  # Reduced from 0.5 to prevent saturation
+        max_rate: float = 10.0,  # Maximum firing rate (Hz)
     ):
         """
         Initialize rate-based simulator.
@@ -183,12 +184,14 @@ class RateSimulator:
             tau: Time constant
             activation: Activation function
             syn_weight_scale: Synaptic weight scaling
+            max_rate: Maximum firing rate (prevents saturation)
         """
         self.adj = adjacency * syn_weight_scale
         self.n_neurons = adjacency.shape[0]
         self.dt = dt
         self.tau = tau
         self.activation = activation
+        self.max_rate = max_rate
         
         self.decay = np.exp(-dt / tau)
         
@@ -234,6 +237,9 @@ class RateSimulator:
         
         # Temporal dynamics (exponential moving average)
         self.rates = self.rates * self.decay + activated * (1 - self.decay)
+        
+        # Clip to max rate to prevent saturation
+        self.rates = np.clip(self.rates, 0, self.max_rate)
         
         return self.rates
     
