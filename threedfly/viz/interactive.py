@@ -1,32 +1,26 @@
-"""Interactive 3D visualization using viser with dashboard panels."""
+"""Interactive 3D visualization using viser with embedded dashboard panels."""
 
 import numpy as np
 import viser
 import time
 from typing import Optional, Dict, List
 import threading
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
+from io import BytesIO
+from PIL import Image
 
 
 class InteractiveVisualizer:
     """
-    Interactive 3D god's-eye visualization for fly exploration with dashboard panels.
+    Interactive 3D god's-eye visualization for fly exploration.
     
-    Shows:
-    3D View (viser, in browser):
-    - MuJoCo environment (room walls, obstacles)
-    - Fruit fly body and position
-    - Flight trajectory
-    - 3D point cloud reconstruction
-    
-    Dashboard Panels (matplotlib window):
-    - Left eye camera view
-    - Right eye camera view
-    - Trajectory plot (top view)
-    - Brain activity histogram
-    - Flight commands bar chart
-    - System status text
+    Single-page unified interface with:
+    - 3D god's-eye view: MuJoCo environment (room walls, obstacles), fruit fly body, 
+      flight trajectory, and 3D point cloud reconstruction
+    - Dashboard panels: Live stereo camera views, trajectory plot, brain activity,
+      flight commands, and system status
     
     Controls:
     - Orbit/pan/zoom the 3D scene
@@ -62,9 +56,9 @@ class InteractiveVisualizer:
         
         self.left_img: Optional[np.ndarray] = None
         self.right_img: Optional[np.ndarray] = None
+        
         self.brain_activity: Optional[np.ndarray] = None
         self.control_action: Optional[np.ndarray] = None
-        
         self.brain_stats: Dict = {}
         self.control_stats: Dict = {}
         self.map_stats: Dict = {}
@@ -74,65 +68,24 @@ class InteractiveVisualizer:
         self.should_step = False
         self.should_reset = False
         
-        # Visualization handles (3D viser)
+        # Visualization handles (3D scene)
         self._fly_handle = None
         self._trajectory_handle = None
         self._point_cloud_handle = None
-        self._status_text_handle = None
         
-        # Dashboard (matplotlib)
-        self._setup_dashboard()
+        # Dashboard panel handles (GUI images)
+        self._dashboard_folder = None
+        self._panel_left_eye = None
+        self._panel_right_eye = None
+        self._panel_trajectory = None
+        self._panel_brain = None
+        self._panel_commands = None
+        self._panel_status = None
         
-        # Setup 3D scene
+        # Setup scene
         self._setup_environment()
         self._setup_ui_controls()
-        
-    def _setup_dashboard(self):
-        """Setup matplotlib dashboard with 6 panels."""
-        plt.ion()  # Interactive mode
-        self.fig, self.axes = plt.subplots(2, 3, figsize=(14, 8))
-        self.fig.suptitle("3dfly Dashboard: Cameras, Trajectory, Brain & Control", 
-                         fontsize=14, fontweight='bold')
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-        
-        # Row 0: Camera views and trajectory
-        self.ax_left = self.axes[0, 0]
-        self.ax_right = self.axes[0, 1]
-        self.ax_traj = self.axes[0, 2]
-        
-        self.ax_left.set_title("Left Eye Camera")
-        self.ax_left.axis('off')
-        self.ax_right.set_title("Right Eye Camera")
-        self.ax_right.axis('off')
-        self.ax_traj.set_title("Flight Trajectory (Top View)")
-        self.ax_traj.set_xlabel("X (m)")
-        self.ax_traj.set_ylabel("Y (m)")
-        self.ax_traj.set_xlim(-5, 5)
-        self.ax_traj.set_ylim(-5, 5)
-        self.ax_traj.grid(True, alpha=0.3)
-        
-        # Row 1: Brain activity, control, and status
-        self.ax_brain = self.axes[1, 0]
-        self.ax_control = self.axes[1, 1]
-        self.ax_status = self.axes[1, 2]
-        
-        self.ax_brain.set_title("Brain Activity")
-        self.ax_brain.set_xlabel("Neuron Index")
-        self.ax_brain.set_ylabel("Activity")
-        
-        self.ax_control.set_title("Flight Commands")
-        self.ax_control.set_ylabel("Command Value")
-        self.ax_control.set_ylim(-1, 1)
-        self.ax_control.grid(True, alpha=0.3)
-        
-        self.ax_status.set_title("System Status")
-        self.ax_status.axis('off')
-        
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
-        
-        print(f"📊 Dashboard panels created!")
-        print(f"   The matplotlib window shows 6 panels: cameras, trajectory, brain, commands, status")
+        self._setup_dashboard_panels()
         
     def _setup_environment(self):
         """Setup static environment geometry (room, obstacles)."""
@@ -256,7 +209,7 @@ class InteractiveVisualizer:
         self.show_trajectory = self.server.gui.add_checkbox(
             "Show Trajectory",
             initial_value=True,
-            hint="Display flight path"
+            hint="Display flight path in 3D view"
         )
         
         self.show_point_cloud = self.server.gui.add_checkbox(
@@ -281,6 +234,13 @@ class InteractiveVisualizer:
             initial_value="Initializing...",
             disabled=True,
         )
+    
+    def _setup_dashboard_panels(self):
+        """Setup dashboard panel folder for images."""
+        # Create a collapsible folder for dashboard
+        self._dashboard_folder = self.server.gui.add_folder("Dashboard Panels")
+        
+        # We'll add dashboard images here (updated in _render_dashboard_panels)
         
     def update(
         self,
@@ -321,8 +281,8 @@ class InteractiveVisualizer:
             self.left_img = left_img
         if right_img is not None:
             self.right_img = right_img
-            
-        # Update brain/control data
+        
+        # Update brain and control data
         if brain_activity is not None:
             self.brain_activity = brain_activity
         if control_action is not None:
@@ -350,8 +310,8 @@ class InteractiveVisualizer:
         self._render_fly()
         self._render_trajectory()
         self._render_point_cloud()
+        self._render_dashboard_panels()
         self._render_status()
-        self._update_dashboard()
         
     def _render_fly(self):
         """Render fruit fly body."""
@@ -436,109 +396,125 @@ class InteractiveVisualizer:
             point_shape="circle",
         )
         
-    def _update_dashboard(self):
-        """Update matplotlib dashboard panels."""
-        if not plt.fignum_exists(self.fig.number):
-            return
-            
-        # Left eye camera
+    def _render_dashboard_panels(self):
+        """Render dashboard panels as matplotlib images in viser GUI."""
+        # Create matplotlib figure with all dashboard panels
+        fig = plt.figure(figsize=(14, 8))
+        gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+        
+        # Row 0: Camera views and trajectory
+        ax_left = fig.add_subplot(gs[0, 0])
+        ax_right = fig.add_subplot(gs[0, 1])
+        ax_traj = fig.add_subplot(gs[0, 2])
+        
+        # Row 1: Brain activity, control commands, and status
+        ax_brain = fig.add_subplot(gs[1, 0])
+        ax_control = fig.add_subplot(gs[1, 1])
+        ax_status = fig.add_subplot(gs[1, 2])
+        
+        # Left eye view
+        ax_left.set_title("Left Eye", fontweight='bold', fontsize=10)
         if self.left_img is not None:
-            self.ax_left.clear()
-            self.ax_left.imshow(self.left_img)
-            self.ax_left.set_title("Left Eye Camera")
-            self.ax_left.axis('off')
+            ax_left.imshow(self.left_img)
+        ax_left.axis('off')
         
-        # Right eye camera
+        # Right eye view
+        ax_right.set_title("Right Eye", fontweight='bold', fontsize=10)
         if self.right_img is not None:
-            self.ax_right.clear()
-            self.ax_right.imshow(self.right_img)
-            self.ax_right.set_title("Right Eye Camera")
-            self.ax_right.axis('off')
+            ax_right.imshow(self.right_img)
+        ax_right.axis('off')
         
-        # Trajectory (top view)
+        # Flight trajectory (top view)
+        ax_traj.set_title("Flight Trajectory (Top View)", fontweight='bold', fontsize=10)
         if len(self.trajectory_points) > 1:
             traj = np.array(self.trajectory_points)
-            self.ax_traj.clear()
-            self.ax_traj.plot(traj[:, 0], traj[:, 1], 'b-', alpha=0.5, linewidth=1)
-            self.ax_traj.scatter(traj[-1, 0], traj[-1, 1], c='r', s=100, marker='o', zorder=5)
-            self.ax_traj.set_title("Flight Trajectory (Top View)")
-            self.ax_traj.set_xlabel("X (m)")
-            self.ax_traj.set_ylabel("Y (m)")
-            self.ax_traj.set_xlim(-5, 5)
-            self.ax_traj.set_ylim(-5, 5)
-            self.ax_traj.grid(True, alpha=0.3)
+            ax_traj.plot(traj[:, 0], traj[:, 1], 'b-', alpha=0.5, linewidth=1)
+            ax_traj.scatter(traj[-1, 0], traj[-1, 1], c='r', s=50, marker='o', zorder=5)
+        ax_traj.set_xlabel("X (m)", fontsize=9)
+        ax_traj.set_ylabel("Y (m)", fontsize=9)
+        ax_traj.set_xlim(-5, 5)
+        ax_traj.set_ylim(-5, 5)
+        ax_traj.grid(True, alpha=0.3)
+        ax_traj.tick_params(labelsize=8)
         
         # Brain activity
+        ax_brain.set_title("Brain Activity", fontweight='bold', fontsize=10)
         if self.brain_activity is not None:
-            self.ax_brain.clear()
-            # Sample for visualization
+            # Sample for visualization (show subset)
             n_sample = min(200, len(self.brain_activity))
             indices = np.linspace(0, len(self.brain_activity)-1, n_sample, dtype=int)
-            self.ax_brain.bar(indices, self.brain_activity[indices], width=1, alpha=0.7)
-            self.ax_brain.set_title("Brain Activity (sampled)")
-            self.ax_brain.set_xlabel("Neuron Index")
-            self.ax_brain.set_ylabel("Activity")
+            ax_brain.bar(indices, self.brain_activity[indices], width=1, alpha=0.7, color='steelblue')
+        ax_brain.set_xlabel("Neuron Index", fontsize=9)
+        ax_brain.set_ylabel("Activity", fontsize=9)
+        ax_brain.tick_params(labelsize=8)
+        ax_brain.grid(True, alpha=0.3, axis='y')
         
-        # Control commands
+        # Flight commands
+        ax_control.set_title("Flight Commands", fontweight='bold', fontsize=10)
         if self.control_action is not None:
-            self.ax_control.clear()
             labels = ["Fwd", "Up", "Roll", "Pitch", "Yaw"]
-            colors = ['b', 'g', 'r', 'orange', 'purple']
-            self.ax_control.bar(labels, self.control_action, color=colors, alpha=0.7)
-            self.ax_control.set_title("Flight Commands")
-            self.ax_control.set_ylabel("Command Value")
-            self.ax_control.set_ylim(-1, 1)
-            self.ax_control.axhline(0, color='k', linewidth=0.5)
-            self.ax_control.grid(True, alpha=0.3, axis='y')
+            colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12', '#9b59b6']
+            ax_control.bar(labels, self.control_action, color=colors, alpha=0.7)
+            ax_control.axhline(0, color='k', linewidth=0.5)
+        ax_control.set_ylabel("Command Value", fontsize=9)
+        ax_control.set_ylim(-1, 1)
+        ax_control.tick_params(labelsize=8)
+        ax_control.grid(True, alpha=0.3, axis='y')
         
-        # Status text
-        self.ax_status.clear()
-        self.ax_status.axis('off')
+        # System status
+        ax_status.set_title("System Status", fontweight='bold', fontsize=10)
+        ax_status.axis('off')
         
         status_text = f"Position: ({self.fly_position[0]:.2f}, {self.fly_position[1]:.2f}, {self.fly_position[2]:.2f}) m\n"
-        status_text += f"Trajectory points: {len(self.trajectory_points)}\n\n"
-        
-        if self.brain_stats:
-            status_text += "Brain:\n"
-            for key, val in self.brain_stats.items():
-                status_text += f"  {key}: {val:.3f}\n"
-            status_text += "\n"
+        status_text += f"Trajectory: {len(self.trajectory_points)} points\n\n"
         
         if self.map_stats:
             status_text += "Mapping:\n"
-            status_text += f"  Total points: {self.map_stats.get('total_points', 0)}\n"
-            status_text += f"  Occupied voxels: {self.map_stats.get('occupied_voxels', 0)}\n"
-            status_text += f"  Exploration: {100*self.map_stats.get('exploration_ratio', 0):.1f}%\n"
+            status_text += f"  Points: {self.map_stats.get('total_points', 0)}\n"
+            status_text += f"  Voxels: {self.map_stats.get('occupied_voxels', 0)}\n"
+            status_text += f"  Explored: {100*self.map_stats.get('exploration_ratio', 0):.1f}%\n\n"
         
-        self.ax_status.text(0.05, 0.95, status_text, transform=self.ax_status.transAxes,
-                           verticalalignment='top', fontfamily='monospace', fontsize=9)
+        if self.brain_stats:
+            status_text += "Brain:\n"
+            for i, (key, val) in enumerate(self.brain_stats.items()):
+                if i >= 4:  # Limit to first 4 stats
+                    break
+                status_text += f"  {key}: {val:.3f}\n"
         
-        # Update the figure
-        try:
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
-        except:
-            pass
+        ax_status.text(0.05, 0.95, status_text, transform=ax_status.transAxes,
+                      verticalalignment='top', fontfamily='monospace', fontsize=9)
+        
+        # Convert matplotlib figure to image
+        buf = BytesIO()
+        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        dashboard_img = np.array(Image.open(buf).convert('RGB'))
+        plt.close(fig)
+        
+        # Display in viser GUI folder
+        with self._dashboard_folder:
+            if self._panel_left_eye is not None:
+                self._panel_left_eye.remove()
+            self._panel_left_eye = self.server.gui.add_image(
+                dashboard_img,
+                label="Dashboard Panels",
+            )
+    
+    def _render_camera_views(self):
+        """Legacy method - camera views now in dashboard panels."""
+        pass
             
     def _render_status(self):
-        """Render status text in UI."""
+        """Render compact status text in UI."""
         status_lines = []
-        status_lines.append(f"Position: ({self.fly_position[0]:.2f}, {self.fly_position[1]:.2f}, {self.fly_position[2]:.2f}) m")
-        status_lines.append(f"Trajectory: {len(self.trajectory_points)} points")
+        status_lines.append(f"Pos: ({self.fly_position[0]:.2f}, {self.fly_position[1]:.2f}, {self.fly_position[2]:.2f}) m")
+        status_lines.append(f"Trajectory: {len(self.trajectory_points)} pts")
         
         if self.map_stats:
-            status_lines.append("")
-            status_lines.append(f"Point Cloud: {self.map_stats.get('total_points', 0)} points")
-            status_lines.append(f"Occupied Voxels: {self.map_stats.get('occupied_voxels', 0)}")
-            status_lines.append(f"Exploration: {100*self.map_stats.get('exploration_ratio', 0):.2f}%")
-            
-        if self.brain_stats:
-            status_lines.append("")
-            status_lines.append("Brain:")
-            for key, val in list(self.brain_stats.items())[:3]:  # Show first 3
-                status_lines.append(f"  {key}: {val:.3f}")
-                
-        self._status_text_handle.value = "\n".join(status_lines)
+            status_lines.append(f"Map: {self.map_stats.get('total_points', 0)} pts, "
+                              f"{100*self.map_stats.get('exploration_ratio', 0):.1f}% explored")
+        
+        self._status_text_handle.value = " | ".join(status_lines)
         
     def check_controls(self) -> Dict[str, bool]:
         """
@@ -570,7 +546,5 @@ class InteractiveVisualizer:
             self._trajectory_handle = None
             
     def close(self):
-        """Close the visualization server and dashboard."""
+        """Close the visualization server."""
         print("\n🛑 Closing interactive visualization server...")
-        if plt.fignum_exists(self.fig.number):
-            plt.close(self.fig)

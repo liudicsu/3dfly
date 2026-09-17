@@ -101,9 +101,9 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### Option 1: Interactive 3D God's-Eye View (Recommended)
+### Option 1: Interactive Unified Web Interface (Recommended)
 
-**🎮 Full interactive 3D visualization with orbit/pan/zoom controls + dashboard panels**
+**🎮 Single-page web interface with 3D god's-eye view + dashboard panels**
 
 ```bash
 # Create small demo subgraph (500 neurons, synthetic)
@@ -112,22 +112,17 @@ python scripts/create_demo_subgraph.py
 # Run interactive demo
 threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
 
-# Two windows will open:
-# 1. Browser (http://localhost:8080) - 3D god's-eye view
-# 2. Matplotlib window - Dashboard panels
+# Open your browser to http://localhost:8080
+# Everything is in one page: 3D view + all dashboard panels
 ```
 
 **Interactive features:**
-- **3D god's-eye view** (browser): See the fly, trajectory, and point cloud together
-  - **Orbit/pan/zoom**: Use mouse to explore the scene from any angle
-  - **Playback controls**: Play, pause, step frame-by-frame, or reset
-  - **Adjustable speed**: Control simulation playback speed
-- **Dashboard panels** (matplotlib window): Classic monitoring interface
-  - **Left & Right eye cameras**: See what the fly observes in real-time
-  - **Flight trajectory**: Top-down view of the flight path
-  - **Brain activity**: Histogram of neural activity across neurons
-  - **Flight commands**: Bar chart of motor control signals
-  - **System status**: Position, mapping stats, and brain metrics
+- **3D god's-eye view**: See the fly, trajectory, and point cloud together with orbit/pan/zoom
+- **Dashboard panels in same page**: Left/right eye views, trajectory plot, brain activity, flight commands, system status
+- **Playback controls**: Play, pause, step frame-by-frame, or reset
+- **Adjustable speed**: Control simulation playback speed
+
+**One browser tab, everything together** — no separate matplotlib windows!
 
 ### Option 2: Run with Static Visualization
 
@@ -204,7 +199,7 @@ Options:
 ```
 
 #### `threedfly run-interactive`
-Run the simulation with interactive 3D god's-eye visualization plus dashboard panels.
+Run the simulation with unified interactive web interface.
 
 ```bash
 threedfly run-interactive [OPTIONS]
@@ -219,16 +214,14 @@ Options:
   --port PORT                  Visualization server port [default: 8080]
 
 Features:
-  - Interactive 3D view with orbit/pan/zoom (browser)
-  - Dashboard panels with cameras, trajectory, brain, and control (matplotlib window)
+  - Single-page web interface combining 3D view and dashboard panels
+  - Interactive 3D view with orbit/pan/zoom
+  - Dashboard: stereo views, trajectory, brain activity, flight commands, status
   - Play/pause/step/reset controls
-  - Real-time trajectory and point cloud
-  - Live stereo camera views in dashboard
   - Adjustable playback speed
 
-Two windows open:
-  - Browser: http://localhost:8080 (3D scene)
-  - Matplotlib: Dashboard with 6 monitoring panels
+After starting, open your browser to http://localhost:8080
+All visualizations are in one page — no separate windows!
 ```
 
 #### `threedfly demo`
@@ -475,7 +468,7 @@ And cite the MaleCNS connectome:
 
 ### 快速开始
 
-#### 方式一：交互式3D可视化（推荐）
+#### 方式一：交互式统一网页界面（推荐）
 
 ```bash
 # 安装
@@ -487,22 +480,17 @@ python scripts/create_demo_subgraph.py
 # 运行交互式模拟
 threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
 
-# 将打开两个窗口：
-# 1. 浏览器 (http://localhost:8080) - 3D上帝视角
-# 2. matplotlib窗口 - 仪表盘面板
+# 在浏览器中打开 http://localhost:8080
+# 所有内容在同一页面：3D视图 + 仪表盘面板
 ```
 
 **交互功能：**
-- **3D上帝视角**（浏览器）：同时看到果蝇、飞行轨迹和点云地图
-  - **自由视角控制**：用鼠标从任意角度观察场景
-  - **播放控制**：播放、暂停、单步前进、重置模拟
-  - **速度调节**：控制模拟播放速度
-- **仪表盘面板**（matplotlib窗口）：经典监控界面
-  - **左右眼摄像头**：查看果蝇眼睛实时观测到的画面
-  - **飞行轨迹**：俯视图展示飞行路径
-  - **大脑活动**：神经元活动的柱状图
-  - **飞行指令**：电机控制信号的条形图
-  - **系统状态**：位置、建图统计和大脑指标
+- **3D上帝视角**：同时看到果蝇、飞行轨迹和点云地图，支持旋转、平移和缩放
+- **仪表盘面板**（同页面）：左右眼视图、飞行轨迹图、大脑活动、飞行指令、系统状态
+- **播放控制**：播放、暂停、单步前进、重置模拟
+- **速度调节**：控制模拟播放速度
+
+**一个浏览器标签页，所有功能齐全** — 不再需要单独的matplotlib窗口！
 
 #### 方式二：静态可视化
 

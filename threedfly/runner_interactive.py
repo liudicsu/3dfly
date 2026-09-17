@@ -1,4 +1,4 @@
-"""Interactive simulation runner with god's-eye 3D visualization."""
+"""Interactive simulation runner with unified 3D + dashboard web interface."""
 
 import numpy as np
 from pathlib import Path
@@ -24,12 +24,13 @@ def run_interactive_simulation(
     port: int = 8080,
 ):
     """
-    Run interactive 3dfly simulation with god's-eye 3D visualization.
+    Run interactive 3dfly simulation with unified web interface.
     
-    Features:
-    - Interactive 3D view with orbit/pan/zoom
+    Single-page web interface featuring:
+    - Interactive 3D god's-eye view: room, fly, trajectory, point cloud
+    - Dashboard panels: left/right eye views, trajectory plot, brain activity, 
+      flight commands, and system status
     - Play/pause/step/reset controls
-    - Real-time visualization of fly, trajectory, and point cloud
     - Adjustable playback speed
     
     Args:
@@ -84,21 +85,15 @@ def run_interactive_simulation(
     explorer = ExplorationPolicy(exploration_weight=0.5)
     print("  ✓ Control system ready")
     
-    print("\n[6/7] Initializing interactive 3D visualization...")
+    print("\n[6/7] Initializing interactive web interface...")
     viz = InteractiveVisualizer(host=host, port=port)
-    print("  ✓ 3D visualization and dashboard ready")
+    print("  ✓ Unified web interface ready (3D view + dashboard panels)")
     
     print("\n[7/7] Starting interactive simulation...")
     print("=" * 70)
     print("\n📋 Controls:")
     print("  - Open the web browser to interact with the 3D scene")
-    print("  - The matplotlib window shows 6 dashboard panels:")
-    print("    • Left & Right eye cameras")
-    print("    • Flight trajectory (top view)")
-    print("    • Brain activity")
-    print("    • Flight commands")
-    print("    • System status")
-    print("  - Use mouse to orbit, pan, and zoom in the 3D view")
+    print("  - Use mouse to orbit, pan, and zoom")
     print("  - Use the UI panel to play/pause, step, and reset")
     print("  - Press Ctrl+C to exit")
     print("\n" + "=" * 70 + "\n")
