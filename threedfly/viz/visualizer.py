@@ -47,7 +47,7 @@ class Visualizer:
         
         # Matplotlib figure
         if mode in ["matplotlib", "both"]:
-            self.fig, self.axes = plt.subplots(2, 3, figsize=window_size)
+            self.fig, self.axes = plt.subplots(3, 3, figsize=window_size)
             self.fig.suptitle("3dfly: Connectome-Driven Exploration", fontsize=14, fontweight='bold')
             plt.tight_layout(rect=[0, 0, 1, 0.96])
             
@@ -67,26 +67,34 @@ class Visualizer:
     
     def _init_matplotlib_plots(self):
         """Initialize matplotlib subplot layout."""
-        # Row 0: Camera views and trajectory
+        # Row 0: Camera views and top-view trajectory
         self.ax_left = self.axes[0, 0]
         self.ax_right = self.axes[0, 1]
-        self.ax_traj = self.axes[0, 2]
+        self.ax_traj_top = self.axes[0, 2]
         
         self.ax_left.set_title("Left Eye")
         self.ax_left.axis('off')
         self.ax_right.set_title("Right Eye")
         self.ax_right.axis('off')
-        self.ax_traj.set_title("Flight Trajectory (Top View)")
-        self.ax_traj.set_xlabel("X (m)")
-        self.ax_traj.set_ylabel("Y (m)")
-        self.ax_traj.set_xlim(-5, 5)
-        self.ax_traj.set_ylim(-5, 5)
-        self.ax_traj.grid(True, alpha=0.3)
+        self.ax_traj_top.set_title("Trajectory (Top View: XY)")
+        self.ax_traj_top.set_xlabel("X (m)")
+        self.ax_traj_top.set_ylabel("Y (m)")
+        self.ax_traj_top.set_xlim(-5, 5)
+        self.ax_traj_top.set_ylim(-5, 5)
+        self.ax_traj_top.grid(True, alpha=0.3)
+        self.ax_traj_top.set_aspect('equal')
         
-        # Row 1: Brain activity, control, and status
-        self.ax_brain = self.axes[1, 0]
-        self.ax_control = self.axes[1, 1]
-        self.ax_status = self.axes[1, 2]
+        # Row 1: Side-view trajectory, brain activity, control
+        self.ax_traj_side = self.axes[1, 0]
+        self.ax_brain = self.axes[1, 1]
+        self.ax_control = self.axes[1, 2]
+        
+        self.ax_traj_side.set_title("Trajectory (Side View: XZ)")
+        self.ax_traj_side.set_xlabel("X (m)")
+        self.ax_traj_side.set_ylabel("Z (m)")
+        self.ax_traj_side.set_xlim(-5, 5)
+        self.ax_traj_side.set_ylim(0, 3)
+        self.ax_traj_side.grid(True, alpha=0.3)
         
         self.ax_brain.set_title("Brain Activity")
         self.ax_brain.set_xlabel("Neuron Index")
@@ -97,8 +105,20 @@ class Visualizer:
         self.ax_control.set_ylim(-1, 1)
         self.ax_control.grid(True, alpha=0.3)
         
+        # Row 2: Status and additional info
+        self.ax_status = self.axes[2, 0]
+        self.ax_depth = self.axes[2, 1]
+        self.ax_looming = self.axes[2, 2]
+        
         self.ax_status.set_title("System Status")
         self.ax_status.axis('off')
+        
+        self.ax_depth.set_title("Brain Depth Estimate")
+        self.ax_depth.axis('off')
+        
+        self.ax_looming.set_title("Looming/Proximity Signals")
+        self.ax_looming.set_ylim(0, 1)
+        self.ax_looming.grid(True, alpha=0.3)
     
     def update(
         self,
@@ -110,6 +130,7 @@ class Visualizer:
         point_cloud_mapper = None,
         brain_stats: Optional[Dict] = None,
         control_stats: Optional[Dict] = None,
+        looming_features: Optional[np.ndarray] = None,
     ):
         """
         Update visualization with new data.
@@ -123,6 +144,7 @@ class Visualizer:
             point_cloud_mapper: PointCloudMapper instance
             brain_stats: Brain statistics
             control_stats: Control statistics
+            looming_features: Obstacle proximity signals (8 sectors)
         """
         # Store state
         if left_img is not None:
@@ -144,13 +166,13 @@ class Visualizer:
         
         # Update matplotlib
         if self.mode in ["matplotlib", "both"]:
-            self._update_matplotlib(brain_activity, control_action)
+            self._update_matplotlib(brain_activity, control_action, looming_features)
         
         # Update Open3D
         if self.mode in ["open3d", "both"]:
             self._update_open3d()
     
-    def _update_matplotlib(self, brain_activity, control_action):
+    def _update_matplotlib(self, brain_activity, control_action, looming_features):
         """Update matplotlib plots."""
         # Left eye
         if self.left_img is not None:
@@ -166,18 +188,47 @@ class Visualizer:
             self.ax_right.set_title("Right Eye")
             self.ax_right.axis('off')
         
-        # Trajectory
+        # Top-view trajectory (XY)
         if len(self.fly_trajectory) > 1:
             traj = np.array(self.fly_trajectory)
-            self.ax_traj.clear()
-            self.ax_traj.plot(traj[:, 0], traj[:, 1], 'b-', alpha=0.5, linewidth=1)
-            self.ax_traj.scatter(traj[-1, 0], traj[-1, 1], c='r', s=100, marker='o', zorder=5)
-            self.ax_traj.set_title("Flight Trajectory (Top View)")
-            self.ax_traj.set_xlabel("X (m)")
-            self.ax_traj.set_ylabel("Y (m)")
-            self.ax_traj.set_xlim(-5, 5)
-            self.ax_traj.set_ylim(-5, 5)
-            self.ax_traj.grid(True, alpha=0.3)
+            self.ax_traj_top.clear()
+            self.ax_traj_top.plot(traj[:, 0], traj[:, 1], 'b-', alpha=0.5, linewidth=1)
+            self.ax_traj_top.scatter(traj[-1, 0], traj[-1, 1], c='r', s=100, marker='o', zorder=5)
+            self.ax_traj_top.set_title("Trajectory (Top View: XY)")
+            self.ax_traj_top.set_xlabel("X (m)")
+            self.ax_traj_top.set_ylabel("Y (m)")
+            self.ax_traj_top.set_xlim(-5, 5)
+            self.ax_traj_top.set_ylim(-5, 5)
+            self.ax_traj_top.grid(True, alpha=0.3)
+            self.ax_traj_top.set_aspect('equal')
+            
+            # Show trajectory range
+            dx = traj[:, 0].max() - traj[:, 0].min()
+            dy = traj[:, 1].max() - traj[:, 1].min()
+            self.ax_traj_top.text(0.02, 0.98, f"ΔX={dx:.2f}m\nΔY={dy:.2f}m", 
+                                  transform=self.ax_traj_top.transAxes, 
+                                  verticalalignment='top', fontsize=8,
+                                  bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Side-view trajectory (XZ)
+        if len(self.fly_trajectory) > 1:
+            traj = np.array(self.fly_trajectory)
+            self.ax_traj_side.clear()
+            self.ax_traj_side.plot(traj[:, 0], traj[:, 2], 'g-', alpha=0.5, linewidth=1)
+            self.ax_traj_side.scatter(traj[-1, 0], traj[-1, 2], c='r', s=100, marker='o', zorder=5)
+            self.ax_traj_side.set_title("Trajectory (Side View: XZ)")
+            self.ax_traj_side.set_xlabel("X (m)")
+            self.ax_traj_side.set_ylabel("Z (m)")
+            self.ax_traj_side.set_xlim(-5, 5)
+            self.ax_traj_side.set_ylim(0, 3)
+            self.ax_traj_side.grid(True, alpha=0.3)
+            
+            # Show vertical range
+            dz = traj[:, 2].max() - traj[:, 2].min()
+            self.ax_traj_side.text(0.02, 0.98, f"ΔZ={dz:.2f}m", 
+                                   transform=self.ax_traj_side.transAxes, 
+                                   verticalalignment='top', fontsize=8,
+                                   bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
         
         # Brain activity
         if brain_activity is not None:
@@ -201,6 +252,20 @@ class Visualizer:
             self.ax_control.set_ylim(-1, 1)
             self.ax_control.axhline(0, color='k', linewidth=0.5)
             self.ax_control.grid(True, alpha=0.3, axis='y')
+        
+        # Looming/proximity features
+        if looming_features is not None:
+            self.ax_looming.clear()
+            sector_labels = ["Fwd", "FL", "L", "BL", "Back", "BR", "R", "FR"]
+            colors = ['red' if loom > 0.5 else 'orange' if loom > 0.3 else 'yellow' 
+                     for loom in looming_features]
+            self.ax_looming.bar(sector_labels, looming_features, color=colors, alpha=0.7)
+            self.ax_looming.set_title("Looming/Proximity (Brain Input)")
+            self.ax_looming.set_ylabel("Proximity")
+            self.ax_looming.set_ylim(0, 1)
+            self.ax_looming.axhline(0.3, color='orange', linestyle='--', linewidth=0.5, alpha=0.5)
+            self.ax_looming.axhline(0.5, color='red', linestyle='--', linewidth=0.5, alpha=0.5)
+            self.ax_looming.grid(True, alpha=0.3, axis='y')
         
         # Status text
         self.ax_status.clear()

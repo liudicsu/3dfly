@@ -33,15 +33,15 @@ class FlightController:
         self.dn_end = n_neurons
         self.n_dn = self.dn_end - self.dn_start
         
-        # Fixed mapping gains (hand-tuned)
-        self.thrust_forward_gain = 0.8  # Increased for stronger forward motion
-        self.thrust_up_gain = 0.15  # Further reduced to avoid ceiling hits
-        self.yaw_gain = 0.6  # Increased for more turning exploration
-        self.pitch_gain = 0.25  # Slightly increased
-        self.roll_gain = 0.15  # Slightly increased
+        # Fixed mapping gains (hand-tuned for horizontal exploration)
+        self.thrust_forward_gain = 1.0  # Strong forward motion for room traversal
+        self.thrust_up_gain = 0.05  # Minimal upward gain to counter ceiling bouncing
+        self.yaw_gain = 0.8  # Strong turning for horizontal exploration
+        self.pitch_gain = 0.2  # Reduced pitch to minimize vertical oscillation
+        self.roll_gain = 0.15  # Slight roll for natural flight
         
         # Bias for stable flight
-        self.thrust_up_bias = 0.15  # Further reduced to keep fly mid-room, not ceiling
+        self.thrust_up_bias = 0.0  # No upward bias - let gravity and brain control height
         
         # Smoothing filter
         self.prev_action = np.zeros(5)
@@ -72,9 +72,8 @@ class FlightController:
             dn_norm = dn_activity
         
         # Simple linear mapping (engineered, not learned)
-        # Forward thrust: baseline + brain activity
-        # Add baseline to ensure continuous forward motion
-        forward_baseline = 0.4  # Baseline forward thrust for exploration
+        # Forward thrust: strong baseline + brain activity for continuous exploration
+        forward_baseline = 0.6  # Higher baseline for active room traversal
         thrust_forward = forward_baseline + self.thrust_forward_gain * dn_norm.mean()
         
         # Upward thrust: bias + activity (counters gravity)
@@ -94,11 +93,11 @@ class FlightController:
         # Combine into action
         action = np.array([thrust_forward, thrust_up, roll, pitch, yaw])
         
-        # Add exploration signal if provided
+        # Add exploration signal if provided (favor horizontal movement)
         if exploration_signal is not None:
-            action[0] += 0.5 * exploration_signal[0]  # Forward - further increased
-            action[4] += 0.7 * exploration_signal[1]  # Yaw - further increased
-            action[1] += 0.1 * exploration_signal[2]  # Up - further reduced
+            action[0] += 0.8 * exploration_signal[0]  # Strong forward bias for XY coverage
+            action[4] += 1.0 * exploration_signal[1]  # Strong yaw for directional changes
+            action[1] += 0.0 * exploration_signal[2]  # Ignore vertical exploration bias
         
         # Smooth action
         action = self.alpha * action + (1 - self.alpha) * self.prev_action

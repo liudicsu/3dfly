@@ -103,13 +103,14 @@ def run_simulation(
     collision_count = 0
     
     for step in tqdm(range(n_steps), desc="Simulation"):
-        # Get visual input (includes StereoBM for comparison)
+        # Get visual input (includes StereoBM for comparison + looming features)
         visual_features = stereo.get_visual_features(left_img, right_img)
         
-        # Feed to brain (ommatidial samples as input)
+        # Feed to brain (ommatidial samples + looming/proximity for avoidance)
         brain_input = np.concatenate([
             visual_features["left_ommatidia"],
-            visual_features["right_ommatidia"]
+            visual_features["right_ommatidia"],
+            visual_features["looming_features"]  # Obstacle proximity signals
         ])
         
         # Run brain for multiple timesteps
@@ -190,6 +191,7 @@ def run_simulation(
                 point_cloud_mapper=mapper,
                 brain_stats=brain_stats,
                 control_stats=control_stats,
+                looming_features=visual_features["looming_features"],
             )
         
         # Check collision

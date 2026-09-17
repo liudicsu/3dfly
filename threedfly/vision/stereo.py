@@ -136,6 +136,84 @@ class StereoVision:
         
         return samples
     
+    def compute_looming_features(
+        self,
+        depth_map: np.ndarray,
+        confidence: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Compute looming/proximity features from depth map.
+        
+        Divides the visual field into sectors and computes proximity signals
+        for each sector. These features feed into the brain for obstacle avoidance.
+        
+        Args:
+            depth_map: Depth map (H, W)
+            confidence: Confidence map (H, W)
+        
+        Returns:
+            Looming features (n_sectors,) where higher values = closer obstacles
+        """
+        h, w = depth_map.shape
+        
+        # Divide into 8 sectors: forward, forward-left, left, back-left, 
+        # back, back-right, right, forward-right
+        n_sectors = 8
+        looming = np.zeros(n_sectors)
+        
+        # Define sector boundaries (roughly)
+        # Sector 0: forward (center)
+        # Sectors 1-3: left side
+        # Sector 4: back (edges)
+        # Sectors 5-7: right side
+        
+        for i in range(n_sectors):
+            angle = i * 2 * np.pi / n_sectors
+            
+            # Define sector region in image
+            if i == 0:  # Forward center
+                region = depth_map[h//3:2*h//3, w//3:2*w//3]
+                region_conf = confidence[h//3:2*h//3, w//3:2*w//3]
+            elif i == 1:  # Forward-left
+                region = depth_map[h//4:3*h//4, :w//3]
+                region_conf = confidence[h//4:3*h//4, :w//3]
+            elif i == 2:  # Left
+                region = depth_map[:, :w//4]
+                region_conf = confidence[:, :w//4]
+            elif i == 3:  # Back-left
+                region = depth_map[:h//4, :w//3]
+                region_conf = confidence[:h//4, :w//3]
+            elif i == 4:  # Back (top and bottom edges)
+                top = depth_map[:h//4, :]
+                bottom = depth_map[3*h//4:, :]
+                region = np.concatenate([top.flatten(), bottom.flatten()])
+                top_conf = confidence[:h//4, :]
+                bottom_conf = confidence[3*h//4:, :]
+                region_conf = np.concatenate([top_conf.flatten(), bottom_conf.flatten()])
+            elif i == 5:  # Back-right
+                region = depth_map[:h//4, 2*w//3:]
+                region_conf = confidence[:h//4, 2*w//3:]
+            elif i == 6:  # Right
+                region = depth_map[:, 3*w//4:]
+                region_conf = confidence[:, 3*w//4:]
+            else:  # i == 7, Forward-right
+                region = depth_map[h//4:3*h//4, 2*w//3:]
+                region_conf = confidence[h//4:3*h//4, 2*w//3:]
+            
+            # Compute proximity signal: inverse depth weighted by confidence
+            # Closer objects = higher signal
+            valid = (region_conf > 0.1) & (region > 0.01)
+            if valid.sum() > 0:
+                # Use minimum depth in sector (closest obstacle)
+                min_depth = np.min(region[valid])
+                # Convert to proximity (0 at far, 1 at very close)
+                proximity = np.clip(1.0 / (min_depth + 0.1), 0, 10) / 10
+                looming[i] = proximity
+            else:
+                looming[i] = 0.0
+        
+        return looming
+    
     def get_visual_features(
         self,
         left_img: np.ndarray,
@@ -152,6 +230,7 @@ class StereoVision:
             Dictionary with features:
                 - left_ommatidia: sampled left eye
                 - right_ommatidia: sampled right eye
+                - looming_features: proximity/looming signals (8 sectors)
                 - depth_estimate: mean depth
                 - depth_map: depth map (downsampled if downsample_factor > 1)
                 - confidence: confidence map (same size as depth_map)
@@ -163,6 +242,9 @@ class StereoVision:
         
         # Depth estimate
         depth_map, confidence = self.estimate_depth(left_img, right_img)
+        
+        # Looming/proximity features for obstacle avoidance
+        looming = self.compute_looming_features(depth_map, confidence)
         
         # Downsample RGB to match depth map if needed
         if self.downsample_factor > 1:
@@ -182,6 +264,7 @@ class StereoVision:
         return {
             "left_ommatidia": left_samples,
             "right_ommatidia": right_samples,
+            "looming_features": looming,
             "depth_estimate": mean_depth,
             "depth_map": depth_map,
             "confidence": confidence,

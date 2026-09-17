@@ -154,10 +154,11 @@ def run_interactive_simulation(
             # Get visual input
             visual_features = stereo.get_visual_features(left_img, right_img)
             
-            # Feed to brain (ommatidial samples as input)
+            # Feed to brain (ommatidial samples + looming/proximity for avoidance)
             brain_input = np.concatenate([
                 visual_features["left_ommatidia"],
-                visual_features["right_ommatidia"]
+                visual_features["right_ommatidia"],
+                visual_features["looming_features"]  # Obstacle proximity signals
             ])
             
             # Run brain for multiple timesteps

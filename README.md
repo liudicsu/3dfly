@@ -380,18 +380,50 @@ The depth readout uses a population code where each visual neuron votes for its 
 ### Flight Control Mapping
 
 The `FlightController` uses a simple hand-designed linear mapping:
-- **Thrust forward**: Mean DN activity
-- **Thrust up**: Bias (0.3) + DN activity (counters gravity)
-- **Yaw**: Left-right DN asymmetry
-- **Pitch/Roll**: Front-back DN asymmetry
+- **Thrust forward**: Baseline (0.6) + Mean DN activity (strong forward bias for room traversal)
+- **Thrust up**: No bias + Minimal DN activity (reduced to eliminate ceiling bouncing)
+- **Yaw**: Left-right DN asymmetry (strong turning for horizontal exploration)
+- **Pitch/Roll**: Front-back DN asymmetry (reduced to minimize vertical oscillation)
+
+**Horizontal exploration priority**: Controller gains and baselines are tuned to strongly favor horizontal (XY) room coverage over vertical bobbing. Forward thrust has a high baseline (0.6) and gain (1.0), while upward thrust has zero bias and minimal gain (0.05). Yaw gain is high (0.8) to encourage turning and room traversal.
 
 This mapping is **engineered, not biologically validated**. It provides plausible control but does not claim to replicate actual fly motor control.
 
+### Brain-Mediated Obstacle Avoidance
+
+**How the fly avoids obstacles:**
+
+1. **Visual features → Brain input**:
+   - Ommatidial intensity samples (left/right eyes, ~100 samples each)
+   - **Looming/proximity signals** (8 directional sectors): Engineered visual features computed from stereo depth map, indicating obstacle proximity in each direction (forward, forward-left, left, back-left, back, back-right, right, forward-right)
+   - These 208 features (200 ommatidial + 8 looming) are concatenated and fed as input to the connectome
+
+2. **Brain processing**:
+   - Input flows through the MaleCNS connectome subgraph (visual neurons → descending neurons)
+   - Neural dynamics (LIF or rate model) propagate activity through actual synaptic connections
+   - The brain's response to looming signals emerges from connectome structure + dynamics
+
+3. **Motor output → Steering away**:
+   - Descending neuron (DN) activity is read out by the flight controller
+   - DN asymmetry generates yaw/pitch/roll to steer away from obstacles
+   - The motor response is **brain-mediated**: looming features → connectome activity → DN output → motor commands
+
+**What's brain-controlled vs engineered:**
+- ✅ **Brain-controlled**: The transformation from visual input (ommatidia + looming) to motor output (DN activity) routes through the real connectome structure with neural dynamics
+- ⚙️ **Engineered**: 
+  - Looming feature extraction (inverse depth by sector from StereoBM)
+  - Input mapping (which neurons receive looming signals)
+  - DN-to-motor readout (linear mapping from DN activity to thrust/torque)
+  - Soft collision recovery (physics script as last-resort safety net, NOT primary avoidance)
+
+**Honest assessment**: The fly steers based on brain activity that is influenced by obstacle proximity signals routed through the connectome. This is brain-structured avoidance with engineered feature extraction and motor readout, not a claim that fruit flies use exactly these visual features or that our DN readout matches biological motor control. The primary avoidance mechanism operates through the brain pathway; soft collision recovery serves only as a safety fallback.
+
 ### Exploration Policy
 
-- Samples exploration score in 8 directions around current position
+- Samples exploration score in 8 directions around current position (horizontal plane only)
 - Scores based on voxel occupancy (low occupancy → high score)
-- Biases flight toward frontiers
+- Biases flight toward frontiers with strong forward signal (1.5) and turning
+- **No vertical exploration bias**: Altitude control delegated to brain/controller to avoid ceiling bouncing
 - Random exploration with probability 0.2
 
 ### Collision Recovery
