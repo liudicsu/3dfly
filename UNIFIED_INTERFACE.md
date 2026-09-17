@@ -36,7 +36,7 @@ from PIL import Image
 2. **Dashboard panel generation** (`_render_dashboard_panels()`):
    - Creates 2x3 matplotlib figure with all panels
    - Converts figure to PNG image in memory (BytesIO)
-   - Displays image in viser GUI folder using `server.gui.add_image()`
+   - Displays image in viser GUI folder using `server.gui.add_image(image_array, label="Dashboard Panels")`
 
 3. **Dashboard layout**:
 ```

@@ -87,7 +87,10 @@ class InteractiveVisualizer:
         
         # Display in viser web interface
         with self._dashboard_folder:
-            self.server.gui.add_image("dashboard", image=dashboard_img)
+            self.server.gui.add_image(
+                dashboard_img,
+                label="Dashboard Panels"
+            )
 ```
 
 ### Why This Works
@@ -160,6 +163,44 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 from PIL import Image
 ```
+
+### Viser API for GUI Images
+
+The viser library provides `GuiApi.add_image()` to display images in the web interface:
+
+```python
+# Correct signature:
+GuiApi.add_image(
+    self,
+    image: np.ndarray,      # Required positional: RGB/RGBA image array
+    *,                      # Keyword-only arguments below
+    label: str | None = None,
+    format: Literal['auto', 'png', 'jpeg'] = 'auto',
+    jpeg_quality: int | None = None,
+    order: float | None = None,
+    visible: bool = True
+) -> GuiImageHandle
+
+# Example usage:
+dashboard_img = np.array(...)  # Your image array (H, W, 3)
+handle = server.gui.add_image(
+    dashboard_img,              # ✅ Image as first positional arg
+    label="Dashboard Panels"    # ✅ Label as keyword arg
+)
+
+# ❌ INCORRECT (what we fixed):
+handle = server.gui.add_image(
+    "dashboard",               # ❌ String interpreted as image
+    image=dashboard_img,       # ❌ Conflicts with first arg
+    width=None                 # ❌ Parameter doesn't exist
+)
+# Error: TypeError: got multiple values for argument 'image'
+```
+
+**Key points**:
+- `image` must be first positional argument (numpy array)
+- `label` is a keyword-only argument (optional title/name)
+- No `width` parameter exists (image displays at full resolution)
 
 ## Verification
 
