@@ -16,8 +16,8 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - **Brain**: Uses the MaleCNS v1.0 connectome (male *Drosophila* CNS, ~166,700 neurons) as the neural wiring diagram
 - **Vision**: Dual cameras provide stereo views, processed through the connectome to estimate depth
 - **Motor**: Descending neuron activity maps to flight thrust and torques in a MuJoCo simulation
-- **Depth Perception**: **Brain-based depth estimation** from connectome neural pathways (primary) with classical StereoBM as comparison baseline
-- **Mapping**: Accumulates brain-estimated depth into a global 3D point cloud
+- **Depth Perception**: **Brain-based depth estimation** from connectome neural pathways (primary) with classical StereoBM as dense comparison baseline
+    - **Mapping**: Accumulates brain-estimated depth into a global 3D point cloud, with StereoBM providing informative comparison data
 - **Exploration**: Biases flight toward under-mapped regions using occupancy-based curiosity
 - **Soft Collision Recovery**: Automatically recovers from wall/obstacle hits to continue exploration
 
@@ -30,7 +30,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - **Realistic Fly Model**: Uses anatomically-detailed 3D meshes from the [flybody project](https://github.com/TuragaLab/flybody) (Google DeepMind & HHMI Janelia)
 - **Biologically-Inspired Brain**: MaleCNS v1.0 connectome structure with ~166,700 neurons
 - **Brain-Based Depth Perception**: Depth estimates derived from connectome neural activity (primary reconstruction)
-- **Stereo Vision**: Dual cameras with classical StereoBM depth (comparison baseline) and ommatidial sampling
+- **Stereo Vision**: Dual cameras (160×120) with classical StereoBM depth (dense comparison baseline) and ommatidial sampling
 - **Interactive 3D Visualization**: Real-time god's-eye view with orbit/pan/zoom controls
 - **Live Point Cloud Mapping**: Brain-estimated 3D map accumulates and renders in real-time on the same interactive web page
 - **Curiosity-Driven Exploration**: Biases flight toward under-mapped regions
@@ -175,8 +175,12 @@ threedfly run --subgraph data/subgraph.npz --steps 2000
 ### Headless Mode (for CI/servers)
 
 ```bash
-threedfly run --subgraph data/demo_subgraph.npz --steps 500 --headless --save-output output/
-# Outputs: output/point_cloud_brain.ply (primary), output/point_cloud_stereo.ply (comparison), output/final_state.png
+threedfly run --subgraph data/demo_subgraph.npz --steps 1500 --headless --save-output output/
+# Outputs: 
+#   output/point_cloud_brain.ply (primary: brain-depth reconstruction)
+#   output/point_cloud_stereo.ply (comparison: classical StereoBM, dense sampling)
+#   output/final_state.png (visualization snapshot)
+# Both point clouds exported at 1cm voxel resolution for detailed comparison
 ```
 
 ---
@@ -376,6 +380,15 @@ The `BrainDepthEstimator` extracts depth information from connectome neural acti
 - **Spatial resolution** → coarse retinotopic mapping (8×6 regions)
 
 The depth readout uses a population code where each visual neuron votes for its preferred depth weighted by its activity level. This is **engineered, not biologically validated**, but routes visual information through actual connectome pathways rather than using a disconnected neural network.
+
+### StereoBM Comparison Baseline
+
+Classical stereo block matching provides a dense comparison baseline:
+- **High resolution**: 160×120 eye cameras for detailed stereo matching
+- **Dense sampling**: Stereo depth computed every 2 steps
+- **Low confidence threshold**: 0.08 minimum confidence for informative comparison (typical confidences 0.1–0.4)
+- **Tuned parameters**: 64 disparities, block size 5, optimized for fly-scale depth range
+- **Typical output**: ~200K raw points → thousands of unique points @1-3cm voxel resolution on a 1500-step run
 
 ### Flight Control Mapping
 

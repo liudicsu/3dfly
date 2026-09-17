@@ -20,8 +20,8 @@ class FlyEnvironment:
     def __init__(
         self,
         render_mode: Optional[str] = "rgb_array",
-        camera_width: int = 64,
-        camera_height: int = 48,
+        camera_width: int = 160,
+        camera_height: int = 120,
     ):
         """
         Initialize environment.
