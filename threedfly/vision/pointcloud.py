@@ -30,8 +30,9 @@ class PointCloudMapper:
         self.max_depth = max_depth
         self.map_bounds = np.array(map_bounds)
         
-        # Global point cloud
-        self.global_cloud = o3d.geometry.PointCloud()
+        # Global point clouds (separate for brain and stereo sources)
+        self.global_cloud = o3d.geometry.PointCloud()  # Primary (brain depth)
+        self.stereo_cloud = o3d.geometry.PointCloud()  # Comparison (StereoBM)
         
         # Voxel occupancy grid for curiosity
         self.voxel_grid_size = (map_bounds[0] / voxel_size, 
@@ -45,6 +46,7 @@ class PointCloudMapper:
         )
         
         self.total_points_added = 0
+        self.stereo_points_added = 0
     
     def add_depth_observation(
         self,
@@ -53,6 +55,7 @@ class PointCloudMapper:
         camera_pose: np.ndarray,
         confidence: Optional[np.ndarray] = None,
         min_confidence: float = 0.3,
+        source: str = "brain",  # "brain" or "stereo"
     ) -> int:
         """
         Add depth observation to global map.
@@ -63,6 +66,7 @@ class PointCloudMapper:
             camera_pose: 4x4 camera pose matrix (world coordinates)
             confidence: Confidence map (H, W)
             min_confidence: Minimum confidence threshold
+            source: "brain" for brain-based depth, "stereo" for StereoBM comparison
         
         Returns:
             Number of points added
@@ -119,13 +123,15 @@ class PointCloudMapper:
         new_cloud.points = o3d.utility.Vector3dVector(points_world)
         new_cloud.colors = o3d.utility.Vector3dVector(rgb)
         
-        # Add to global cloud
-        self.global_cloud += new_cloud
-        
-        # Update occupancy grid
-        self._update_occupancy(points_world)
-        
-        self.total_points_added += len(points_world)
+        # Add to appropriate cloud based on source
+        if source == "brain":
+            self.global_cloud += new_cloud
+            # Update occupancy grid (only from primary brain cloud)
+            self._update_occupancy(points_world)
+            self.total_points_added += len(points_world)
+        else:  # stereo comparison
+            self.stereo_cloud += new_cloud
+            self.stereo_points_added += len(points_world)
         
         return len(points_world)
     
@@ -202,40 +208,45 @@ class PointCloudMapper:
         
         return float(score)
     
-    def downsample(self, voxel_size: Optional[float] = None) -> o3d.geometry.PointCloud:
+    def downsample(self, voxel_size: Optional[float] = None, source: str = "brain") -> o3d.geometry.PointCloud:
         """
-        Downsample global cloud for visualization.
+        Downsample cloud for visualization.
         
         Args:
             voxel_size: Voxel size for downsampling (default: use mapper's voxel_size)
+            source: "brain" for primary cloud, "stereo" for comparison cloud
         
         Returns:
             Downsampled point cloud
         """
-        if len(self.global_cloud.points) == 0:
-            return self.global_cloud
+        cloud = self.global_cloud if source == "brain" else self.stereo_cloud
+        
+        if len(cloud.points) == 0:
+            return cloud
         
         if voxel_size is None:
             voxel_size = self.voxel_size
         
-        downsampled = self.global_cloud.voxel_down_sample(voxel_size=voxel_size)
+        downsampled = cloud.voxel_down_sample(voxel_size=voxel_size)
         return downsampled
     
-    def save_point_cloud(self, filename: str, voxel_size: Optional[float] = None):
+    def save_point_cloud(self, filename: str, voxel_size: Optional[float] = None, source: str = "brain"):
         """
         Save point cloud to file (PLY format).
         
         Args:
             filename: Output filename
             voxel_size: Voxel size for downsampling (default: use 1/2 of mapper's voxel_size for denser export)
+            source: "brain" for primary cloud, "stereo" for comparison cloud
         """
         if voxel_size is None:
             # Use smaller voxel size for export (denser than default downsample)
             voxel_size = self.voxel_size / 2.0
         
-        downsampled = self.downsample(voxel_size=voxel_size)
+        downsampled = self.downsample(voxel_size=voxel_size, source=source)
         o3d.io.write_point_cloud(filename, downsampled)
-        print(f"✓ Saved point cloud: {filename} ({len(downsampled.points)} points)")
+        source_label = "brain-depth" if source == "brain" else "StereoBM"
+        print(f"✓ Saved {source_label} point cloud: {filename} ({len(downsampled.points)} points)")
     
     def get_statistics(self) -> dict:
         """Get mapping statistics."""
@@ -249,8 +260,10 @@ class PointCloudMapper:
         exploration_ratio = occupied_voxels / max(1, reachable_voxels)
         
         return {
-            "total_points": len(self.global_cloud.points),
+            "total_points": len(self.global_cloud.points),  # Brain depth (primary)
             "points_added": self.total_points_added,
+            "stereo_points": len(self.stereo_cloud.points),  # StereoBM (comparison)
+            "stereo_points_added": self.stereo_points_added,
             "occupied_voxels": occupied_voxels,
             "total_voxels": total_voxels,
             "exploration_ratio": float(exploration_ratio),

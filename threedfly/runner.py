@@ -8,7 +8,7 @@ import time
 from threedfly.connectome import ConnectomeLoader, BrainSimulator
 from threedfly.connectome.simulator import RateSimulator
 from threedfly.sim import FlyEnvironment
-from threedfly.vision import StereoVision, PointCloudMapper
+from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
 from threedfly.control import FlightController, ExplorationPolicy
 from threedfly.viz import Visualizer
 
@@ -62,18 +62,28 @@ def run_simulation(
     stereo = StereoVision(baseline=0.012, focal_length=0.01)
     mapper = PointCloudMapper(voxel_size=0.05)
     
-    print("\n[5/7] Setting up control and exploration...")
+    print("\n[5/7] Setting up brain depth estimation...")
+    brain_depth = BrainDepthEstimator(
+        n_neurons=n_neurons,
+        adjacency=adjacency,
+        use_rate_model=(simulator_type == "rate")
+    )
+    
+    print("\n[6/7] Setting up control and exploration...")
     controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
     explorer = ExplorationPolicy(exploration_weight=0.5)
     
-    print("\n[6/7] Initializing visualization...")
+    print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":
         viz = Visualizer(mode=viz_mode, window_size=(12, 8))
         viz.show(block=False)
     else:
         viz = None
     
-    print("\n[7/7] Running simulation...")
+    print("\n[8/8] Running simulation...")
+    print("=" * 70)
+    print("\n💡 Using BRAIN-BASED DEPTH for primary reconstruction")
+    print("   StereoBM available as comparison baseline")
     print("=" * 70)
     
     # Reset environment
@@ -86,7 +96,7 @@ def run_simulation(
     viz_update_interval = 10  # Update viz every N steps
     
     for step in tqdm(range(n_steps), desc="Simulation"):
-        # Get visual input
+        # Get visual input (includes StereoBM for comparison)
         visual_features = stereo.get_visual_features(left_img, right_img)
         
         # Feed to brain (ommatidial samples as input)
@@ -104,6 +114,26 @@ def run_simulation(
             else:
                 brain_activity = brain.step()
         
+        # *** BRAIN-BASED DEPTH ESTIMATION ***
+        # Extract depth from brain activity (primary reconstruction)
+        brain_depth_result = brain_depth.estimate_depth_from_activity(
+            brain_activity,
+            stereo_features=visual_features
+        )
+        
+        # Upsample brain depth map to match camera resolution
+        h, w = visual_features["depth_map"].shape
+        brain_depth_map_upsampled = brain_depth.upsample_depth_map(
+            brain_depth_result["depth_map"],
+            target_height=h,
+            target_width=w
+        )
+        brain_confidence_upsampled = brain_depth.upsample_depth_map(
+            brain_depth_result["confidence"],
+            target_height=h,
+            target_width=w
+        )
+        
         # Get exploration signal
         fly_pos = env.get_fly_position()
         exploration_signal = explorer.compute_exploration_signal(fly_pos, mapper)
@@ -117,13 +147,27 @@ def run_simulation(
         # Update point cloud map
         if step % 5 == 0:  # Update map every 5 steps
             left_pose, right_pose = env.get_camera_poses()
+            
+            # PRIMARY: Add brain-depth observation
             mapper.add_depth_observation(
-                visual_features["depth_map"],
+                brain_depth_map_upsampled,
                 visual_features["rgb_for_cloud"],
                 left_pose,
-                visual_features["confidence"],
-                min_confidence=0.3
+                brain_confidence_upsampled,
+                min_confidence=0.2,  # Lower threshold for brain estimates
+                source="brain"
             )
+            
+            # COMPARISON: Add StereoBM observation (less frequently)
+            if step % 20 == 0:  # StereoBM every 20 steps (for comparison only)
+                mapper.add_depth_observation(
+                    visual_features["depth_map"],
+                    visual_features["rgb_for_cloud"],
+                    left_pose,
+                    visual_features["confidence"],
+                    min_confidence=0.3,
+                    source="stereo"
+                )
         
         # Update visualization
         if viz is not None and step % viz_update_interval == 0:
@@ -153,10 +197,13 @@ def run_simulation(
     # Save outputs
     print("\nSaving outputs...")
     
-    # Point cloud
-    pc_path = output_dir / "point_cloud.ply"
+    # Point clouds (both brain and stereo)
+    brain_pc_path = output_dir / "point_cloud_brain.ply"
+    stereo_pc_path = output_dir / "point_cloud_stereo.ply"
+    
     # Export with very dense voxel size for inspection (1cm instead of 5cm)
-    mapper.save_point_cloud(str(pc_path), voxel_size=0.01)
+    mapper.save_point_cloud(str(brain_pc_path), voxel_size=0.01, source="brain")
+    mapper.save_point_cloud(str(stereo_pc_path), voxel_size=0.01, source="stereo")
     
     # Final visualization
     if viz is not None:
@@ -171,14 +218,21 @@ def run_simulation(
     
     # Statistics
     map_stats = mapper.get_statistics()
+    brain_depth_stats = brain_depth.get_statistics()
+    
     print("\n" + "=" * 70)
     print("Final Statistics:")
     print("=" * 70)
     print(f"Total simulation steps: {step + 1}")
     print(f"Brain neurons: {n_neurons}")
-    print(f"Point cloud points: {map_stats['total_points']}")
-    print(f"Occupied voxels: {map_stats['occupied_voxels']}")
-    print(f"Exploration ratio: {100 * map_stats['exploration_ratio']:.2f}%")
+    print(f"\nPrimary (Brain Depth):")
+    print(f"  Point cloud points: {map_stats['total_points']}")
+    print(f"  Mean depth: {brain_depth_stats.get('mean_depth_history', 0):.2f}m")
+    print(f"\nComparison (StereoBM):")
+    print(f"  Point cloud points: {map_stats['stereo_points']}")
+    print(f"\nExploration:")
+    print(f"  Occupied voxels: {map_stats['occupied_voxels']}")
+    print(f"  Exploration ratio: {100 * map_stats['exploration_ratio']:.2f}%")
     print("=" * 70)
     
     env.close()

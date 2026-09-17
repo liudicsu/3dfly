@@ -14,12 +14,13 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 **3dfly** demonstrates exploratory behavior driven by a biologically-inspired neural architecture. The system:
 
 - **Brain**: Uses the MaleCNS v1.0 connectome (male *Drosophila* CNS, ~166,700 neurons) as the neural wiring diagram
-- **Vision**: Dual cameras provide stereo views, processed to estimate depth and sample visual features
+- **Vision**: Dual cameras provide stereo views, processed through the connectome to estimate depth
 - **Motor**: Descending neuron activity maps to flight thrust and torques in a MuJoCo simulation
-- **Mapping**: Accumulates stereo depth into a global 3D point cloud
+- **Depth Perception**: **Brain-based depth estimation** from connectome neural pathways (primary) with classical StereoBM as comparison baseline
+- **Mapping**: Accumulates brain-estimated depth into a global 3D point cloud
 - **Exploration**: Biases flight toward under-mapped regions using occupancy-based curiosity
 
-**Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. The mapping from visual input to photoreceptor activity and from descending neurons to motor commands is hand-designed, not learned or biologically validated.
+**Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. The mapping from visual input to photoreceptor activity, the depth readout from visual neurons, and the mapping from descending neurons to motor commands are hand-designed, not learned or biologically validated. The brain-based depth estimation routes visual features through the connectome and extracts depth from neural activity patterns in visual processing regions—an engineering design that honors the connectome structure.
 
 ---
 
@@ -27,9 +28,10 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 
 - **Realistic Fly Model**: Uses anatomically-detailed 3D meshes from the [flybody project](https://github.com/TuragaLab/flybody) (Google DeepMind & HHMI Janelia)
 - **Biologically-Inspired Brain**: MaleCNS v1.0 connectome structure with ~166,700 neurons
-- **Stereo Vision**: Dual cameras with depth estimation and ommatidial sampling
+- **Brain-Based Depth Perception**: Depth estimates derived from connectome neural activity (primary reconstruction)
+- **Stereo Vision**: Dual cameras with classical StereoBM depth (comparison baseline) and ommatidial sampling
 - **Interactive 3D Visualization**: Real-time god's-eye view with orbit/pan/zoom controls
-- **Live Point Cloud Mapping**: Reconstructed 3D map accumulates and renders in real-time on the same interactive web page
+- **Live Point Cloud Mapping**: Brain-estimated 3D map accumulates and renders in real-time on the same interactive web page
 - **Curiosity-Driven Exploration**: Biases flight toward under-mapped regions
 
 ## Architecture
@@ -43,47 +45,50 @@ graph TB
     end
     
     subgraph Vision
-        D[Stereo Vision<br/>Depth Estimation]
+        D[Stereo Vision<br/>Classical StereoBM]
         E[Ommatidial Sampling<br/>~100 samples/eye]
-        F[Point Cloud Mapper<br/>Voxel Occupancy]
+        F[Brain Depth Estimator<br/>Neural Pathways → Depth]
+        G[Point Cloud Mapper<br/>Voxel Occupancy]
     end
     
     subgraph Brain
-        G[Visual Input<br/>Photoreceptor Layer]
-        H[Connectome Subgraph<br/>Visual + Flight Neurons]
-        I[Neural Simulator<br/>LIF or Rate Model]
-        J[Descending Neurons<br/>Motor Output]
+        H[Visual Input<br/>Photoreceptor Layer]
+        I[Connectome Subgraph<br/>Visual + Flight Neurons]
+        J[Neural Simulator<br/>LIF or Rate Model]
+        K[Descending Neurons<br/>Motor Output]
     end
     
     subgraph Control
-        K[Flight Controller<br/>DN → Thrust/Torque]
-        L[Exploration Policy<br/>Curiosity Drive]
+        L[Flight Controller<br/>DN → Thrust/Torque]
+        M[Exploration Policy<br/>Curiosity Drive]
     end
     
     subgraph Visualization
-        M[Interactive UI<br/>Eye Views + Trajectory<br/>Brain Activity + Map]
+        N[Interactive UI<br/>Eye Views + Trajectory<br/>Brain Activity + Map]
     end
     
     B --> D
     C --> D
     D --> E
-    D --> F
-    E --> G
-    G --> H
+    E --> H
     H --> I
     I --> J
-    J --> K
-    F --> L
-    L --> K
-    K --> A
+    I --> F
+    F --> G
+    D -.-> G
+    J --> L
+    G --> M
+    M --> L
+    L --> A
     A --> B
     A --> C
     
-    D -.-> M
-    H -.-> M
-    K -.-> M
-    F -.-> M
-    A -.-> M
+    D -.-> N
+    F -.-> N
+    I -.-> N
+    L -.-> N
+    G -.-> N
+    A -.-> N
 ```
 
 ---
@@ -126,13 +131,13 @@ threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
 ```
 
 **Interactive features:**
-- **3D god's-eye view**: See the fly, trajectory, and **live updating point cloud** together with orbit/pan/zoom
-- **Real-time point cloud rendering**: The reconstructed 3D map accumulates and updates live in the same view as the fly moves
+- **3D god's-eye view**: See the fly, trajectory, and **live updating brain-depth point cloud** together with orbit/pan/zoom
+- **Real-time point cloud rendering**: The brain-estimated 3D map accumulates and updates live in the same view as the fly moves
 - **Dashboard panels in same page**: Left/right eye views, trajectory plot, brain activity, flight commands, system status
 - **Playback controls**: Play, pause, step frame-by-frame, or reset
 - **Adjustable speed**: Control simulation playback speed
 
-**One browser tab, everything together** — no separate matplotlib windows! The point cloud builds up in real-time as the fly explores.
+**One browser tab, everything together** — no separate matplotlib windows! The brain-based point cloud builds up in real-time as the fly explores. Classical StereoBM depth is also computed as a comparison baseline.
 
 ### Option 2: Run with Static Visualization
 
@@ -166,7 +171,7 @@ threedfly run --subgraph data/subgraph.npz --steps 2000
 
 ```bash
 threedfly run --subgraph data/demo_subgraph.npz --steps 500 --headless --save-output output/
-# Outputs: output/point_cloud.ply, output/final_state.png
+# Outputs: output/point_cloud_brain.ply (primary), output/point_cloud_stereo.ply (comparison), output/final_state.png
 ```
 
 ---
@@ -318,8 +323,9 @@ threedfly/
 │   ├── downloader.py   # Download MaleCNS data
 │   ├── loader.py       # Load and extract subgraph
 │   └── simulator.py    # LIF and rate-based simulators
-├── vision/             # Stereo vision and point cloud mapping
-│   ├── stereo.py       # Depth estimation, ommatidial sampling
+├── vision/             # Vision processing and depth estimation
+│   ├── stereo.py       # Classical StereoBM (comparison baseline)
+│   ├── brain_depth.py  # Brain-based depth estimation (primary)
 │   └── pointcloud.py   # 3D map accumulation, occupancy tracking
 ├── sim/                # MuJoCo physics simulation
 │   ├── mjcf.py         # MJCF (XML) model definitions
@@ -355,6 +361,16 @@ tests/                  # Unit tests
 - `activation`: ReLU (default) | sigmoid | tanh
 
 **Recommendation**: Use rate model for faster realtime simulation. LIF for more detailed spike dynamics (slower).
+
+### Brain-Based Depth Estimation
+
+The `BrainDepthEstimator` extracts depth information from connectome neural activity:
+- **Visual input** → ommatidial samples → photoreceptor layer
+- **Connectome processing** → visual neuron activity patterns
+- **Depth readout** → population code from visual neurons (hand-designed linear mapping)
+- **Spatial resolution** → coarse retinotopic mapping (8×6 regions)
+
+The depth readout uses a population code where each visual neuron votes for its preferred depth weighted by its activity level. This is **engineered, not biologically validated**, but routes visual information through actual connectome pathways rather than using a disconnected neural network.
 
 ### Flight Control Mapping
 
@@ -473,7 +489,8 @@ And cite the MaleCNS connectome:
 
 - **写实的果蝇模型**：使用来自 [flybody 项目](https://github.com/TuragaLab/flybody)（Google DeepMind & HHMI Janelia）的解剖学精确3D网格
 - 使用真实的雄性果蝇中枢神经系统连接组（MaleCNS v1.0，约16.67万个神经元）
-- 双目视觉深度估计和3D点云建图
+- **大脑驱动的深度感知**：从连接组神经活动中提取深度估计（主要重建方式）
+- 双目视觉深度估计（经典StereoBM作为对比基准）和3D点云建图
 - MuJoCo物理仿真环境
 - 基于好奇心的探索策略
 - **交互式3D上帝视角可视化**
@@ -497,13 +514,13 @@ threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
 ```
 
 **交互功能：**
-- **3D上帝视角**：同时看到果蝇、飞行轨迹和**实时更新的点云地图**，支持旋转、平移和缩放
-- **实时点云渲染**：重建的3D地图随着果蝇移动在同一视图中实时累积和更新
+- **3D上帝视角**：同时看到果蝇、飞行轨迹和**实时更新的大脑深度点云地图**，支持旋转、平移和缩放
+- **实时点云渲染**：大脑估计的3D地图随着果蝇移动在同一视图中实时累积和更新
 - **仪表盘面板**（同页面）：左右眼视图、飞行轨迹图、大脑活动、飞行指令、系统状态
 - **播放控制**：播放、暂停、单步前进、重置模拟
 - **速度调节**：控制模拟播放速度
 
-**一个浏览器标签页，所有功能齐全** — 不再需要单独的matplotlib窗口！点云在果蝇探索时实时构建。
+**一个浏览器标签页，所有功能齐全** — 不再需要单独的matplotlib窗口！大脑驱动的点云在果蝇探索时实时构建。经典StereoBM深度同时作为对比基准计算。
 
 #### 方式二：静态可视化
 
@@ -514,7 +531,7 @@ threedfly run --subgraph data/demo_subgraph.npz --steps 1000
 
 ### 重要说明
 
-这是一个**基于连接组结构的模拟器**，使用简化的神经元模型（LIF或速率模型）和工程化的输入输出映射。不是对果蝇大脑的逐神经元生物学准确模拟。
+这是一个**基于连接组结构的模拟器**，使用简化的神经元模型（LIF或速率模型）和工程化的输入输出映射。大脑驱动的深度估计通过连接组神经通路处理视觉特征，但深度读取机制是手工设计的工程方案，而非生物学验证的机制。不是对果蝇大脑的逐神经元生物学准确模拟。
 
 ---
 
