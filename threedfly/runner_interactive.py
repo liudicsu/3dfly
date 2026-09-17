@@ -9,7 +9,7 @@ import sys
 from threedfly.connectome import ConnectomeLoader, BrainSimulator
 from threedfly.connectome.simulator import RateSimulator
 from threedfly.sim import FlyEnvironment
-from threedfly.vision import StereoVision, PointCloudMapper
+from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
 from threedfly.control import FlightController, ExplorationPolicy
 from threedfly.viz import InteractiveVisualizer
 
@@ -80,16 +80,27 @@ def run_interactive_simulation(
     mapper = PointCloudMapper(voxel_size=0.05)
     print("  ✓ Vision system ready")
     
-    print("\n[5/7] Setting up control and exploration...")
+    print("\n[5/8] Setting up brain depth estimation...")
+    brain_depth = BrainDepthEstimator(
+        n_neurons=n_neurons,
+        adjacency=adjacency,
+        use_rate_model=(simulator_type == "rate")
+    )
+    print("  ✓ Brain depth estimator ready")
+    
+    print("\n[6/8] Setting up control and exploration...")
     controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
     explorer = ExplorationPolicy(exploration_weight=0.5)
     print("  ✓ Control system ready")
     
-    print("\n[6/7] Initializing interactive web interface...")
+    print("\n[7/8] Initializing interactive web interface...")
     viz = InteractiveVisualizer(host=host, port=port)
     print("  ✓ Unified web interface ready (3D view + dashboard panels)")
     
-    print("\n[7/7] Starting interactive simulation...")
+    print("\n[8/8] Starting interactive simulation...")
+    print("=" * 70)
+    print("\n💡 Using BRAIN-BASED DEPTH for primary reconstruction")
+    print("   StereoBM available as comparison baseline")
     print("=" * 70)
     print("\n📋 Controls:")
     print("  - Open the web browser to interact with the 3D scene")
@@ -108,6 +119,7 @@ def run_interactive_simulation(
         """Reset simulation to initial state."""
         left_img, right_img = env.reset(seed=seed)
         mapper.__init__(voxel_size=0.05)  # Reset mapper
+        brain_depth.reset()  # Reset brain depth estimator
         viz.reset_trajectory()
         return left_img, right_img, 0
     
@@ -153,6 +165,26 @@ def run_interactive_simulation(
                 else:
                     brain_activity = brain.step()
             
+            # *** BRAIN-BASED DEPTH ESTIMATION ***
+            # Extract depth from brain activity (primary reconstruction)
+            brain_depth_result = brain_depth.estimate_depth_from_activity(
+                brain_activity,
+                stereo_features=visual_features
+            )
+            
+            # Upsample brain depth map to match camera resolution
+            h, w = visual_features["depth_map"].shape
+            brain_depth_map_upsampled = brain_depth.upsample_depth_map(
+                brain_depth_result["depth_map"],
+                target_height=h,
+                target_width=w
+            )
+            brain_confidence_upsampled = brain_depth.upsample_depth_map(
+                brain_depth_result["confidence"],
+                target_height=h,
+                target_width=w
+            )
+            
             # Get exploration signal
             fly_pos = env.get_fly_position()
             exploration_signal = explorer.compute_exploration_signal(fly_pos, mapper)
@@ -166,17 +198,31 @@ def run_interactive_simulation(
             # Update point cloud map (every 3 steps for more frequent updates)
             if step % 3 == 0:
                 left_pose, right_pose = env.get_camera_poses()
-                # Use left camera for point cloud (could also use right or both)
+                
+                # PRIMARY: Add brain-depth observation
                 n_added = mapper.add_depth_observation(
-                    visual_features["depth_map"],
+                    brain_depth_map_upsampled,
                     visual_features["rgb_for_cloud"],
                     left_pose,
-                    visual_features["confidence"],
-                    min_confidence=0.2  # Lower threshold for more points
+                    brain_confidence_upsampled,
+                    min_confidence=0.15,  # Lower threshold for brain estimates
+                    source="brain"
                 )
+                
+                # COMPARISON: Add StereoBM observation (less frequently)
+                if step % 15 == 0:  # StereoBM every 15 steps (for comparison only)
+                    mapper.add_depth_observation(
+                        visual_features["depth_map"],
+                        visual_features["rgb_for_cloud"],
+                        left_pose,
+                        visual_features["confidence"],
+                        min_confidence=0.2,
+                        source="stereo"
+                    )
+                
                 if step % 30 == 0 and n_added > 0:
                     # Periodic logging of point cloud growth
-                    print(f"  Added {n_added} points to cloud")
+                    print(f"  Added {n_added} brain-depth points to cloud")
             
             # Update visualization
             if step % viz_update_interval == 0:
@@ -227,21 +273,31 @@ def run_interactive_simulation(
     print("Saving outputs...")
     print("=" * 70)
     
-    # Point cloud
-    pc_path = output_dir / "point_cloud.ply"
+    # Point clouds (both brain and stereo)
+    brain_pc_path = output_dir / "point_cloud_brain.ply"
+    stereo_pc_path = output_dir / "point_cloud_stereo.ply"
+    
     # Export with very dense voxel size for inspection (1cm instead of 5cm/1.25cm)
-    mapper.save_point_cloud(str(pc_path), voxel_size=0.01)
+    mapper.save_point_cloud(str(brain_pc_path), voxel_size=0.01, source="brain")
+    mapper.save_point_cloud(str(stereo_pc_path), voxel_size=0.01, source="stereo")
     
     # Statistics
     map_stats = mapper.get_statistics()
+    brain_depth_stats = brain_depth.get_statistics()
+    
     print("\n" + "=" * 70)
     print("Final Statistics:")
     print("=" * 70)
     print(f"Total simulation steps: {step}")
     print(f"Brain neurons: {n_neurons}")
-    print(f"Point cloud points: {map_stats['total_points']}")
-    print(f"Occupied voxels: {map_stats['occupied_voxels']}")
-    print(f"Exploration ratio: {100 * map_stats['exploration_ratio']:.2f}%")
+    print(f"\nPrimary (Brain Depth):")
+    print(f"  Point cloud points: {map_stats['total_points']}")
+    print(f"  Mean depth: {brain_depth_stats.get('mean_depth_history', 0):.2f}m")
+    print(f"\nComparison (StereoBM):")
+    print(f"  Point cloud points: {map_stats['stereo_points']}")
+    print(f"\nExploration:")
+    print(f"  Occupied voxels: {map_stats['occupied_voxels']}")
+    print(f"  Exploration ratio: {100 * map_stats['exploration_ratio']:.2f}%")
     print("=" * 70)
     
     # Keep visualization open
