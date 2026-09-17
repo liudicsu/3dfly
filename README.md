@@ -18,6 +18,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - **Motor**: Descending neuron activity maps to flight thrust and torques in a MuJoCo simulation
 - **Mapping**: Accumulates stereo depth into a global 3D point cloud
 - **Exploration**: Biases flight toward under-mapped regions using occupancy-based curiosity
+- **Soft Collision Recovery**: Automatically recovers from wall/obstacle hits to continue exploration
 
 **Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. The mapping from visual input to photoreceptor activity and from descending neurons to motor commands is hand-designed, not learned or biologically validated.
 
@@ -31,6 +32,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - **Interactive 3D Visualization**: Real-time god's-eye view with orbit/pan/zoom controls
 - **Live Point Cloud Mapping**: Reconstructed 3D map accumulates and renders in real-time on the same interactive web page
 - **Curiosity-Driven Exploration**: Biases flight toward under-mapped regions
+- **Soft Collision Recovery**: Automatically backs off and reorients after hitting obstacles, enabling continuous exploration instead of stopping on first collision
 
 ## Architecture
 
@@ -142,6 +144,9 @@ python scripts/create_demo_subgraph.py
 
 # Run demo with matplotlib plots
 threedfly run --subgraph data/demo_subgraph.npz --steps 1000 --viz-mode matplotlib
+
+# Advanced: Configure collision recovery
+threedfly run --subgraph data/demo_subgraph.npz --steps 2000 --max-collisions 50
 ```
 
 ### Option 3: Download Full Connectome and Extract Subgraph
@@ -372,6 +377,14 @@ This mapping is **engineered, not biologically validated**. It provides plausibl
 - Scores based on voxel occupancy (low occupancy → high score)
 - Biases flight toward frontiers
 - Random exploration with probability 0.2
+
+### Collision Recovery
+
+- **Soft recovery** automatically handles collisions instead of stopping
+- Backs off from collision point, dampens velocity, randomizes orientation
+- Configurable max collisions (default: 50 non-interactive, 100 interactive)
+- Enables continuous exploration: 1500+ steps vs ~255 without recovery
+- See [COLLISION_RECOVERY.md](COLLISION_RECOVERY.md) for details
 
 ---
 
