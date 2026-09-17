@@ -213,12 +213,12 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
     help="Visualization server port"
 )
 def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port):
-    """Run 3dfly with interactive 3D god's-eye visualization.
+    """Run 3dfly with unified interactive web interface.
     
-    Features:
-    - Interactive 3D view (orbit/pan/zoom with mouse)
+    Single-page interface with:
+    - Interactive 3D god's-eye view (orbit/pan/zoom with mouse)
+    - Dashboard panels (stereo views, trajectory, brain, commands, status)
     - Play/pause/step/reset controls
-    - Real-time trajectory and point cloud
     - Adjustable playback speed
     
     Open your browser to http://localhost:8080 after starting.
