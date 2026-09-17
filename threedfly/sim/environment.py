@@ -245,57 +245,61 @@ class FlyEnvironment:
         pos = self.get_fly_position()
         vel = self.get_fly_velocity()
         
-        # Determine recovery direction
-        if pos[2] < 0.2:
-            # Ground collision: move up and randomize horizontal position
+        # Determine recovery direction - PURE horizontal repositioning only
+        # Always recover at fixed mid-height (1.4m) to avoid vertical bouncing
+        target_height = 1.4
+        
+        if pos[2] < 0.3:
+            # Ground: teleport to mid-height with horizontal randomization
             recovery_offset = np.array([
-                np.random.uniform(-0.2, 0.2),
-                np.random.uniform(-0.2, 0.2),
-                recovery_distance + 0.3
+                np.random.uniform(-0.7, 0.7),
+                np.random.uniform(-0.7, 0.7),
+                target_height - pos[2]  # Move to target height
             ])
-        elif pos[2] > 2.5:
-            # Ceiling collision: move down and randomize horizontal
+        elif pos[2] > 2.3:
+            # Ceiling: teleport to mid-height with horizontal randomization
             recovery_offset = np.array([
-                np.random.uniform(-0.3, 0.3),
-                np.random.uniform(-0.3, 0.3),
-                -(recovery_distance + 0.3)  # Move down
+                np.random.uniform(-0.7, 0.7),
+                np.random.uniform(-0.7, 0.7),
+                target_height - pos[2]  # Move to target height
             ])
         elif self.data.ncon > 0:
-            # Wall/obstacle collision: back off from contact normal
+            # Wall collision: back off horizontally only, maintain height
             contact = self.data.contact[0]
             contact_normal = contact.frame[:3]
-            recovery_offset = -contact_normal * recovery_distance
-            # Add random horizontal offset for exploration
-            recovery_offset[0] += np.random.uniform(-0.2, 0.2)
-            recovery_offset[1] += np.random.uniform(-0.2, 0.2)
+            # Use only horizontal component of normal
+            horizontal_normal = np.array([contact_normal[0], contact_normal[1], 0])
+            if np.linalg.norm(horizontal_normal) > 0.1:
+                horizontal_normal = horizontal_normal / np.linalg.norm(horizontal_normal)
+            recovery_offset = -horizontal_normal * recovery_distance
+            # Add large horizontal randomization
+            recovery_offset[0] += np.random.uniform(-0.6, 0.6)
+            recovery_offset[1] += np.random.uniform(-0.6, 0.6)
+            # Move toward target height
+            recovery_offset[2] = (target_height - pos[2]) * 0.5
         else:
-            # High velocity collision or other: randomize with horizontal bias
+            # Other: pure horizontal randomization at target height
             recovery_offset = np.array([
-                np.random.uniform(-0.3, 0.3),
-                np.random.uniform(-0.3, 0.3),
-                np.random.uniform(-0.1, 0.1)  # Small vertical offset
+                np.random.uniform(-0.7, 0.7),
+                np.random.uniform(-0.7, 0.7),
+                target_height - pos[2]
             ])
         
         # Apply recovery position offset
         self.data.qpos[:3] = pos + recovery_offset
         
-        # Clamp position to valid room bounds (with margins)
+        # Clamp position to valid room bounds, maintaining mid-height preference
         self.data.qpos[0] = np.clip(self.data.qpos[0], -1.9, 1.9)  # x
         self.data.qpos[1] = np.clip(self.data.qpos[1], -1.9, 1.9)  # y
-        self.data.qpos[2] = np.clip(self.data.qpos[2], 0.3, 2.5)   # z - wider range, centered
+        self.data.qpos[2] = np.clip(self.data.qpos[2], 0.5, 2.2)   # z - allow some range but prefer mid
         
         # Dampen velocity to avoid immediate re-collision
         self.data.qvel[:3] *= 0.05  # More aggressive dampening
         
-        # Randomize orientation to explore different directions
+        # Randomize orientation - PERFECTLY HORIZONTAL heading
         angle = np.random.uniform(0, 2 * np.pi)
-        pitch_angle = np.random.uniform(-np.pi/6, np.pi/6)  # Slight pitch variation
-        self.data.qpos[3:7] = [
-            np.cos(angle/2) * np.cos(pitch_angle/2),
-            0,
-            np.sin(pitch_angle/2),
-            np.sin(angle/2) * np.cos(pitch_angle/2)
-        ]
+        # Zero pitch - perfectly horizontal
+        self.data.qpos[3:7] = [np.cos(angle/2), 0, 0, np.sin(angle/2)]  # Pure yaw rotation
         
         # Forward simulation to update contacts
         mujoco.mj_forward(self.model, self.data)
