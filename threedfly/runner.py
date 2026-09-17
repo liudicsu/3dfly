@@ -56,10 +56,11 @@ def run_simulation(
         brain_dt = 0.010
     
     print("\n[3/7] Creating MuJoCo environment...")
+    # Always render camera images for vision system (even in headless mode)
     env = FlyEnvironment(
-        render_mode="rgb_array" if viz_mode != "none" else None,
-        camera_width=64,
-        camera_height=48
+        render_mode="rgb_array",
+        camera_width=160,
+        camera_height=120
     )
     
     print("\n[4/7] Initializing vision and mapping...")
@@ -152,10 +153,10 @@ def run_simulation(
         left_img, right_img, info = env.step(action)
         
         # Update point cloud map
-        if step % 5 == 0:  # Update map every 5 steps
-            left_pose, right_pose = env.get_camera_poses()
-            
-            # PRIMARY: Add brain-depth observation
+        left_pose, right_pose = env.get_camera_poses()
+        
+        # PRIMARY: Add brain-depth observation (every 5 steps)
+        if step % 5 == 0:
             mapper.add_depth_observation(
                 brain_depth_map_upsampled,
                 visual_features["rgb_for_cloud"],
@@ -164,17 +165,17 @@ def run_simulation(
                 min_confidence=0.2,  # Lower threshold for brain estimates
                 source="brain"
             )
-            
-            # COMPARISON: Add StereoBM observation (less frequently)
-            if step % 20 == 0:  # StereoBM every 20 steps (for comparison only)
-                mapper.add_depth_observation(
-                    visual_features["depth_map"],
-                    visual_features["rgb_for_cloud"],
-                    left_pose,
-                    visual_features["confidence"],
-                    min_confidence=0.3,
-                    source="stereo"
-                )
+        
+        # COMPARISON: Add StereoBM observation (every 2 steps, denser for informative comparison)
+        if step % 2 == 0:
+            mapper.add_depth_observation(
+                visual_features["depth_map"],
+                visual_features["rgb_for_cloud"],
+                left_pose,
+                visual_features["confidence"],
+                min_confidence=0.08,  # Lower threshold for denser comparison
+                source="stereo"
+            )
         
         # Update visualization
         if viz is not None and step % viz_update_interval == 0:

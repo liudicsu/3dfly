@@ -17,8 +17,8 @@ class StereoVision:
         baseline: float = 0.012,  # Distance between eyes in meters (~12mm for fly)
         focal_length: float = 0.01,  # Approximate focal length
         block_size: int = 5,
-        num_disparities: int = 32,  # Must be divisible by 16 (increased from 16)
-        downsample_factor: int = 1,  # No downsampling for denser clouds (changed from 2)
+        num_disparities: int = 64,  # Must be divisible by 16 (64 for denser comparison)
+        downsample_factor: int = 1,  # No downsampling for denser clouds
     ):
         """
         Initialize stereo processor.

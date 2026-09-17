@@ -19,8 +19,8 @@ def test_stereo_depth_estimation():
     """Test depth estimation from stereo pair."""
     stereo = StereoVision()
     
-    # Create synthetic stereo pair
-    h, w = 48, 64
+    # Create synthetic stereo pair (using higher resolution)
+    h, w = 120, 160
     left_img = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
     right_img = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
     
@@ -38,7 +38,7 @@ def test_ommatidial_sampling():
     """Test ommatidial sampling."""
     stereo = StereoVision()
     
-    img = np.random.randint(0, 256, (48, 64, 3), dtype=np.uint8)
+    img = np.random.randint(0, 256, (120, 160, 3), dtype=np.uint8)
     
     samples = stereo.ommatidial_sample(img)
     
@@ -51,8 +51,8 @@ def test_visual_features():
     """Test visual feature extraction."""
     stereo = StereoVision()
     
-    left_img = np.random.randint(0, 256, (48, 64, 3), dtype=np.uint8)
-    right_img = np.random.randint(0, 256, (48, 64, 3), dtype=np.uint8)
+    left_img = np.random.randint(0, 256, (120, 160, 3), dtype=np.uint8)
+    right_img = np.random.randint(0, 256, (120, 160, 3), dtype=np.uint8)
     
     features = stereo.get_visual_features(left_img, right_img)
     
@@ -177,10 +177,10 @@ def test_brain_depth_upsample():
     # Create coarse depth map
     coarse_depth = np.ones((8, 6)) * 1.5
     
-    # Upsample
-    upsampled = estimator.upsample_depth_map(coarse_depth, target_height=48, target_width=64)
+    # Upsample to higher resolution
+    upsampled = estimator.upsample_depth_map(coarse_depth, target_height=120, target_width=160)
     
-    assert upsampled.shape == (48, 64)
+    assert upsampled.shape == (120, 160)
     assert np.allclose(upsampled.mean(), coarse_depth.mean(), atol=0.1)
 
 

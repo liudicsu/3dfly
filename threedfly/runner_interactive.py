@@ -74,8 +74,8 @@ def run_interactive_simulation(
     print("\n[3/7] Creating MuJoCo environment...")
     env = FlyEnvironment(
         render_mode="rgb_array",
-        camera_width=64,
-        camera_height=48
+        camera_width=160,
+        camera_height=120
     )
     print("  ✓ Environment ready")
     
@@ -199,11 +199,11 @@ def run_interactive_simulation(
             # Step environment
             left_img, right_img, info = env.step(action)
             
-            # Update point cloud map (every 3 steps for more frequent updates)
+            # Update point cloud map
+            left_pose, right_pose = env.get_camera_poses()
+            
+            # PRIMARY: Add brain-depth observation (every 3 steps for frequent updates)
             if step % 3 == 0:
-                left_pose, right_pose = env.get_camera_poses()
-                
-                # PRIMARY: Add brain-depth observation
                 n_added = mapper.add_depth_observation(
                     brain_depth_map_upsampled,
                     visual_features["rgb_for_cloud"],
@@ -213,20 +213,20 @@ def run_interactive_simulation(
                     source="brain"
                 )
                 
-                # COMPARISON: Add StereoBM observation (less frequently)
-                if step % 15 == 0:  # StereoBM every 15 steps (for comparison only)
-                    mapper.add_depth_observation(
-                        visual_features["depth_map"],
-                        visual_features["rgb_for_cloud"],
-                        left_pose,
-                        visual_features["confidence"],
-                        min_confidence=0.2,
-                        source="stereo"
-                    )
-                
                 if step % 30 == 0 and n_added > 0:
                     # Periodic logging of point cloud growth
                     print(f"  Added {n_added} brain-depth points to cloud")
+            
+            # COMPARISON: Add StereoBM observation (every 2 steps, denser for informative comparison)
+            if step % 2 == 0:
+                mapper.add_depth_observation(
+                    visual_features["depth_map"],
+                    visual_features["rgb_for_cloud"],
+                    left_pose,
+                    visual_features["confidence"],
+                    min_confidence=0.08,  # Lower threshold for denser comparison
+                    source="stereo"
+                )
             
             # Update visualization
             if step % viz_update_interval == 0:
