@@ -14,14 +14,14 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 **3dfly** demonstrates exploratory behavior driven by a biologically-inspired neural architecture. The system:
 
 - **Brain**: Uses the MaleCNS v1.0 connectome (male *Drosophila* CNS, ~166,700 neurons) as the neural wiring diagram
-- **Vision**: Dual cameras provide stereo views, processed through the connectome to estimate depth
+- **Vision**: Dual cameras provide stereo views; **motion parallax and optic flow** (real fly depth cues) processed through connectome
 - **Motor**: Descending neuron activity maps to flight thrust and torques in a MuJoCo simulation
-- **Depth Perception**: **Brain-based depth estimation** from connectome neural pathways (primary) with classical StereoBM as dense comparison baseline
-    - **Mapping**: Accumulates brain-estimated depth into a global 3D point cloud, with StereoBM providing informative comparison data
+- **Depth Perception**: **Brain-based motion parallax** (primary) — optical flow + egomotion routed through connectome → spatial depth map at 12×16 resolution
+    - **Comparison baseline**: Classical StereoBM stereo provides dense depth for validation
 - **Exploration**: Biases flight toward under-mapped regions using occupancy-based curiosity
 - **Soft Collision Recovery**: Automatically recovers from wall/obstacle hits to continue exploration
 
-**Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. The mapping from visual input to photoreceptor activity, the depth readout from visual neurons, and the mapping from descending neurons to motor commands are hand-designed, not learned or biologically validated. The brain-based depth estimation routes visual features through the connectome and extracts depth from neural activity patterns in visual processing regions—an engineering design that honors the connectome structure.
+**Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. **NEW**: Depth estimation now uses **motion parallax and optic flow** (the primary depth cues real fruit flies use) instead of arbitrary mid-network readouts. Optical flow is computed from consecutive frames, combined with flight velocity (egomotion), routed through the connectome (set_input → simulate → readout), and decoded from visual neuron population activity into a 12×16 spatial depth map. This approach is biologically motivated but the flow extraction, parallax calculation, and neural readout are hand-designed engineering approximations, not biologically validated.
 
 ---
 
@@ -29,7 +29,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 
 - **Realistic Fly Model**: Uses anatomically-detailed 3D meshes from the [flybody project](https://github.com/TuragaLab/flybody) (Google DeepMind & HHMI Janelia)
 - **Biologically-Inspired Brain**: MaleCNS v1.0 connectome structure with ~166,700 neurons
-- **Brain-Based Depth Perception**: Depth estimates derived from connectome neural activity (primary reconstruction)
+- **Brain-Based Motion Parallax**: Depth via optic flow + egomotion routed through connectome (real Drosophila depth cue, 12×16 resolution)
 - **Stereo Vision**: Dual cameras (160×120) with classical StereoBM depth (dense comparison baseline) and ommatidial sampling
 - **Interactive 3D Visualization**: Real-time god's-eye view with orbit/pan/zoom controls
 - **Live Point Cloud Mapping**: Brain-estimated 3D map accumulates and renders in real-time on the same interactive web page
@@ -371,15 +371,26 @@ tests/                  # Unit tests
 
 **Recommendation**: Use rate model for faster realtime simulation. LIF for more detailed spike dynamics (slower).
 
-### Brain-Based Depth Estimation
+### Brain-Based Depth Estimation (Motion Parallax)
 
-The `BrainDepthEstimator` extracts depth information from connectome neural activity:
-- **Visual input** → ommatidial samples → photoreceptor layer
-- **Connectome processing** → visual neuron activity patterns
-- **Depth readout** → population code from visual neurons (hand-designed linear mapping)
-- **Spatial resolution** → coarse retinotopic mapping (8×6 regions)
+**NEW**: The `BrainDepthEstimator` now uses **motion parallax and optic flow** — the primary depth cues used by real fruit flies — instead of arbitrary neural readouts:
 
-The depth readout uses a population code where each visual neuron votes for its preferred depth weighted by its activity level. This is **engineered, not biologically validated**, but routes visual information through actual connectome pathways rather than using a disconnected neural network.
+1. **Optical flow computation**: Dense flow between consecutive frames using Farneback method
+2. **Motion parallax**: Depth = (velocity × focal_length) / flow_magnitude
+   - Nearer objects move faster on retina during self-motion
+   - Uses flight velocity (egomotion) from MuJoCo physics
+3. **Brain routing**: Flow features → connectome (set_input → simulate → readout)
+4. **Spatial depth map**: Population readout from visual neurons → 12×16 depth grid
+5. **Higher resolution**: 192 cells (12×16) vs old 48 cells (8×6) = **4× spatial resolution**
+
+**Biological motivation**:
+- ✅ Real Drosophila primarily use motion parallax/optic flow, NOT stereo disparity
+- ✅ Looming (expansion) for collision detection (already present)
+- ✅ T4/T5 neurons (motion), lobula plate (optic flow) are key biological pathways
+- ⚙️ Flow extraction and depth calculation are hand-designed engineering
+- ⚙️ Neural readout mapping is inspired by, but not validated against, fly neuroscience
+
+**vs Old approach**: Previous implementation used arbitrary mid-network neurons (35-65% range) with hand-designed 8×6 readout producing blurry depth. New approach follows real fly depth perception mechanisms.
 
 ### StereoBM Comparison Baseline
 
@@ -547,7 +558,7 @@ And cite the MaleCNS connectome:
 
 - **写实的果蝇模型**：使用来自 [flybody 项目](https://github.com/TuragaLab/flybody)（Google DeepMind & HHMI Janelia）的解剖学精确3D网格
 - 使用真实的雄性果蝇中枢神经系统连接组（MaleCNS v1.0，约16.67万个神经元）
-- **大脑驱动的深度感知**：从连接组神经活动中提取深度估计（主要重建方式）
+- **大脑驱动的运动视差深度感知**：使用光流+自我运动通过连接组处理（真实果蝇深度感知机制，12×16分辨率）
 - 双目视觉深度估计（经典StereoBM作为对比基准）和3D点云建图
 - MuJoCo物理仿真环境
 - 基于好奇心的探索策略
@@ -589,7 +600,7 @@ threedfly run --subgraph data/demo_subgraph.npz --steps 1000
 
 ### 重要说明
 
-这是一个**基于连接组结构的模拟器**，使用简化的神经元模型（LIF或速率模型）和工程化的输入输出映射。大脑驱动的深度估计通过连接组神经通路处理视觉特征，但深度读取机制是手工设计的工程方案，而非生物学验证的机制。不是对果蝇大脑的逐神经元生物学准确模拟。
+这是一个**基于连接组结构的模拟器**，使用简化的神经元模型（LIF或速率模型）和工程化的输入输出映射。**新版本**：深度估计现在使用**运动视差和光流**（真实果蝇使用的主要深度线索），而不是任意的中间网络神经元读取。从连续帧计算光流，结合飞行速度（自我运动），通过连接组路由（set_input → simulate → readout），从视觉神经元群体活动解码为12×16空间深度图。这种方法有生物学动机，但光流提取、视差计算和神经读取是手工设计的工程近似，未经生物学验证。
 
 ---
 

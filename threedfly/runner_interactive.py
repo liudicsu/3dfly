@@ -154,14 +154,25 @@ def run_interactive_simulation(
             # Get visual input
             visual_features = stereo.get_visual_features(left_img, right_img)
             
-            # Feed to brain (ommatidial samples + looming/proximity for avoidance)
+            # *** NEW: Get fly velocity for motion parallax ***
+            fly_velocity = env.get_fly_velocity()
+            
+            # *** NEW: Prepare optical flow features for brain (motion parallax) ***
+            flow_features, flow_info = brain_depth.prepare_flow_features_for_brain(
+                left_img,
+                right_img,
+                fly_velocity
+            )
+            
+            # Feed to brain: ommatidial samples + looming + FLOW FEATURES (motion parallax)
             brain_input = np.concatenate([
                 visual_features["left_ommatidia"],
                 visual_features["right_ommatidia"],
-                visual_features["looming_features"]  # Obstacle proximity signals
+                visual_features["looming_features"],  # Obstacle proximity signals
+                flow_features  # *** NEW: Motion parallax/optic flow features ***
             ])
             
-            # Run brain for multiple timesteps
+            # Run brain for multiple timesteps (connectome processes flow features)
             for _ in range(brain_steps_per_sim):
                 brain.set_input(brain_input)
                 if simulator_type == "lif":
@@ -170,11 +181,18 @@ def run_interactive_simulation(
                 else:
                     brain_activity = brain.step()
             
-            # *** BRAIN-BASED DEPTH ESTIMATION ***
-            # Extract depth from brain activity (primary reconstruction)
+            # *** BRAIN-BASED DEPTH ESTIMATION (now using motion parallax) ***
+            # Extract depth from brain activity after connectome processing
+            visual_features_with_flow = {
+                **visual_features,
+                "flow_magnitude": flow_info["flow_magnitude"],
+                "left_img": left_img,
+                "right_img": right_img,
+            }
             brain_depth_result = brain_depth.estimate_depth_from_activity(
                 brain_activity,
-                stereo_features=visual_features
+                stereo_features=visual_features_with_flow,
+                velocity=fly_velocity
             )
             
             # Upsample brain depth map to match camera resolution
