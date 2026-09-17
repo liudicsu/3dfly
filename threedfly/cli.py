@@ -135,7 +135,18 @@ def extract(data_dir, output, max_neurons, demo):
     default=42,
     help="Random seed"
 )
-def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
+@click.option(
+    "--max-collisions",
+    type=int,
+    default=50,
+    help="Maximum collisions before stopping (0 = unlimited)"
+)
+@click.option(
+    "--no-soft-recovery",
+    is_flag=True,
+    help="Disable soft collision recovery (stop on first collision)"
+)
+def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery):
     """Run 3dfly exploration simulation (static visualization)."""
     from threedfly.runner import run_simulation
     
@@ -160,6 +171,8 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
             save_output_dir=save_output,
             simulator_type=simulator_type,
             seed=seed,
+            max_collisions=max_collisions,
+            enable_soft_recovery=not no_soft_recovery,
         )
         click.echo("\n✓ Simulation complete!")
     except Exception as e:
@@ -212,7 +225,18 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed):
     default=8080,
     help="Visualization server port"
 )
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port):
+@click.option(
+    "--max-collisions",
+    type=int,
+    default=100,
+    help="Maximum collisions before stopping (0 = unlimited)"
+)
+@click.option(
+    "--no-soft-recovery",
+    is_flag=True,
+    help="Disable soft collision recovery (pause on collision)"
+)
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -234,6 +258,8 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
             seed=seed,
             host=host,
             port=port,
+            max_collisions=max_collisions,
+            enable_soft_recovery=not no_soft_recovery,
         )
     except Exception as e:
         click.echo(f"\nError running interactive simulation: {e}", err=True)

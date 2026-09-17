@@ -34,14 +34,14 @@ class FlightController:
         self.n_dn = self.dn_end - self.dn_start
         
         # Fixed mapping gains (hand-tuned)
-        self.thrust_forward_gain = 0.5
-        self.thrust_up_gain = 0.3
-        self.yaw_gain = 0.4
-        self.pitch_gain = 0.2
-        self.roll_gain = 0.1
+        self.thrust_forward_gain = 0.8  # Increased for stronger forward motion
+        self.thrust_up_gain = 0.15  # Further reduced to avoid ceiling hits
+        self.yaw_gain = 0.6  # Increased for more turning exploration
+        self.pitch_gain = 0.25  # Slightly increased
+        self.roll_gain = 0.15  # Slightly increased
         
         # Bias for stable flight
-        self.thrust_up_bias = 0.3  # Counter gravity
+        self.thrust_up_bias = 0.15  # Further reduced to keep fly mid-room, not ceiling
         
         # Smoothing filter
         self.prev_action = np.zeros(5)
@@ -72,10 +72,12 @@ class FlightController:
             dn_norm = dn_activity
         
         # Simple linear mapping (engineered, not learned)
-        # Forward thrust: based on mean DN activity
-        thrust_forward = self.thrust_forward_gain * dn_norm.mean()
+        # Forward thrust: baseline + brain activity
+        # Add baseline to ensure continuous forward motion
+        forward_baseline = 0.4  # Baseline forward thrust for exploration
+        thrust_forward = forward_baseline + self.thrust_forward_gain * dn_norm.mean()
         
-        # Upward thrust: bias + activity
+        # Upward thrust: bias + activity (counters gravity)
         thrust_up = self.thrust_up_bias + self.thrust_up_gain * dn_norm[:self.n_dn//3].mean()
         
         # Turning: based on left-right asymmetry
@@ -94,9 +96,9 @@ class FlightController:
         
         # Add exploration signal if provided
         if exploration_signal is not None:
-            action[0] += 0.3 * exploration_signal[0]  # Forward
-            action[4] += 0.5 * exploration_signal[1]  # Yaw
-            action[1] += 0.2 * exploration_signal[2]  # Up
+            action[0] += 0.5 * exploration_signal[0]  # Forward - further increased
+            action[4] += 0.7 * exploration_signal[1]  # Yaw - further increased
+            action[1] += 0.1 * exploration_signal[2]  # Up - further reduced
         
         # Smooth action
         action = self.alpha * action + (1 - self.alpha) * self.prev_action

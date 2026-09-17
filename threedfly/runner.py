@@ -20,6 +20,8 @@ def run_simulation(
     save_output_dir: str = "output",
     simulator_type: str = "rate",
     seed: int = 42,
+    max_collisions: int = 50,
+    enable_soft_recovery: bool = True,
 ):
     """
     Run complete 3dfly simulation.
@@ -31,6 +33,8 @@ def run_simulation(
         save_output_dir: Output directory
         simulator_type: "rate" or "lif"
         seed: Random seed
+        max_collisions: Maximum collisions before stopping (0 = unlimited)
+        enable_soft_recovery: Enable soft collision recovery (back off and continue)
     """
     np.random.seed(seed)
     
@@ -71,7 +75,7 @@ def run_simulation(
     
     print("\n[6/7] Setting up control and exploration...")
     controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
-    explorer = ExplorationPolicy(exploration_weight=0.5)
+    explorer = ExplorationPolicy(exploration_weight=0.8)  # Increased from 0.5 for stronger exploration
     
     print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":
@@ -94,6 +98,9 @@ def run_simulation(
     brain_steps_per_sim = int(sim_dt / brain_dt)
     
     viz_update_interval = 10  # Update viz every N steps
+    
+    # Collision tracking
+    collision_count = 0
     
     for step in tqdm(range(n_steps), desc="Simulation"):
         # Get visual input (includes StereoBM for comparison)
@@ -187,8 +194,17 @@ def run_simulation(
         
         # Check collision
         if env.check_collision():
-            print(f"\nCollision detected at step {step}!")
-            break
+            collision_count += 1
+            if enable_soft_recovery:
+                print(f"\nCollision {collision_count} at step {step} - recovering...")
+                env.recover_from_collision()
+                # Check if we've hit max collisions
+                if max_collisions > 0 and collision_count >= max_collisions:
+                    print(f"Reached maximum collisions ({max_collisions}), stopping.")
+                    break
+            else:
+                print(f"\nCollision detected at step {step}!")
+                break
     
     print("\n" + "=" * 70)
     print("Simulation complete!")
@@ -224,6 +240,7 @@ def run_simulation(
     print("Final Statistics:")
     print("=" * 70)
     print(f"Total simulation steps: {step + 1}")
+    print(f"Total collisions: {collision_count}")
     print(f"Brain neurons: {n_neurons}")
     print(f"\nPrimary (Brain Depth):")
     print(f"  Point cloud points: {map_stats['total_points']}")

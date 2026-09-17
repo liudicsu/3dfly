@@ -22,6 +22,8 @@ def run_interactive_simulation(
     seed: int = 42,
     host: str = "0.0.0.0",
     port: int = 8080,
+    max_collisions: int = 100,
+    enable_soft_recovery: bool = True,
 ):
     """
     Run interactive 3dfly simulation with unified web interface.
@@ -41,6 +43,8 @@ def run_interactive_simulation(
         seed: Random seed
         host: Visualization server host
         port: Visualization server port
+        max_collisions: Maximum collisions before stopping (0 = unlimited)
+        enable_soft_recovery: Enable soft collision recovery (back off and continue)
     """
     np.random.seed(seed)
     
@@ -90,7 +94,7 @@ def run_interactive_simulation(
     
     print("\n[6/8] Setting up control and exploration...")
     controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
-    explorer = ExplorationPolicy(exploration_weight=0.5)
+    explorer = ExplorationPolicy(exploration_weight=0.8)  # Increased from 0.5 for stronger exploration
     print("  ✓ Control system ready")
     
     print("\n[7/8] Initializing interactive web interface...")
@@ -121,9 +125,9 @@ def run_interactive_simulation(
         mapper.__init__(voxel_size=0.05)  # Reset mapper
         brain_depth.reset()  # Reset brain depth estimator
         viz.reset_trajectory()
-        return left_img, right_img, 0
+        return left_img, right_img, 0, 0  # step, collision_count
     
-    left_img, right_img, step = reset_simulation()
+    left_img, right_img, step, collision_count = reset_simulation()
     
     # Main simulation loop
     try:
@@ -134,7 +138,7 @@ def run_interactive_simulation(
             # Handle reset
             if controls["should_reset"]:
                 print("\n🔄 Resetting simulation...")
-                left_img, right_img, step = reset_simulation()
+                left_img, right_img, step, collision_count = reset_simulation()
                 continue
             
             # Handle pause (unless stepping)
@@ -244,13 +248,27 @@ def run_interactive_simulation(
             
             # Check collision
             if env.check_collision():
-                print(f"\n⚠️  Collision detected at step {step}!")
-                print("Press reset to continue or Ctrl+C to exit.")
-                # Pause and wait for reset
-                while not controls["should_reset"]:
-                    controls = viz.check_controls()
-                    time.sleep(0.1)
-                continue
+                collision_count += 1
+                if enable_soft_recovery:
+                    print(f"\n⚠️  Collision {collision_count} at step {step} - recovering...")
+                    env.recover_from_collision()
+                    # Check if we've hit max collisions
+                    if max_collisions > 0 and collision_count >= max_collisions:
+                        print(f"\n🛑 Reached maximum collisions ({max_collisions}).")
+                        print("Press reset to continue or Ctrl+C to exit.")
+                        # Pause and wait for reset
+                        while not controls["should_reset"]:
+                            controls = viz.check_controls()
+                            time.sleep(0.1)
+                        continue
+                else:
+                    print(f"\n⚠️  Collision detected at step {step}!")
+                    print("Press reset to continue or Ctrl+C to exit.")
+                    # Pause and wait for reset
+                    while not controls["should_reset"]:
+                        controls = viz.check_controls()
+                        time.sleep(0.1)
+                    continue
             
             step += 1
             
@@ -289,6 +307,7 @@ def run_interactive_simulation(
     print("Final Statistics:")
     print("=" * 70)
     print(f"Total simulation steps: {step}")
+    print(f"Total collisions: {collision_count}")
     print(f"Brain neurons: {n_neurons}")
     print(f"\nPrimary (Brain Depth):")
     print(f"  Point cloud points: {map_stats['total_points']}")
