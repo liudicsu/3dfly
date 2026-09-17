@@ -152,9 +152,9 @@ def test_brain_depth_estimator():
     confidence = result["confidence"]
     mean_depth = result["mean_depth"]
     
-    # Check shapes
-    assert depth_map.shape == (8, 6)  # Coarse depth map
-    assert confidence.shape == (8, 6)
+    # Check shapes (NEW: 12×16 motion parallax grid, upgraded from 8×6)
+    assert depth_map.shape == (12, 16)  # Motion parallax flow grid
+    assert confidence.shape == (12, 16)
     
     # Check value ranges
     assert np.all(depth_map >= estimator.depth_min)
@@ -174,8 +174,8 @@ def test_brain_depth_upsample():
         use_rate_model=True
     )
     
-    # Create coarse depth map
-    coarse_depth = np.ones((8, 6)) * 1.5
+    # Create coarse depth map (NEW: 12×16 resolution)
+    coarse_depth = np.ones((12, 16)) * 1.5
     
     # Upsample to higher resolution
     upsampled = estimator.upsample_depth_map(coarse_depth, target_height=120, target_width=160)

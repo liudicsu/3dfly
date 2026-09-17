@@ -94,6 +94,7 @@ class BrainDepthEstimator:
         self.depth_max = 5.0  # Maximum depth (meters)
         
         # State tracking
+        self.last_depth_estimate = 1.0  # For API compatibility
         self.depth_history = []
         
         # Optical flow computation
@@ -354,6 +355,9 @@ class BrainDepthEstimator:
         # Mean depth
         mean_depth = float(np.mean(depth_values))
         
+        # Update last_depth_estimate for API compatibility
+        self.last_depth_estimate = mean_depth
+        
         # Store history
         self.depth_history.append(mean_depth)
         if len(self.depth_history) > 100:
@@ -364,11 +368,18 @@ class BrainDepthEstimator:
         if stereo_features is not None and 'flow_magnitude' in stereo_features:
             flow_magnitude = stereo_features['flow_magnitude']
         
+        # Depth distribution for API compatibility (population activity → depth votes)
+        depth_distribution = {
+            "bins": depth_values,  # Depth value per cell
+            "weights": depth_per_cell,  # Activity/confidence per cell
+        }
+        
         return {
             "depth_map": depth_map,
             "confidence": confidence_map,
             "mean_depth": mean_depth,
             "flow_magnitude": flow_magnitude,
+            "depth_distribution": depth_distribution,  # API compatibility
         }
     
     def prepare_flow_features_for_brain(
@@ -442,6 +453,7 @@ class BrainDepthEstimator:
     def get_statistics(self) -> Dict[str, float]:
         """Get depth estimation statistics."""
         stats = {
+            "last_depth": self.last_depth_estimate,  # API compatibility
             "n_visual_neurons": self.n_visual,
             "flow_grid_size": f"{self.flow_grid_h}x{self.flow_grid_w}",
             "velocity": tuple(self.velocity.tolist()),
@@ -455,6 +467,7 @@ class BrainDepthEstimator:
     
     def reset(self):
         """Reset state."""
+        self.last_depth_estimate = 1.0  # API compatibility
         self.depth_history = []
         self.prev_left_gray = None
         self.prev_right_gray = None
