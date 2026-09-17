@@ -300,12 +300,16 @@ class InteractiveVisualizer:
         if point_cloud_mapper is not None:
             # Use smaller voxel size for visualization (denser cloud)
             if len(point_cloud_mapper.global_cloud.points) > 0:
-                # Show denser cloud - use 1/3 of the mapper's voxel size
-                viz_voxel_size = point_cloud_mapper.voxel_size / 3.0
+                # Show denser cloud - use 1/4 of the mapper's voxel size for finer detail
+                viz_voxel_size = point_cloud_mapper.voxel_size / 4.0
                 downsampled = point_cloud_mapper.global_cloud.voxel_down_sample(voxel_size=viz_voxel_size)
                 if len(downsampled.points) > 0:
                     self.point_cloud_points = np.asarray(downsampled.points)
                     self.point_cloud_colors = np.asarray(downsampled.colors)
+                else:
+                    # If downsampling yields nothing, use raw cloud (up to a limit)
+                    self.point_cloud_points = np.asarray(point_cloud_mapper.global_cloud.points)
+                    self.point_cloud_colors = np.asarray(point_cloud_mapper.global_cloud.colors)
             self.map_stats = point_cloud_mapper.get_statistics()
             
         # Render updates
@@ -446,13 +450,13 @@ class InteractiveVisualizer:
         if self._point_cloud_handle is not None:
             self._point_cloud_handle.remove()
             
-        # Add new point cloud
+        # Add new point cloud with better visualization
         colors_uint8 = (self.point_cloud_colors * 255).astype(np.uint8)
         self._point_cloud_handle = self.server.scene.add_point_cloud(
             "/world/point_cloud",
             points=self.point_cloud_points,
             colors=colors_uint8,
-            point_size=0.02,
+            point_size=0.03,  # Slightly larger points for visibility
             point_shape="circle",
         )
         

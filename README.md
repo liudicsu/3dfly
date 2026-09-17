@@ -29,7 +29,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - **Biologically-Inspired Brain**: MaleCNS v1.0 connectome structure with ~166,700 neurons
 - **Stereo Vision**: Dual cameras with depth estimation and ommatidial sampling
 - **Interactive 3D Visualization**: Real-time god's-eye view with orbit/pan/zoom controls
-- **Point Cloud Mapping**: Accumulates 3D map from stereo vision
+- **Live Point Cloud Mapping**: Reconstructed 3D map accumulates and renders in real-time on the same interactive web page
 - **Curiosity-Driven Exploration**: Biases flight toward under-mapped regions
 
 ## Architecture
@@ -126,12 +126,13 @@ threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
 ```
 
 **Interactive features:**
-- **3D god's-eye view**: See the fly, trajectory, and point cloud together with orbit/pan/zoom
+- **3D god's-eye view**: See the fly, trajectory, and **live updating point cloud** together with orbit/pan/zoom
+- **Real-time point cloud rendering**: The reconstructed 3D map accumulates and updates live in the same view as the fly moves
 - **Dashboard panels in same page**: Left/right eye views, trajectory plot, brain activity, flight commands, system status
 - **Playback controls**: Play, pause, step frame-by-frame, or reset
 - **Adjustable speed**: Control simulation playback speed
 
-**One browser tab, everything together** — no separate matplotlib windows!
+**One browser tab, everything together** — no separate matplotlib windows! The point cloud builds up in real-time as the fly explores.
 
 ### Option 2: Run with Static Visualization
 
@@ -496,12 +497,13 @@ threedfly run-interactive --subgraph data/demo_subgraph.npz --steps 5000
 ```
 
 **交互功能：**
-- **3D上帝视角**：同时看到果蝇、飞行轨迹和点云地图，支持旋转、平移和缩放
+- **3D上帝视角**：同时看到果蝇、飞行轨迹和**实时更新的点云地图**，支持旋转、平移和缩放
+- **实时点云渲染**：重建的3D地图随着果蝇移动在同一视图中实时累积和更新
 - **仪表盘面板**（同页面）：左右眼视图、飞行轨迹图、大脑活动、飞行指令、系统状态
 - **播放控制**：播放、暂停、单步前进、重置模拟
 - **速度调节**：控制模拟播放速度
 
-**一个浏览器标签页，所有功能齐全** — 不再需要单独的matplotlib窗口！
+**一个浏览器标签页，所有功能齐全** — 不再需要单独的matplotlib窗口！点云在果蝇探索时实时构建。
 
 #### 方式二：静态可视化
 

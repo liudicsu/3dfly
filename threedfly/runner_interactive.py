@@ -101,7 +101,7 @@ def run_interactive_simulation(
     # Simulation parameters
     sim_dt = 0.02  # 20ms per step
     brain_steps_per_sim = int(sim_dt / brain_dt)
-    viz_update_interval = 5  # Update viz every N steps
+    viz_update_interval = 3  # Update viz every N steps (more frequent for smoother point cloud)
     
     # Initial state
     def reset_simulation():
@@ -163,16 +163,20 @@ def run_interactive_simulation(
             # Step environment
             left_img, right_img, info = env.step(action)
             
-            # Update point cloud map
-            if step % 5 == 0:
+            # Update point cloud map (every 3 steps for more frequent updates)
+            if step % 3 == 0:
                 left_pose, right_pose = env.get_camera_poses()
-                mapper.add_depth_observation(
+                # Use left camera for point cloud (could also use right or both)
+                n_added = mapper.add_depth_observation(
                     visual_features["depth_map"],
                     visual_features["rgb_for_cloud"],
                     left_pose,
                     visual_features["confidence"],
-                    min_confidence=0.3
+                    min_confidence=0.2  # Lower threshold for more points
                 )
+                if step % 30 == 0 and n_added > 0:
+                    # Periodic logging of point cloud growth
+                    print(f"  Added {n_added} points to cloud")
             
             # Update visualization
             if step % viz_update_interval == 0:

@@ -86,10 +86,12 @@ class PointCloudMapper:
         cx, cy = w / 2.0, h / 2.0
         
         # Unproject to 3D camera coordinates
+        # Note: camera frame is typically z forward, x right, y down
         z = depth_map[valid_mask]
         x = (u[valid_mask] - cx) * z / fx
         y = (v[valid_mask] - cy) * z / fy
         
+        # Stack as [x, y, z] where z is depth (forward direction)
         points_camera = np.stack([x, y, z], axis=-1)
         
         # Transform to world coordinates

@@ -17,8 +17,8 @@ class StereoVision:
         baseline: float = 0.012,  # Distance between eyes in meters (~12mm for fly)
         focal_length: float = 0.01,  # Approximate focal length
         block_size: int = 5,
-        num_disparities: int = 16,  # Must be divisible by 16
-        downsample_factor: int = 2,  # Downsample for efficiency
+        num_disparities: int = 32,  # Must be divisible by 16 (increased from 16)
+        downsample_factor: int = 1,  # No downsampling for denser clouds (changed from 2)
     ):
         """
         Initialize stereo processor.
@@ -34,11 +34,18 @@ class StereoVision:
         self.focal_length = focal_length
         self.downsample_factor = downsample_factor
         
-        # Create stereo matcher
+        # Create stereo matcher with better parameters for denser matching
         self.stereo = cv2.StereoBM_create(
             numDisparities=num_disparities,
             blockSize=block_size
         )
+        # Tune parameters for better matching
+        self.stereo.setPreFilterCap(31)
+        self.stereo.setMinDisparity(0)
+        self.stereo.setTextureThreshold(10)
+        self.stereo.setUniquenessRatio(5)
+        self.stereo.setSpeckleWindowSize(100)
+        self.stereo.setSpeckleRange(32)
         
         # For ommatidial-like sampling
         self.n_ommatidia = 100  # Simplified fly eye model
@@ -76,18 +83,22 @@ class StereoVision:
         # Convert to float and handle invalid values
         disparity = disparity.astype(np.float32) / 16.0  # StereoBM returns fixed-point
         
-        # Compute depth: depth = (baseline * focal_length) / disparity
+        # Compute depth: depth = (baseline * focal_length_pixels) / disparity
+        # focal_length in pixels approximated as image_width / 2
+        h, w = left_gray.shape
+        focal_length_pixels = w / 2.0
+        
         # Avoid division by zero
-        valid_mask = disparity > 0
+        valid_mask = disparity > 0.5  # Require minimum disparity
         depth = np.zeros_like(disparity)
-        depth[valid_mask] = (self.baseline * self.focal_length) / disparity[valid_mask]
+        depth[valid_mask] = (self.baseline * focal_length_pixels) / disparity[valid_mask]
         
         # Clip unreasonable depths
-        depth = np.clip(depth, 0, 10.0)  # Max 10 meters
+        depth = np.clip(depth, 0, 5.0)  # Max 5 meters (more appropriate for fly scale)
         
-        # Confidence based on disparity magnitude
+        # Confidence based on disparity magnitude (higher disparity = closer = more confident)
         confidence = np.zeros_like(depth)
-        confidence[valid_mask] = np.clip(disparity[valid_mask] / 16.0, 0, 1)
+        confidence[valid_mask] = np.clip(disparity[valid_mask] / 32.0, 0, 1)
         
         return depth, confidence
     
