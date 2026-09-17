@@ -23,12 +23,21 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 
 ---
 
+## Features
+
+- **Realistic Fly Model**: Uses anatomically-detailed 3D meshes from the [flybody project](https://github.com/TuragaLab/flybody) (Google DeepMind & HHMI Janelia)
+- **Biologically-Inspired Brain**: MaleCNS v1.0 connectome structure with ~166,700 neurons
+- **Stereo Vision**: Dual cameras with depth estimation and ommatidial sampling
+- **Interactive 3D Visualization**: Real-time god's-eye view with orbit/pan/zoom controls
+- **Point Cloud Mapping**: Accumulates 3D map from stereo vision
+- **Curiosity-Driven Exploration**: Biases flight toward under-mapped regions
+
 ## Architecture
 
 ```mermaid
 graph TB
     subgraph Environment
-        A[MuJoCo Simulation<br/>Room + Obstacles + Fly]
+        A[MuJoCo Simulation<br/>Room + Obstacles + Realistic Fly]
         B[Left Eye Camera]
         C[Right Eye Camera]
     end
@@ -448,6 +457,7 @@ And cite the MaleCNS connectome:
 ## Acknowledgments
 
 - **Google Research** and **HHMI Janelia Research Campus** for the MaleCNS v1.0 connectome
+- **Google DeepMind** and **HHMI Janelia** for the flybody anatomical meshes (Apache-2.0 license)
 - **MuJoCo** physics engine (DeepMind)
 - **Open3D** library
 - The fruit fly research community
@@ -460,6 +470,7 @@ And cite the MaleCNS connectome:
 
 ### 主要特点
 
+- **写实的果蝇模型**：使用来自 [flybody 项目](https://github.com/TuragaLab/flybody)（Google DeepMind & HHMI Janelia）的解剖学精确3D网格
 - 使用真实的雄性果蝇中枢神经系统连接组（MaleCNS v1.0，约16.67万个神经元）
 - 双目视觉深度估计和3D点云建图
 - MuJoCo物理仿真环境

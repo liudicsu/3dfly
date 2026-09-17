@@ -10,6 +10,8 @@ matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from io import BytesIO
 from PIL import Image
+from pathlib import Path
+import trimesh
 
 
 class InteractiveVisualizer:
@@ -313,20 +315,78 @@ class InteractiveVisualizer:
         self._render_dashboard_panels()
         self._render_status()
         
+    def _load_fly_mesh(self):
+        """Load and combine fruit fly meshes into a single mesh."""
+        assets_dir = Path(__file__).parent.parent.parent / "assets" / "fly_meshes"
+        
+        # Load main body parts
+        try:
+            # Scale factor to match MuJoCo (0.01) and adjust for Viser
+            scale = 0.01
+            
+            # Load thorax (main body)
+            thorax = trimesh.load(assets_dir / "thorax_body.obj", force="mesh")
+            thorax.apply_scale(scale)
+            
+            # Load head
+            head = trimesh.load(assets_dir / "head_body.obj", force="mesh")
+            head.apply_scale(scale)
+            head.apply_translation([0.012, 0, 0])
+            
+            # Load abdomen
+            abdomen = trimesh.load(assets_dir / "abdomen_1_body.obj", force="mesh")
+            abdomen.apply_scale(scale)
+            abdomen.apply_translation([-0.012, 0, -0.002])
+            
+            # Load wings
+            wing_left = trimesh.load(assets_dir / "wing_left_membrane.obj", force="mesh")
+            wing_left.apply_scale(scale)
+            wing_left.apply_translation([-0.002, 0.008, 0.002])
+            
+            wing_right = trimesh.load(assets_dir / "wing_right_membrane.obj", force="mesh")
+            wing_right.apply_scale(scale)
+            wing_right.apply_translation([-0.002, -0.008, 0.002])
+            
+            # Combine all parts
+            combined = trimesh.util.concatenate([thorax, head, abdomen, wing_left, wing_right])
+            
+            # Set consistent color (brown for body)
+            combined.visual.vertex_colors = np.array([76, 51, 25, 255], dtype=np.uint8)
+            
+            return combined
+            
+        except Exception as e:
+            print(f"Warning: Could not load fly mesh: {e}")
+            print("Falling back to simple sphere representation")
+            return None
+    
     def _render_fly(self):
-        """Render fruit fly body."""
+        """Render fruit fly body using realistic mesh."""
         # Remove old fly
         if self._fly_handle is not None:
             self._fly_handle.remove()
-            
-        # Fly body (ellipsoid approximated as sphere)
-        self._fly_handle = self.server.scene.add_icosphere(
-            "/world/fly",
-            radius=0.015,
-            color=(76, 51, 25),  # Brown
-            position=tuple(self.fly_position),
-            wxyz=tuple(self.fly_orientation),
-        )
+        
+        # Try to load and display realistic mesh
+        if not hasattr(self, '_fly_mesh'):
+            self._fly_mesh = self._load_fly_mesh()
+        
+        if self._fly_mesh is not None:
+            # Use mesh representation
+            self._fly_handle = self.server.scene.add_mesh_trimesh(
+                "/world/fly",
+                mesh=self._fly_mesh,
+                position=tuple(self.fly_position),
+                wxyz=tuple(self.fly_orientation),
+            )
+        else:
+            # Fallback to simple sphere
+            self._fly_handle = self.server.scene.add_icosphere(
+                "/world/fly",
+                radius=0.015,
+                color=(76, 51, 25),  # Brown
+                position=tuple(self.fly_position),
+                wxyz=tuple(self.fly_orientation),
+            )
         
         # Add a small directional indicator (forward vector)
         # Convert quaternion to forward direction
