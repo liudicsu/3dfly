@@ -164,24 +164,56 @@ class FlyEnvironment:
         Returns:
             (left_pose, right_pose) as 4x4 transformation matrices
         """
-        left_cam = self.model.cam(self.left_eye_id)
-        right_cam = self.model.cam(self.right_eye_id)
-        
-        # Get camera positions and orientations from MuJoCo
         mujoco.mj_forward(self.model, self.data)
         
-        # Extract camera matrices (simplified - assumes fixed relative to fly)
+        # Get fly body pose
         fly_pos = self.get_fly_position()
-        fly_quat = self.get_fly_orientation()
+        fly_quat = self.get_fly_orientation()  # (w, x, y, z)
         
-        # Build 4x4 transforms (approximate)
+        # Convert quaternion to rotation matrix
+        fly_rot = self._quat_to_rotation_matrix(fly_quat)
+        
+        # Camera positions in fly body frame (forward, sideways, up)
+        # Cameras point forward (+x in fly frame)
+        left_cam_offset = np.array([0.015, 0.006, 0.002])   # forward, left, up
+        right_cam_offset = np.array([0.015, -0.006, 0.002])  # forward, right, up
+        
+        # Transform camera positions to world frame
+        left_pos_world = fly_pos + fly_rot @ left_cam_offset
+        right_pos_world = fly_pos + fly_rot @ right_cam_offset
+        
+        # Build 4x4 transformation matrices
+        # Cameras inherit fly's rotation (pointing forward in fly's body frame)
         left_pose = np.eye(4)
-        left_pose[:3, 3] = fly_pos + np.array([0.015, 0.006, 0.002])
+        left_pose[:3, :3] = fly_rot
+        left_pose[:3, 3] = left_pos_world
         
         right_pose = np.eye(4)
-        right_pose[:3, 3] = fly_pos + np.array([0.015, -0.006, 0.002])
+        right_pose[:3, :3] = fly_rot
+        right_pose[:3, 3] = right_pos_world
         
         return left_pose, right_pose
+    
+    def _quat_to_rotation_matrix(self, quat: np.ndarray) -> np.ndarray:
+        """
+        Convert quaternion to 3x3 rotation matrix.
+        
+        Args:
+            quat: Quaternion (w, x, y, z)
+        
+        Returns:
+            3x3 rotation matrix
+        """
+        w, x, y, z = quat
+        
+        # Rotation matrix from quaternion
+        R = np.array([
+            [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
+            [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+            [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
+        ])
+        
+        return R
     
     def check_collision(self) -> bool:
         """Check if fly has collided with environment."""
