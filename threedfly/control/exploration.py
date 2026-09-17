@@ -83,10 +83,10 @@ class ExplorationPolicy:
             # No strong preference, continue forward
             direction_unit = np.array([1, 0, 0])
         
-        # Exploration signal (pure horizontal - no vertical component)
-        forward_signal = 1.5  # Very strong forward encouragement for room traversal
+        # Exploration signal (pure horizontal - MAXIMUM forward bias)
+        forward_signal = 2.0  # Maximum forward encouragement
         turn_signal = np.arctan2(direction_unit[1], direction_unit[0])  # Desired heading
-        up_signal = 0.0  # No vertical exploration - let brain/controller handle altitude
+        up_signal = 0.0  # Absolutely no vertical exploration
         
         signal = np.array([forward_signal, turn_signal, up_signal])
         signal *= self.exploration_weight

@@ -75,7 +75,7 @@ def run_simulation(
     
     print("\n[6/7] Setting up control and exploration...")
     controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
-    explorer = ExplorationPolicy(exploration_weight=0.8)  # Increased from 0.5 for stronger exploration
+    explorer = ExplorationPolicy(exploration_weight=1.5, random_exploration_prob=0.05)  # Maximum exploration, minimal random
     
     print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":

@@ -33,15 +33,15 @@ class FlightController:
         self.dn_end = n_neurons
         self.n_dn = self.dn_end - self.dn_start
         
-        # Fixed mapping gains (hand-tuned for horizontal exploration)
-        self.thrust_forward_gain = 1.0  # Strong forward motion for room traversal
-        self.thrust_up_gain = 0.05  # Minimal upward gain to counter ceiling bouncing
-        self.yaw_gain = 0.8  # Strong turning for horizontal exploration
-        self.pitch_gain = 0.2  # Reduced pitch to minimize vertical oscillation
-        self.roll_gain = 0.15  # Slight roll for natural flight
+        # Fixed mapping gains (2D horizontal exploration - minimal vertical control)
+        self.thrust_forward_gain = 1.5  # Strong forward
+        self.thrust_up_gain = 0.0  # Zero - let fixed bias handle altitude
+        self.yaw_gain = 1.2  # Strong turning
+        self.pitch_gain = 0.0  # Zero - no pitch control
+        self.roll_gain = 0.0  # Zero - no roll control
         
-        # Bias for stable flight
-        self.thrust_up_bias = 0.0  # No upward bias - let gravity and brain control height
+        # Fixed upward thrust to maintain altitude (like a drone)
+        self.thrust_up_bias = 0.12  # Strong enough to counter gravity and maintain ~1.5m
         
         # Smoothing filter
         self.prev_action = np.zeros(5)
@@ -72,8 +72,8 @@ class FlightController:
             dn_norm = dn_activity
         
         # Simple linear mapping (engineered, not learned)
-        # Forward thrust: strong baseline + brain activity for continuous exploration
-        forward_baseline = 0.6  # Higher baseline for active room traversal
+        # Forward thrust: balanced strong baseline for stable horizontal flight
+        forward_baseline = 0.7  # Strong but stable
         thrust_forward = forward_baseline + self.thrust_forward_gain * dn_norm.mean()
         
         # Upward thrust: bias + activity (counters gravity)
@@ -90,8 +90,8 @@ class FlightController:
         pitch = self.pitch_gain * (front_activity - back_activity)
         roll = self.roll_gain * (left_activity - right_activity)
         
-        # Combine into action
-        action = np.array([thrust_forward, thrust_up, roll, pitch, yaw])
+        # Combine into action (2D + altitude maintenance)
+        action = np.array([thrust_forward, thrust_up, 0.0, 0.0, yaw])  # No roll/pitch
         
         # Add exploration signal if provided (favor horizontal movement)
         if exploration_signal is not None:
