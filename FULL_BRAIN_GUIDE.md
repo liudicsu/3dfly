@@ -94,6 +94,61 @@ brain.set_input(input_vector)
 rates = brain.step()
 ```
 
+### 4. Annotation-Based Neuron Selection (NEW)
+
+Use neuron type annotations for biologically-motivated I/O mapping:
+
+```python
+from threedfly.connectome import (
+    ConnectomeLoader,
+    RateSimulator,
+    find_visual_neurons,
+    find_descending_neurons,
+)
+import numpy as np
+
+# Load full connectome with annotations
+subgraph = ConnectomeLoader.load_subgraph("data/full_connectome.npz")
+
+# Initialize simulator
+brain = RateSimulator(subgraph["adjacency"], dt=0.010)
+
+# Find neuron indices by biological type
+visual = find_visual_neurons(
+    subgraph["annotations"],
+    subgraph["body_ids"],
+    subgraph["body_id_to_idx"]
+)
+
+descending = find_descending_neurons(
+    subgraph["annotations"],
+    subgraph["body_ids"],
+    subgraph["body_id_to_idx"]
+)
+
+# Use type-based indices for I/O
+# Input: photoreceptors
+photoreceptor_input = np.random.rand(len(visual["photoreceptor"])) * 0.5
+brain.set_input(photoreceptor_input, neuron_indices=visual["photoreceptor"])
+
+# Simulate
+rates = brain.step()
+
+# Output: descending neurons (motor commands)
+motor_output = rates[descending["DN"]]
+print(f"Motor activity: {motor_output.mean():.4f}")
+```
+
+**Available neuron categories:**
+- `visual["photoreceptor"]` - R1-R8 photoreceptors (6,632 neurons)
+- `visual["lamina"]` - L1-L5 lamina neurons (10,945)
+- `visual["medulla"]` - Mi, Tm, T4, T5 (51,474)
+- `visual["lobula"]` - LC, LPLC (5,475)
+- `visual["all_visual"]` - All visual neurons (74,475)
+- `descending["DN"]` - All descending neurons (1,372)
+- `descending["DNa"]`, `["DNb"]`, `["DNp"]` - DN subtypes
+- `central_complex["FB"]`, `["EB"]`, `["PB"]`, `["NO"]` - CX regions
+
 ## Memory Optimization
 
 ### Why Filtering?
@@ -147,15 +202,37 @@ brain = RateSimulator(adjacency, dt=0.020)  # 20ms instead of 10ms
 
 ### 3. Target Specific Input/Output Neurons
 
-When setting input or reading output, target specific neuron indices rather than random subsets:
+Use annotation-based selection to target specific neuron types:
 
 ```python
-# Use annotation-based selection for input
-visual_neurons = [i for i, bid in enumerate(subgraph['body_ids']) 
-                  if annotations.loc[annotations['bodyId']==bid, 'type'].str.contains('photoreceptor')]
+from threedfly.connectome import find_visual_neurons, find_descending_neurons
 
-# Set input to visual neurons only
-brain.set_input(input_vector, neuron_indices=visual_neurons)
+# Load with annotations
+subgraph = ConnectomeLoader.load_subgraph("data/full_connectome.npz")
+
+# Find visual input neurons
+visual = find_visual_neurons(
+    subgraph["annotations"],
+    subgraph["body_ids"],
+    subgraph["body_id_to_idx"]
+)
+
+# Set input to photoreceptors only (more efficient than all neurons)
+brain.set_input(input_vector, neuron_indices=visual["photoreceptor"])
+
+# Read output from descending neurons only
+descending = find_descending_neurons(
+    subgraph["annotations"],
+    subgraph["body_ids"],
+    subgraph["body_id_to_idx"]
+)
+motor_output = rates[descending["DN"]]
+```
+
+### 4. Inspect Types Before Running
+```bash
+# See what neuron types are available
+threedfly inspect-types data/full_connectome.npz
 ```
 
 ## Biological Accuracy
