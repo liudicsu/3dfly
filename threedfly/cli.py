@@ -93,6 +93,66 @@ def extract(data_dir, output, max_neurons, demo):
         sys.exit(1)
 
 
+@main.command("build-full")
+@click.option(
+    "--data-dir",
+    type=click.Path(exists=True),
+    default=None,
+    help="Directory with downloaded connectome data"
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default="data/full_connectome.npz",
+    help="Output file for full connectome"
+)
+@click.option(
+    "--min-synapses",
+    type=int,
+    default=3,
+    help="Minimum synaptic weight to include (default: 3, recommended for memory efficiency)"
+)
+def build_full(data_dir, output, min_synapses):
+    """Build full-brain connectome with all neurons.
+    
+    This creates a sparse adjacency matrix for the entire MaleCNS v1.0
+    connectome (~130k-185k neurons depending on filtering).
+    
+    The default min-synapses=3 filter reduces the dataset from 150M to ~10M
+    connections while keeping biologically significant synapses, making it
+    memory-efficient (~4-8GB RAM during build, final file ~35 MB).
+    
+    For the complete unfiltered connectome, use --min-synapses 1 (requires
+    more memory and produces a larger file).
+    """
+    from threedfly.connectome import ConnectomeLoader
+    
+    click.echo("=" * 70)
+    click.echo("Building Full MaleCNS Connectome")
+    click.echo("=" * 70)
+    click.echo(f"Data directory: {data_dir or 'data/connectome-raw'}")
+    click.echo(f"Output: {output}")
+    click.echo(f"Min synapses: {min_synapses}")
+    click.echo("=" * 70)
+    
+    try:
+        loader = ConnectomeLoader(data_dir=data_dir)
+        loader.load_annotations()
+        
+        loader.build_full_connectome(min_synapses=min_synapses)
+        loader.save_subgraph(Path(output))
+        
+        click.echo(f"\n✓ Full connectome saved to: {output}")
+        click.echo("\nYou can now use this with:")
+        click.echo(f"  threedfly run --subgraph {output}")
+        click.echo(f"  threedfly run-interactive --subgraph {output}")
+    except Exception as e:
+        click.echo(f"Error building full connectome: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 @main.command()
 @click.option(
     "--subgraph",
