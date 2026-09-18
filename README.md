@@ -182,8 +182,11 @@ threedfly download
 
 # Build full-brain connectome (~185k neurons, optimized for memory efficiency)
 # Default min-synapses=3 filters weak connections (biologically significant synapses only)
-# Takes ~1-2 minutes, produces ~35 MB file
+# Takes ~1-2 minutes, produces ~35 MB file with annotations (~100 MB total)
 threedfly build-full --output data/full_connectome.npz
+
+# Inspect neuron types in the connectome
+threedfly inspect-types data/full_connectome.npz
 
 # Run with full brain (interactive)
 threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
@@ -195,8 +198,17 @@ threedfly run --subgraph data/full_connectome.npz --steps 2000
 **Full-brain parameters:**
 - **Neurons**: ~185k annotated neurons with connections (min-synapses=3)
 - **Connections**: ~10.6M synapses (filtered from 150M raw connections)
-- **Memory**: ~4-8GB RAM during build, final file ~35MB
+- **Memory**: ~4-8GB RAM during build, final file ~35MB (sparse matrix) + ~65MB (annotations)
 - **Runtime**: Sparse matrix operations scale well; expect real-time or near-real-time with RateSimulator
+- **Annotations**: Neuron types saved for automatic input/output selection
+
+**Annotation-based I/O selection** (NEW):
+The full connectome includes neuron type annotations, enabling biologically-motivated input/output selection:
+- **Visual neurons**: 74,475 neurons (photoreceptors, lamina, medulla, lobula)
+- **Descending neurons**: 1,372 neurons (motor output pathways)
+- **Central complex**: 8,636 neurons (navigation circuits)
+
+See the Python API section for examples of type-based neuron selection.
 
 **Note**: The default `--min-synapses 3` filter keeps biologically significant connections while dramatically reducing memory usage. For the complete unfiltered connectome (~150M connections), use `--min-synapses 1` (requires more memory and produces a larger file).
 
@@ -254,6 +266,20 @@ Creates a sparse adjacency matrix for the entire MaleCNS v1.0 connectome (~130k-
 - `min-synapses=3` (default): ~185k neurons, ~10M connections, ~35MB file, 4-8GB RAM
 - `min-synapses=5`: ~165k neurons, ~6M connections, ~25MB file, 3-5GB RAM
 - `min-synapses=1`: ~185k neurons, ~50M+ connections, ~200MB+ file, 10-15GB RAM
+
+Neuron type annotations are automatically saved alongside the connectome for type-based I/O selection.
+
+#### `threedfly inspect-types`
+**NEW**: Inspect neuron types in a connectome subgraph.
+
+```bash
+threedfly inspect-types <subgraph_path>
+
+# Example
+threedfly inspect-types data/full_connectome.npz
+```
+
+Shows breakdown of visual, descending, and central complex neurons identified by type annotations. Useful for understanding full-brain connectome composition and planning input/output mappings.
 
 #### `threedfly run`
 Run the simulation with static visualization.
@@ -319,6 +345,48 @@ run_simulation(
     simulator_type="rate",
     seed=42
 )
+```
+
+**NEW: Annotation-based neuron selection with full brain:**
+
+```python
+from threedfly.connectome import (
+    ConnectomeLoader,
+    RateSimulator,
+    find_visual_neurons,
+    find_descending_neurons,
+)
+import numpy as np
+
+# Load full connectome with annotations
+subgraph = ConnectomeLoader.load_subgraph("data/full_connectome.npz")
+
+# Initialize simulator
+brain = RateSimulator(subgraph["adjacency"], dt=0.010)
+
+# Find neuron indices by type
+visual = find_visual_neurons(
+    subgraph["annotations"],
+    subgraph["body_ids"],
+    subgraph["body_id_to_idx"]
+)
+
+descending = find_descending_neurons(
+    subgraph["annotations"],
+    subgraph["body_ids"],
+    subgraph["body_id_to_idx"]
+)
+
+# Set input to visual neurons
+visual_input = np.random.rand(len(visual["photoreceptor"])) * 0.5
+brain.set_input(visual_input, neuron_indices=visual["photoreceptor"])
+
+# Simulate
+rates = brain.step()
+
+# Read motor output from descending neurons
+motor_output = rates[descending["DN"]]
+print(f"Motor activity: {motor_output.mean():.4f}")
 ```
 
 ---

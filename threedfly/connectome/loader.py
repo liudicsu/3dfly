@@ -223,6 +223,14 @@ class ConnectomeLoader:
         
         print(f"\nSaving subgraph to {output_path}...")
         
+        # Save annotations to a separate pickle file (too complex for npz)
+        annotations_path = output_path.with_suffix(".annotations.pkl")
+        if "annotations" in self.subgraph and self.subgraph["annotations"] is not None:
+            import pickle
+            with open(annotations_path, "wb") as f:
+                pickle.dump(self.subgraph["annotations"], f)
+            print(f"  Saved annotations to {annotations_path.name}")
+        
         # Save sparse matrix and metadata
         np.savez_compressed(
             output_path,
@@ -237,7 +245,11 @@ class ConnectomeLoader:
             min_synapses=self.subgraph.get("min_synapses", 1),
         )
         
-        print(f"✓ Saved ({output_path.stat().st_size / 1024 / 1024:.1f} MB)")
+        file_size = output_path.stat().st_size / 1024 / 1024
+        print(f"✓ Saved ({file_size:.1f} MB)")
+        if annotations_path.exists():
+            ann_size = annotations_path.stat().st_size / 1024 / 1024
+            print(f"  Total with annotations: {file_size + ann_size:.1f} MB")
     
     def build_full_connectome(self, min_synapses: int = 1) -> Dict:
         """
@@ -367,6 +379,15 @@ class ConnectomeLoader:
         is_full_brain = bool(data.get("is_full_brain", False))
         min_synapses = int(data.get("min_synapses", 1))
         
+        # Load annotations if available
+        annotations_path = path.with_suffix(".annotations.pkl")
+        annotations = None
+        if annotations_path.exists():
+            import pickle
+            with open(annotations_path, "rb") as f:
+                annotations = pickle.load(f)
+            print(f"  Loaded annotations for {len(annotations)} neurons")
+        
         subgraph = {
             "body_ids": body_ids,
             "body_id_to_idx": body_id_to_idx,
@@ -375,6 +396,7 @@ class ConnectomeLoader:
             "n_connections": int(data["n_connections"]),
             "is_full_brain": is_full_brain,
             "min_synapses": min_synapses,
+            "annotations": annotations,
         }
         
         print(f"✓ Loaded: {subgraph['n_neurons']:,} neurons, {subgraph['n_connections']:,} connections")
