@@ -93,6 +93,124 @@ def extract(data_dir, output, max_neurons, demo):
         sys.exit(1)
 
 
+@main.command("build-full")
+@click.option(
+    "--data-dir",
+    type=click.Path(exists=True),
+    default=None,
+    help="Directory with downloaded connectome data"
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    default="data/full_connectome.npz",
+    help="Output file for full connectome"
+)
+@click.option(
+    "--min-synapses",
+    type=int,
+    default=3,
+    help="Minimum synaptic weight to include (default: 3, recommended for memory efficiency)"
+)
+def build_full(data_dir, output, min_synapses):
+    """Build full-brain connectome with all neurons.
+    
+    This creates a sparse adjacency matrix for the entire MaleCNS v1.0
+    connectome (~130k-185k neurons depending on filtering).
+    
+    The default min-synapses=3 filter reduces the dataset from 150M to ~10M
+    connections while keeping biologically significant synapses, making it
+    memory-efficient (~4-8GB RAM during build, final file ~35 MB).
+    
+    For the complete unfiltered connectome, use --min-synapses 1 (requires
+    more memory and produces a larger file).
+    
+    Annotations are automatically saved alongside the connectome for
+    neuron type-based I/O selection at runtime.
+    """
+    from threedfly.connectome import ConnectomeLoader
+    
+    click.echo("=" * 70)
+    click.echo("Building Full MaleCNS Connectome")
+    click.echo("=" * 70)
+    click.echo(f"Data directory: {data_dir or 'data/connectome-raw'}")
+    click.echo(f"Output: {output}")
+    click.echo(f"Min synapses: {min_synapses}")
+    click.echo("=" * 70)
+    
+    try:
+        loader = ConnectomeLoader(data_dir=data_dir)
+        loader.load_annotations()
+        
+        loader.build_full_connectome(min_synapses=min_synapses)
+        loader.save_subgraph(Path(output))
+        
+        click.echo(f"\n✓ Full connectome saved to: {output}")
+        click.echo("\nYou can now use this with:")
+        click.echo(f"  threedfly run --subgraph {output}")
+        click.echo(f"  threedfly run-interactive --subgraph {output}")
+        click.echo(f"\nTo inspect neuron types:")
+        click.echo(f"  threedfly inspect-types {output}")
+    except Exception as e:
+        click.echo(f"Error building full connectome: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@main.command("inspect-types")
+@click.argument("subgraph_path", type=click.Path(exists=True))
+def inspect_types(subgraph_path):
+    """Inspect neuron types in a connectome subgraph.
+    
+    Shows breakdown of visual, descending, and central complex neurons
+    identified by type annotations. Useful for understanding the full-brain
+    connectome composition.
+    """
+    from threedfly.connectome import ConnectomeLoader, get_neuron_selection_summary
+    
+    try:
+        subgraph = ConnectomeLoader.load_subgraph(Path(subgraph_path))
+        
+        if subgraph.get("annotations") is None:
+            click.echo("✗ No annotations found in this subgraph.", err=True)
+            click.echo("Rebuild with: threedfly build-full", err=True)
+            sys.exit(1)
+        
+        annotations = subgraph["annotations"]
+        body_ids = subgraph["body_ids"]
+        body_id_to_idx = subgraph["body_id_to_idx"]
+        
+        selection = get_neuron_selection_summary(annotations, body_ids, body_id_to_idx)
+        
+        click.echo("\n" + "=" * 70)
+        click.echo("Neuron Type Summary")
+        click.echo("=" * 70)
+        
+        for category, subcategories in selection.items():
+            click.echo(f"\n{category.upper()}:")
+            for name, indices in subcategories.items():
+                pct = 100 * len(indices) / subgraph['n_neurons']
+                click.echo(f"  {name:25s}: {len(indices):7,} neurons ({pct:5.1f}%)")
+        
+        total_classified = sum(
+            len(indices) 
+            for subcats in selection.values() 
+            for name, indices in subcats.items() 
+            if not name.startswith("all_")
+        )
+        
+        click.echo("\n" + "=" * 70)
+        click.echo(f"Total classified: {total_classified:,} / {subgraph['n_neurons']:,} neurons ({100 * total_classified / subgraph['n_neurons']:.1f}%)")
+        click.echo("=" * 70)
+        
+    except Exception as e:
+        click.echo(f"Error inspecting types: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
 @main.command()
 @click.option(
     "--subgraph",
