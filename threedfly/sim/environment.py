@@ -235,73 +235,49 @@ class FlyEnvironment:
         
         return False
     
-    def recover_from_collision(self, recovery_distance: float = 0.3) -> None:
+    def recover_from_collision(self, recovery_distance: float = 0.15) -> None:
         """
-        Soft collision recovery: back off and reorient to continue flying.
+        Minimal soft collision recovery: small back-off as safety fallback.
+        
+        The primary avoidance mechanism is brain-mediated (looming → LPLC2/LC4 → DNs).
+        This recovery is a last-resort safety net to prevent simulation lockup.
         
         Args:
-            recovery_distance: Distance to back off from collision (meters)
+            recovery_distance: Small distance to back off (default 15cm, down from 30cm)
         """
         pos = self.get_fly_position()
-        vel = self.get_fly_velocity()
         
-        # Determine recovery direction - PURE horizontal repositioning only
-        # Always recover at fixed mid-height (1.4m) to avoid vertical bouncing
-        target_height = 1.4
+        # Minimal repositioning
+        recovery_offset = np.zeros(3)
         
         if pos[2] < 0.3:
-            # Ground: teleport to mid-height with horizontal randomization
-            recovery_offset = np.array([
-                np.random.uniform(-0.7, 0.7),
-                np.random.uniform(-0.7, 0.7),
-                target_height - pos[2]  # Move to target height
-            ])
+            # Ground: small upward nudge
+            recovery_offset[2] = 0.2
         elif pos[2] > 2.3:
-            # Ceiling: teleport to mid-height with horizontal randomization
-            recovery_offset = np.array([
-                np.random.uniform(-0.7, 0.7),
-                np.random.uniform(-0.7, 0.7),
-                target_height - pos[2]  # Move to target height
-            ])
+            # Ceiling: small downward nudge
+            recovery_offset[2] = -0.2
         elif self.data.ncon > 0:
-            # Wall collision: back off horizontally only, maintain height
+            # Wall: minimal back-off along contact normal
             contact = self.data.contact[0]
             contact_normal = contact.frame[:3]
-            # Use only horizontal component of normal
-            horizontal_normal = np.array([contact_normal[0], contact_normal[1], 0])
-            if np.linalg.norm(horizontal_normal) > 0.1:
-                horizontal_normal = horizontal_normal / np.linalg.norm(horizontal_normal)
-            recovery_offset = -horizontal_normal * recovery_distance
-            # Add large horizontal randomization
-            recovery_offset[0] += np.random.uniform(-0.6, 0.6)
-            recovery_offset[1] += np.random.uniform(-0.6, 0.6)
-            # Move toward target height
-            recovery_offset[2] = (target_height - pos[2]) * 0.5
-        else:
-            # Other: pure horizontal randomization at target height
-            recovery_offset = np.array([
-                np.random.uniform(-0.7, 0.7),
-                np.random.uniform(-0.7, 0.7),
-                target_height - pos[2]
-            ])
+            if np.linalg.norm(contact_normal) > 0.1:
+                contact_normal = contact_normal / np.linalg.norm(contact_normal)
+            recovery_offset = -contact_normal * recovery_distance
         
-        # Apply recovery position offset
+        # Apply recovery
         self.data.qpos[:3] = pos + recovery_offset
         
-        # Clamp position to valid room bounds, maintaining mid-height preference
-        self.data.qpos[0] = np.clip(self.data.qpos[0], -1.9, 1.9)  # x
-        self.data.qpos[1] = np.clip(self.data.qpos[1], -1.9, 1.9)  # y
-        self.data.qpos[2] = np.clip(self.data.qpos[2], 0.5, 2.2)   # z - allow some range but prefer mid
+        # Clamp to room bounds
+        self.data.qpos[0] = np.clip(self.data.qpos[0], -1.9, 1.9)
+        self.data.qpos[1] = np.clip(self.data.qpos[1], -1.9, 1.9)
+        self.data.qpos[2] = np.clip(self.data.qpos[2], 0.3, 2.2)
         
-        # Dampen velocity to avoid immediate re-collision
-        self.data.qvel[:3] *= 0.05  # More aggressive dampening
+        # Gentle velocity dampening (not aggressive)
+        self.data.qvel[:3] *= 0.3
         
-        # Randomize orientation - PERFECTLY HORIZONTAL heading
-        angle = np.random.uniform(0, 2 * np.pi)
-        # Zero pitch - perfectly horizontal
-        self.data.qpos[3:7] = [np.cos(angle/2), 0, 0, np.sin(angle/2)]  # Pure yaw rotation
+        # Keep orientation (no randomization)
         
-        # Forward simulation to update contacts
+        # Forward simulation
         mujoco.mj_forward(self.model, self.data)
     
     def close(self):
