@@ -15,7 +15,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 
 - **Brain**: Uses the MaleCNS v1.0 connectome (male *Drosophila* CNS, ~166,700 neurons) as the neural wiring diagram. **NEW**: Can now run with the full brain (~185k neurons with connections) using sparse matrix operations.
 - **Vision**: Dual cameras provide stereo views; **motion parallax and optic flow** (real fly depth cues) processed through connectome
-- **Motor**: Descending neuron activity maps to flight thrust and torques in a MuJoCo simulation
+- **Motor**: Descending neuron activity maps to **wing stroke amplitudes** (DNg02 L/R) and residual torques in a MuJoCo **flybody** fruit-fly model
 - **Depth Perception**: **Brain-based motion parallax** (primary) — optical flow + egomotion routed through connectome → spatial depth map at 12×16 resolution
     - **Comparison baseline**: Classical StereoBM stereo provides dense depth for validation
 - **Exploration**: Biases flight toward under-mapped regions using occupancy-based curiosity
@@ -35,16 +35,18 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 
 **What is engineered (hand-designed bridges):**
 - Image → neuron encoding:
-  - Luminance → R1-R6 photoreceptors (split by brain hemisphere)
+  - Hex-lattice luminance (~750 ommatidia/eye, ~5°) → R1-R6 photoreceptors (retinotopic assignment; MaleCNS tables here have no optic-lobe hex columns, so the lattice is synthetic)
   - Optic flow → T4a-d / T5a-d direction-selective neurons
   - Looming detection → LPLC2 + LC4 collision detectors
-- Tonic flight drive baseline with rest lift = body weight (DNg02 modulates around hover)
-- Body-frame thorax-site actuators, linear+quadratic aero drag (terminal ~0.5–1.5 m/s), haltere-like angular-rate damping, and a weak altitude-hold around 1.5 m
+  - Body angular velocity → annotated **haltere** afferents (search `haltere` in type/celltype/instance; if none, **engineered angular-rate damping** is the documented safety fallback — DNp is not reused)
+- Tonic flight drive baseline with rest lift = body weight (DNg02 L/R set left/right **wing stroke amplitude**; sum → lift, difference → yaw/roll)
+- flybody body (head/thorax/abdomen/wings/legs/halteres), 10× length / ~1000× mass scale into the 10 m room (see `THIRD_PARTY.md`), linear+quadratic aero drag (terminal ~0.5–1.5 m/s), **minimal** engineered haltere damping, and a weak altitude-hold around 1.5 m
+- Stroke-averaged quasi-steady wing force (visual 200 Hz flap only; not a blade-element 200 Hz sim)
 - 20 ms control ticks: each `env.step` runs 10 MuJoCo substeps (2 ms) so 1000 steps = 20 s of flight, aligned with the brain
 - Per-population visual-input normalisation and rate ceiling 50 Hz so DN readouts are not pinned
 - DN → motor readout:
   - DNp01 → escape (threshold event; brain-triggered count is logged separately from an engineered looming residual)
-  - DNg02 → thrust/altitude deviations around hover
+  - DNg02 L/R → left/right wing stroke amplitude (lift around hover; L−R yaw/roll)
   - DNa02 / DNg02 L−R → yaw (bilateral, zero-mean at rest; silent side drops the pair)
   - DNb → roll
 - Warm-up rest stats are median/MAD; convergence is a moving-window median vs spread
@@ -59,10 +61,10 @@ This is a connectome-structured simulator with engineered sensory encoding and m
 
 ## Features
 
-- **Realistic Fly Model**: Uses anatomically-detailed 3D meshes from the [flybody project](https://github.com/TuragaLab/flybody) (Google DeepMind & HHMI Janelia)
+- **Realistic Fly Model**: [flybody](https://github.com/TuragaLab/flybody) fruit-fly MJCF topology (Apache-2.0) — head, thorax, abdomen, wings, six retracted legs, halteres. Stroke-averaged wing lift; Viser shows the mesh with wing flapping synced to physics. Scaling and attribution: `THIRD_PARTY.md`.
 - **Biologically-Inspired Brain**: MaleCNS v1.0 connectome structure with ~166,700 neurons. **NEW**: Can run with full brain (~185k neurons with connections) using sparse matrices.
 - **Brain-Based Motion Parallax**: Depth via optic flow + egomotion routed through connectome (real Drosophila depth cue, 12×16 resolution)
-- **Stereo Vision**: Dual cameras (160×120) with classical StereoBM depth (dense comparison baseline) and ommatidial sampling
+- **Stereo Vision**: Dual cameras (160×120) with classical StereoBM depth (dense comparison baseline) and **hex-lattice ommatidial sampling (~750/eye)** feeding R1–R6
 - **Interactive 3D Visualization**: Real-time god's-eye view with orbit/pan/zoom controls
 - **Live Point Cloud Mapping**: Brain-estimated 3D map accumulates and renders in real-time on the same interactive web page
 - **Curiosity-Driven Exploration**: Biases flight toward under-mapped regions
@@ -80,7 +82,7 @@ graph TB
     
     subgraph Vision
         D[Stereo Vision<br/>Classical StereoBM]
-        E[Ommatidial Sampling<br/>~100 samples/eye]
+        E[Hex ommatidia<br/>~750 samples/eye]
         F[Brain Depth Estimator<br/>Neural Pathways → Depth]
         G[Point Cloud Mapper<br/>Voxel Occupancy]
     end
@@ -93,7 +95,7 @@ graph TB
     end
     
     subgraph Control
-        L[Flight Controller<br/>DN → Thrust/Torque]
+        L[Flight Controller<br/>DN → Wing strokes]
         M[Exploration Policy<br/>Curiosity Drive]
     end
     
@@ -494,7 +496,9 @@ threedfly/
 │   ├── brain_depth.py  # Brain-based depth estimation (primary)
 │   └── pointcloud.py   # 3D map accumulation, occupancy tracking
 ├── sim/                # MuJoCo physics simulation
-│   ├── mjcf.py         # MJCF (XML) model definitions
+│   ├── mjcf.py         # flybody-based MJCF (XML) model
+│   ├── wings.py        # Stroke-averaged quasi-steady wing force
+│   ├── scale.py        # Length/mass scaling notes
 │   └── environment.py  # Fly environment with stereo cameras
 ├── control/            # Flight control and exploration
 │   ├── controller.py   # Brain activity → motor commands
@@ -575,9 +579,10 @@ This mapping is **engineered, not biologically validated**. It provides plausibl
 **How the fly avoids obstacles:**
 
 1. **Visual features → Brain input**:
-   - Ommatidial intensity samples (left/right eyes, ~100 samples each)
+   - Hex-lattice ommatidial intensity samples (left/right eyes, ~750 samples each) mapped retinotopically onto R1–R6
    - **Looming/proximity signals** (8 directional sectors): Engineered visual features computed from stereo depth map, indicating obstacle proximity in each direction (forward, forward-left, left, back-left, back, back-right, right, forward-right)
-   - These 208 features (200 ommatidial + 8 looming) are concatenated and fed as input to the connectome
+   - Haltere drive from body angular velocity when afferents are annotated
+   - Legacy concat path still includes ommatidia + 8 looming + flow features
 
 2. **Brain processing**:
    - Input flows through the MaleCNS connectome subgraph (visual neurons → descending neurons)
@@ -713,7 +718,7 @@ And cite the MaleCNS connectome:
 
 ### 主要特点
 
-- **写实的果蝇模型**：使用来自 [flybody 项目](https://github.com/TuragaLab/flybody)（Google DeepMind & HHMI Janelia）的解剖学精确3D网格
+- **写实的果蝇模型**： [flybody](https://github.com/TuragaLab/flybody) 果蝇 MJCF 拓扑（Apache-2.0）——头、胸、腹、翅、收起的六足、平衡棒。拍幅平均升力；Viser 按物理同步展示网格与翅膀拍动。缩放与归属见 `THIRD_PARTY.md`。
 - 使用真实的雄性果蝇中枢神经系统连接组（MaleCNS v1.0，约16.67万个神经元）。**新功能**：现可使用完整大脑运行（约18.5万个有连接的神经元）通过稀疏矩阵操作。
 - **大脑驱动的运动视差深度感知**：使用光流+自我运动通过连接组处理（真实果蝇深度感知机制，12×16分辨率）
 - 双目视觉深度估计（经典StereoBM作为对比基准）和3D点云建图
@@ -792,16 +797,18 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
 
 **什么是工程化设计的（手工设计的桥接）：**
 - 图像 → 神经元编码：
-  - 亮度 → R1-R6 感光细胞（按脑半球分割）
+  - 六边形小眼阵列（每眼约 750 个、约 5°）→ R1-R6 感光细胞（视网膜拓扑；当前 MaleCNS 表无视叶 hex 列，故用合成晶格）
   - 光流 → T4a-d / T5a-d 方向选择性神经元
   - 逼近检测 → LPLC2 + LC4 碰撞检测器
-- 强直性飞行驱动：静息升力=体重（DNg02 在悬停点附近调制）
-- 胸部位姿点上的机体坐标系执行器、线+二次气动阻力（巡航约 0.5–1.5 m/s）、平衡棒式角速度阻尼、以及约 1.5 m 的弱高度保持（均为工程化）
+  - 机体角速度 → 注释中的 **平衡棒（haltere）** 传入（搜索 type/celltype/instance 含 `haltere`；若无则回退为物理中的**工程化角速度阻尼**，不用 DNp 顶替）
+- 强直性飞行驱动：静息升力=体重（DNg02 左/右设定左右**翅膀拍幅**；和→升力，差→偏航/滚转）
+- flybody 身体（头/胸/腹/翅/足/平衡棒），按 10× 长度 / 约 1000× 质量缩放到 10 m 房间（见 `THIRD_PARTY.md`）、线+二次气动阻力（巡航约 0.5–1.5 m/s）、**最小**工程化平衡棒阻尼、以及约 1.5 m 的弱高度保持
+- 拍幅平均的准定常翅膀力（视觉上 200 Hz 拍动；不是 200 Hz 叶片元仿真）
 - 20 ms 控制节拍：每步 10 个 2 ms 物理子步，1000 步 = 20 s 飞行，与脑时间对齐
 - 按群体归一化视觉输入、发放上限 50 Hz，避免 DN 读出顶死在上限
 - DN → 运动读取：
   - DNp01 → 逃逸（阈值事件；脑触发次数与工程化逼近残差分开统计）
-  - DNg02 → 推力/高度（相对悬停的偏差）
+  - DNg02 左/右 → 左右翅膀拍幅（悬停附近升力；左右差产生偏航/滚转）
   - DNa02 / DNg02 左右差 → 偏航（双侧、静息零均值；一侧静默则丢弃该对）
   - DNb → 滚转
 - 预热用中位数/MAD；收敛看滑动窗口中位数相对散布

@@ -489,3 +489,82 @@ def select_output_neurons_for_motor(
         "DNa02_R": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "R"),
     }
     return result
+
+
+# Columns that would carry MaleCNS optic-lobe hex / column coordinates if present.
+_HEX_COLUMN_CANDIDATES = (
+    ("hexX", "hexY"),
+    ("hex_x", "hex_y"),
+    ("column_x", "column_y"),
+    ("ommatidia_x", "ommatidia_y"),
+    ("retinotopy_x", "retinotopy_y"),
+)
+
+
+def find_optic_lobe_hex_columns(annotations: pd.DataFrame) -> Optional[tuple]:
+    """
+    Return (x_col, y_col) if annotations include optic-lobe hex coordinates.
+
+    MaleCNS v1.0 body-annotation tables used here do not include these fields;
+    callers should fall back to the synthetic hex lattice in `threedfly.vision.hex_eye`.
+    """
+    if annotations is None or len(annotations.columns) == 0:
+        return None
+    lower = {str(c).lower(): c for c in annotations.columns}
+    for x_name, y_name in _HEX_COLUMN_CANDIDATES:
+        if x_name.lower() in lower and y_name.lower() in lower:
+            return (lower[x_name.lower()], lower[y_name.lower()])
+    return None
+
+
+def select_haltere_afferent_neurons(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+) -> Dict[str, object]:
+    """
+    Map body angular velocity onto annotated haltere afferents.
+
+    Search order (logged):
+      1. type/celltype/instance containing "haltere"
+      2. If none, empty mapping — **fallback is engineered angular-rate damping**
+         in the physics step (`SAFETY_HALTERE_KD`). DNp cells are *not* used as
+         a silent substitute; that would contaminate the escape pathway.
+    """
+    valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
+    type_columns = ["type", "celltype", "instance", "class", "subclass"]
+    mask = pd.Series(False, index=valid_annotations.index)
+    for col in type_columns:
+        if col not in valid_annotations.columns:
+            continue
+        mask = mask | valid_annotations[col].astype(str).str.contains(
+            "haltere", case=False, na=False, regex=False
+        )
+    matching = valid_annotations.loc[mask]
+    left_mask = _get_side_mask(matching, "L") if len(matching) else matching.index
+    right_mask = _get_side_mask(matching, "R") if len(matching) else matching.index
+    left_ids = matching.loc[left_mask, "bodyId"].values if len(matching) else np.array([])
+    right_ids = matching.loc[right_mask, "bodyId"].values if len(matching) else np.array([])
+    # Unsided hits go to both pools so a type-only annotation still drives input.
+    if len(matching):
+        sided = np.concatenate([np.asarray(left_ids), np.asarray(right_ids)])
+        unsided = matching.loc[~matching["bodyId"].isin(sided), "bodyId"].values
+        if len(unsided):
+            left_ids = np.concatenate([left_ids, unsided])
+            right_ids = np.concatenate([right_ids, unsided])
+    left = _bodies_to_indices(left_ids, body_id_to_idx)
+    right = _bodies_to_indices(right_ids, body_id_to_idx)
+    all_idx = np.unique(np.concatenate([left, right]).astype(np.int32)) if (left.size + right.size) else np.array([], dtype=np.int32)
+    fallback = "engineered_damping" if all_idx.size == 0 else "annotation"
+    print(
+        f"Haltere afferents: L={left.size}, R={right.size}, all={all_idx.size} "
+        f"(search='haltere' in type/celltype/instance; fallback={fallback})"
+    )
+    return {
+        "left": left,
+        "right": right,
+        "all": all_idx,
+        "fallback": fallback,
+        "n_left": int(left.size),
+        "n_right": int(right.size),
+    }

@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from threedfly.sim.mjcf import get_fly_mjcf
+from threedfly.sim.wings import stroke_averaged_forces, visual_wing_angles
 
 # Engineered aero: linear+quadratic drag sized for ~1 m/s cruise, not a CFD model.
 DRAG_LINEAR = 0.008       # N·s/m
@@ -19,6 +20,14 @@ ALTITUDE_HOLD_KD = 0.012  # N·s/m
 ROOM_XY_LIMIT = 4.85
 ROOM_Z_MIN = 0.25
 ROOM_Z_MAX = 3.70
+# Visual-only wingbeat (stroke-averaged forces, not a 200 Hz aero sim).
+WINGBEAT_HZ = 200.0
+# Stroke-difference torques sized for the ~1.5 g, 2.5 cm scaled body.
+WING_YAW_GAIN = 8e-6      # N·m per unit (L−R) stroke
+WING_ROLL_GAIN = 3e-6     # N·m per unit (L−R) stroke
+# Minimal engineered angular-rate damping kept as a safety net. Primary
+# haltere path is the connectome mapping (see select_haltere_afferent_neurons).
+SAFETY_HALTERE_KD = 2e-6  # N·m / (rad/s)
 
 
 class FlyEnvironment:
@@ -65,18 +74,29 @@ class FlyEnvironment:
         # Control bounds in SI units (gainprm=1). Max lift ~3x body weight (~0.016 N).
         self.thrust_max = 0.05
         self.torque_max = 5e-6
-        # Engineered haltere-like angular-rate damping (not connectome-derived).
-        self.haltere_kd = 2e-6
+        self.lift_max = self.thrust_max  # peak combined wing lift; hover = weight/lift_max
+        # Minimal engineered damping (safety). Brain haltere afferents are the primary path.
+        self.haltere_kd = SAFETY_HALTERE_KD
         self.drag_linear = DRAG_LINEAR
         self.drag_quadratic = DRAG_QUADRATIC
         self.hover_z = HOVER_Z
         self.altitude_hold_kp = ALTITUDE_HOLD_KP
         self.altitude_hold_kd = ALTITUDE_HOLD_KD
+        self.wing_yaw_gain = WING_YAW_GAIN
+        self.wing_roll_gain = WING_ROLL_GAIN
         
         self._fly_body_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "fly"
         )
         self._fly_geom_ids = self._collect_fly_geom_ids()
+        self._wing_left_jnt = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_JOINT, "wing_left_stroke"
+        )
+        self._wing_right_jnt = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_JOINT, "wing_right_stroke"
+        )
+        self._wing_left_qposadr = int(self.model.jnt_qposadr[self._wing_left_jnt])
+        self._wing_right_qposadr = int(self.model.jnt_qposadr[self._wing_right_jnt])
         # Align physics with the 20 ms brain/control tick (MuJoCo dt = 2 ms → 10 substeps).
         self.control_dt = 0.02
         self.n_substeps = max(1, int(round(self.control_dt / float(self.model.opt.timestep))))
@@ -84,6 +104,9 @@ class FlyEnvironment:
         # State tracking
         self.time = 0.0
         self.step_count = 0
+        self._wing_phase = 0.0
+        self.last_wing_strokes = np.array([0.0, 0.0], dtype=np.float64)
+        self.last_wing_angles = np.array([0.0, 0.0], dtype=np.float64)
 
     def _collect_fly_geom_ids(self) -> set:
         """Geoms whose body is the fly or a descendant of the fly body."""
@@ -136,34 +159,66 @@ class FlyEnvironment:
         
         self.time = 0.0
         self.step_count = 0
+        self._wing_phase = 0.0
         
         return self.get_eye_images()
     
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    def step(
+        self,
+        action: np.ndarray,
+        wing_strokes: Optional[Tuple[float, float]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """
         Step simulation.
         
         Args:
             action: [thrust_forward, thrust_up, torque_roll, torque_pitch, torque_yaw]
+            wing_strokes: Optional (left, right) stroke amplitudes in [0, 1].
+                When omitted, strokes are derived from thrust_up and yaw so the
+                legacy 5-vector API still flies.
         
         Returns:
             (left_eye_image, right_eye_image, info_dict)
         """
         # Clip and apply control for n_substeps so one control tick = 20 ms of physics.
-        action = np.clip(action, -1.0, 1.0)
+        action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+        if wing_strokes is None:
+            mean = float(np.clip(action[1], 0.0, 1.0))
+            diff = float(np.clip(action[4], -1.0, 1.0))
+            stroke_l = float(np.clip(mean + 0.5 * diff, 0.0, 1.0))
+            stroke_r = float(np.clip(mean - 0.5 * diff, 0.0, 1.0))
+        else:
+            stroke_l = float(np.clip(wing_strokes[0], 0.0, 1.0))
+            stroke_r = float(np.clip(wing_strokes[1], 0.0, 1.0))
+        self.last_wing_strokes = np.array([stroke_l, stroke_r], dtype=np.float64)
+
         for _ in range(self.n_substeps):
-            self.data.ctrl[0] = action[0] * self.thrust_max  # forward thrust (N)
-            self.data.ctrl[1] = action[1] * self.thrust_max  # upward thrust (N)
-            self.data.ctrl[2] = action[2] * self.torque_max  # roll (N·m)
-            self.data.ctrl[3] = action[3] * self.torque_max  # pitch (N·m)
-            self.data.ctrl[4] = action[4] * self.torque_max  # yaw (N·m)
-            
-            # Haltere-like attitude stabilisation: damp angular rate in body frame.
+            # Actuators are kept in the MJCF for tests/API; forces are applied below.
+            self.data.ctrl[:] = 0.0
+            self.data.xfrc_applied[:] = 0.0
+            self.data.qfrc_applied[:] = 0.0
+
+            wing_force_body, wing_torque_body = stroke_averaged_forces(
+                stroke_l,
+                stroke_r,
+                lift_max=self.lift_max,
+                yaw_gain=self.wing_yaw_gain,
+                roll_gain=self.wing_roll_gain,
+            )
+            # Forward thrust and residual DN torques stay in the body frame.
+            wing_force_body[0] += float(action[0]) * self.thrust_max
+            wing_torque_body[0] += float(action[2]) * self.torque_max
+            wing_torque_body[1] += float(action[3]) * self.torque_max
+            wing_torque_body[2] += float(action[4]) * self.torque_max
+
+            rot = self._quat_to_rotation_matrix(self.get_fly_orientation())
+            force = rot @ wing_force_body
+            torque = rot @ wing_torque_body
+
+            # Haltere-like safety damping on body angular rate (engineered residual).
             angvel = self.data.qvel[3:6]
-            self.data.ctrl[2] -= self.haltere_kd * angvel[0]
-            self.data.ctrl[3] -= self.haltere_kd * angvel[1]
-            self.data.ctrl[4] -= self.haltere_kd * angvel[2]
-            
+            torque = torque - rot @ (self.haltere_kd * np.asarray(angvel, dtype=np.float64))
+
             # Aerodynamic drag F = -b v - c |v| v, plus a weak engineered altitude hold.
             vel = self.data.qvel[:3]
             speed = float(np.linalg.norm(vel))
@@ -172,11 +227,9 @@ class FlyEnvironment:
                 drag = drag - self.drag_quadratic * speed * vel
             z_err = self.hover_z - float(self.data.qpos[2])
             alt = self.altitude_hold_kp * z_err - self.altitude_hold_kd * float(vel[2])
-            force = np.array([drag[0], drag[1], drag[2] + alt], dtype=np.float64)
-            torque = np.zeros(3, dtype=np.float64)
+            force = force + np.array([drag[0], drag[1], drag[2] + alt], dtype=np.float64)
+
             point = self.data.subtree_com[self._fly_body_id].copy()
-            self.data.xfrc_applied[:] = 0.0
-            self.data.qfrc_applied[:] = 0.0
             mujoco.mj_applyFT(
                 self.model,
                 self.data,
@@ -187,7 +240,8 @@ class FlyEnvironment:
                 self.data.qfrc_applied,
             )
             mujoco.mj_step(self.model, self.data)
-        
+            self._animate_wings(stroke_l, stroke_r)
+
         self.time = self.data.time
         self.step_count += 1
         
@@ -199,9 +253,21 @@ class FlyEnvironment:
             "position": self.get_fly_position(),
             "velocity": self.get_fly_velocity(),
             "orientation": self.get_fly_orientation(),
+            "wing_strokes": self.last_wing_strokes.copy(),
+            "wing_angles": self.last_wing_angles.copy(),
         }
         
         return left_img, right_img, info
+
+    def _animate_wings(self, stroke_l: float, stroke_r: float) -> None:
+        """Overwrite wing-hinge qpos with a visual 200 Hz flap (not simulated aero)."""
+        dt = float(self.model.opt.timestep)
+        self._wing_phase += 2.0 * np.pi * WINGBEAT_HZ * dt
+        left_ang, right_ang = visual_wing_angles(self._wing_phase, stroke_l, stroke_r)
+        self.data.qpos[self._wing_left_qposadr] = left_ang
+        self.data.qpos[self._wing_right_qposadr] = right_ang
+        self.last_wing_angles = np.array([left_ang, right_ang], dtype=np.float64)
+        mujoco.mj_forward(self.model, self.data)
     
     def get_eye_images(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -236,6 +302,20 @@ class FlyEnvironment:
     def get_fly_orientation(self) -> np.ndarray:
         """Get fly orientation quaternion (w, x, y, z)."""
         return self.data.qpos[3:7].copy()
+
+    def get_fly_angular_velocity(self) -> np.ndarray:
+        """Body-frame angular velocity (rad/s) from the freejoint."""
+        return self.data.qvel[3:6].copy()
+
+    def get_wing_angles(self) -> np.ndarray:
+        """Current visual wing hinge angles (left, right) in radians."""
+        return np.array(
+            [
+                float(self.data.qpos[self._wing_left_qposadr]),
+                float(self.data.qpos[self._wing_right_qposadr]),
+            ],
+            dtype=np.float64,
+        )
     
     def get_camera_poses(self) -> Tuple[np.ndarray, np.ndarray]:
         """

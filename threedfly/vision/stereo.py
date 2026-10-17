@@ -4,6 +4,12 @@ import numpy as np
 import cv2
 from typing import Tuple, Optional
 
+from threedfly.vision.hex_eye import (
+    N_OMMATIDIA_PER_EYE,
+    hex_lattice_uv,
+    sample_image_hex,
+)
+
 
 class StereoVision:
     """
@@ -47,8 +53,9 @@ class StereoVision:
         self.stereo.setSpeckleWindowSize(100)
         self.stereo.setSpeckleRange(32)
         
-        # For ommatidial-like sampling
-        self.n_ommatidia = 100  # Simplified fly eye model
+        # Hex-lattice ommatidial sampling (~750/eye, ~5 deg). Replaces the old 10×10 grid.
+        self.n_ommatidia = N_OMMATIDIA_PER_EYE
+        self.ommatidia_uv = hex_lattice_uv(n_ommatidia=self.n_ommatidia)
         
     def estimate_depth(
         self,
@@ -120,21 +127,7 @@ class StereoVision:
         else:
             gray = image
         
-        # Grid sampling
-        h, w = gray.shape
-        n_rows = int(np.sqrt(self.n_ommatidia))
-        n_cols = n_rows
-        
-        samples = []
-        for i in range(n_rows):
-            for j in range(n_cols):
-                y = int((i + 0.5) * h / n_rows)
-                x = int((j + 0.5) * w / n_cols)
-                samples.append(gray[y, x])
-        
-        samples = np.array(samples[:self.n_ommatidia], dtype=np.float32) / 255.0
-        
-        return samples
+        return sample_image_hex(gray, self.ommatidia_uv)
     
     def compute_looming_features(
         self,
@@ -264,6 +257,7 @@ class StereoVision:
         return {
             "left_ommatidia": left_samples,
             "right_ommatidia": right_samples,
+            "ommatidia_uv": self.ommatidia_uv,
             "looming_features": looming,
             "depth_estimate": mean_depth,
             "depth_map": depth_map,

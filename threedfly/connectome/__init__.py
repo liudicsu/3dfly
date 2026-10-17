@@ -20,6 +20,8 @@ from threedfly.connectome.neuron_selection import (
     get_neuron_transmitters,
     transmitter_to_sign,
     build_transmitter_sign_vector,
+    select_haltere_afferent_neurons,
+    find_optic_lobe_hex_columns,
 )
 
 __all__ = [
@@ -40,4 +42,6 @@ __all__ = [
     "get_neuron_transmitters",
     "transmitter_to_sign",
     "build_transmitter_sign_vector",
+    "select_haltere_afferent_neurons",
+    "find_optic_lobe_hex_columns",
 ]
