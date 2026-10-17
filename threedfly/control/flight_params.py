@@ -41,20 +41,29 @@ class FlightParams:
     # --- Giant fiber / escape (DNp01) ---
     dnp01_loom_hz: float = M1_DNP01_LOOM_IPSI_HZ
     dnp01_rot_hz: float = M1_DNP01_ROT_MAX_HZ
-    # Frozen rest; 0.55 sits above rotation (0.33) and below a 0.7 Hz slow loom.
-    dnp01_escape_delta_hz: float = 0.55
-    # Re-arm only after rise falls below this (rising-edge). A frozen rest +
-    # pinned wall otherwise keeps rise ≥ 0.55 and fires every cooldown.
+    # Checkered-object looms peak ~0.68 Hz (L) / ~0.84 Hz (R). Open
+    # wander tops out ~0.28 Hz. 0.30 sits in that gap; slope rejects
+    # the slow open climb if it grazes the threshold.
+    dnp01_escape_delta_hz: float = 0.30
+    # Re-arm only after rise falls below this (rising-edge).
     dnp01_rearm_delta_hz: float = 0.20
-    dnp01_rest_tau_steps: float = 400.0  # unused while freeze_rest is True
+    # Genuine close is steep (≈0.016–0.025 Hz/step). Open wander is ≈0.009.
+    dnp01_slope_min: float = 0.012
+    # Slow rest: eats the 16-step settle climb, keeps a 1 s compact loom.
+    dnp01_rest_tau_steps: float = 100.0
     dnp01_freeze_rest: bool = True
     dnp01_warmup_steps: int = 40
-    # Self-generated takeoff / yaw optic flow raises DNp01 ~0.6 Hz in ~3 steps
-    # and fires before a side wall has a laterality. Wait out that transient.
-    dnp01_post_baseline_steps: int = 16
+    # After a settled prewarm this only skips takeoff optic-flow (a few steps).
+    dnp01_post_baseline_steps: int = 8
     dnp01_escape_hold_steps: int = 3
+    # Closed-loop (baseline set): DNp01 rise alone is not a loom. Require
+    # DNp03/LC4/LPLC laterality so the flyvis settle climb cannot fire.
+    dnp01_loom_lat_min: float = 0.15
     dnp01_escape_hz: float = M1_DNP01_LOOM_IPSI_HZ
     escape_duration_steps: int = 8
+    # One loom = one burst. Short cooldown allowed a second fire that
+    # wrecked side-R direction after the object had already passed.
+    escape_cooldown_extra: int = 200
     escape_pitch: float = 0.45
     escape_forward: float = 0.30
     escape_up: float = 0.20
@@ -67,15 +76,18 @@ class FlightParams:
     yaw_stroke_gain: float = 0.45
 
     # --- Looming dodge (DNp03 + optic-lobe VPNs) ---
-    dnp03_yaw_gain: float = 0.90
+    dnp03_yaw_gain: float = 1.15
+    # Frontal / bilateral loom: slow and pitch (no laterality to yaw away).
+    loom_brake_gain: float = 0.50
+    loom_brake_scale_hz: float = 0.25
+    loom_pitch_gain: float = 0.0
     dnp03_scale_hz: float = 0.50
     dnp03_deadzone_hz: float = 0.04
-    # LPLC2 / LPLC1 / LC4 RateCore L−R (raw: centering at a wall zeroes
-    # the wall-driven LC4 DC). Brain laterality, not a pixel reflex.
+    # LPLC2 / LPLC1 / LC4 are ipsilateral looming VPNs (hex-swap / L-only).
+    # Use baseline-subtracted L−R, not a contralateral wall-DC hack.
     lplc2_threat_gain: float = 0.45
     lplc1_threat_gain: float = 0.20
-    # LC4 L−R on textured walls is contralateral and larger than DNp03 DC.
-    lc4_threat_gain: float = 1.20
+    lc4_threat_gain: float = 0.80
     # Opt-in Python eye-mean reflex (OFF). Same class of shortcut as
     # use_engineered_looming_residual — not the official path.
     use_engineered_eye_laterality: bool = False
@@ -110,9 +122,12 @@ class FlightParams:
 
     # --- Closed-loop timing ---
     prewarm_steps: int = 80
-    # Side-loom onset: short settle so closing is a rise, not the DC peak.
-    side_loom_prewarm_steps: int = 16
-    flyvis_stride: int = 2  # hold last flyvis voltages on odd sim steps
+    # One prewarm for every scenario (settle DNp01; no short side-loom path).
+    side_loom_prewarm_steps: int = 80
+    prewarm_max_steps: int = 140
+    prewarm_settle_std: float = 0.02
+    prewarm_peak_drop_hz: float = 0.12
+    flyvis_stride: int = 3  # hold last flyvis voltages; box target ≪ 25 ms
     flyvis_torch_threads: int = 2
 
     # --- Dynamics ---
@@ -123,13 +138,13 @@ class FlightParams:
 
     notes: Dict[str, str] = field(default_factory=lambda: {
         "escape": (
-            "DNp01 rising-edge ≥ 0.55 Hz over frozen rest; side-loom uses a "
-            "16-step prewarm so closing is a rise (80-step settle eats it); residual off"
+            "DNp01 rise ≥ 0.30 Hz over frozen post-settle rest AND slope "
+            "≥ 0.012 Hz/step AND DNp03/LC4 laterality; one ≥80-step "
+            "past-peak prewarm for every scenario"
         ),
         "dnp03": (
-            "DNp03 ipsilateral + LC4/LPLC contralateral L−R (textured-wall "
-            "RateCore sign) → contralateral turn; high-contrast wall checkers; "
-            "30° outward / 120° FOV"
+            "DNp03 + LC4/LPLC ipsilateral L−R after per-side baseline → "
+            "contralateral turn; compact dark loom object, not wall-drift"
         ),
         "dng02": "mean(L,R) amplitude; NO L−R yaw",
         "yaw_actuator": (

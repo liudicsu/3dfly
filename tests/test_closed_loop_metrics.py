@@ -115,4 +115,14 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     open_p = mod.open_space_pose()
     assert open_p["yaw"] == pytest.approx(0.0)
     assert open_p["max_steps"] >= 300
-    assert open_p["pose"][0] < -1.0 and abs(open_p["pose"][1]) < 0.1
+    assert open_p["pose"][0] < -2.5 and abs(open_p["pose"][1]) < 0.1
+    assert open_p["vel"][0] >= 0.35
+    head = mod.headon_wall_pose()
+    assert head["pose"][0] > 1.5 and abs(head["pose"][1]) < 0.1
+    assert head["vel"][0] > 0.3
+    loom_l = mod.lateral_loom_object("L")
+    loom_r = mod.lateral_loom_object("R")
+    assert loom_l["loom_start"][1] > 1.5
+    assert loom_r["loom_start"][1] < -1.5
+    assert loom_l["loom_vel"][1] < -0.5
+    assert loom_r["loom_vel"][1] > 0.5

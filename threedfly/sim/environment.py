@@ -64,6 +64,13 @@ class FlyEnvironment:
         # Camera IDs
         self.left_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_eye")
         self.right_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_eye")
+        self._loom_mocap = -1
+        try:
+            loom_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "loom_target")
+            if loom_bid >= 0:
+                self._loom_mocap = int(self.model.body_mocapid[loom_bid])
+        except Exception:
+            self._loom_mocap = -1
         
         # Renderer for cameras
         if render_mode is not None:
@@ -156,6 +163,7 @@ class FlyEnvironment:
         self.data.qpos[3:7] = [np.cos(angle/2), 0, 0, np.sin(angle/2)]  # quaternion
         
         mujoco.mj_forward(self.model, self.data)
+        self.hide_loom_object()
         
         self.time = 0.0
         self.step_count = 0
@@ -177,7 +185,17 @@ class FlyEnvironment:
         if vel is not None:
             self.data.qvel[0:3] = np.asarray(vel, dtype=np.float64).reshape(3)
         mujoco.mj_forward(self.model, self.data)
-    
+
+    def set_loom_object(self, xyz) -> None:
+        """Place the compact dark loom mocap (metres). Hidden at z=−8 by default."""
+        if self._loom_mocap < 0:
+            return
+        self.data.mocap_pos[self._loom_mocap] = np.asarray(xyz, dtype=np.float64).reshape(3)
+        mujoco.mj_forward(self.model, self.data)
+
+    def hide_loom_object(self) -> None:
+        self.set_loom_object((0.0, 0.0, -8.0))
+
     def step(
         self,
         action: np.ndarray,

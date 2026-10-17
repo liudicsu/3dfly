@@ -25,20 +25,26 @@ FLY_MJCF = """
   <compiler angle="radian" coordinate="local" meshdir="{meshdir}"/>
   
   <option timestep="0.002" gravity="0 0 -9.81"/>
+  <visual>
+    <headlight ambient="0.55 0.55 0.55" diffuse="0.85 0.85 0.85" specular="0.1 0.1 0.1"/>
+  </visual>
   
   <asset>
     <texture name="grid" type="2d" builtin="checker" width="512" height="512" 
-             rgb1="0.08 0.08 0.10" rgb2="0.75 0.72 0.65"/>
+             rgb1="0.28 0.28 0.30" rgb2="0.88 0.86 0.80"/>
     <material name="grid_mat" texture="grid" texrepeat="16 16" reflectance="0.08"/>
     
     <!-- High-contrast ~20 cm checkers: LPLC2/LC4/DNp03 need expanding
          edges, not a flat beige field. texrepeat on a 10 m × 4 m face. -->
     <texture name="wall_check" type="2d" builtin="checker" width="256" height="256"
-             rgb1="0.02 0.02 0.04" rgb2="0.95 0.93 0.88"/>
+             rgb1="0.08 0.08 0.10" rgb2="0.96 0.94 0.90"/>
     <material name="wall_mat" texture="wall_check" texrepeat="48 20" reflectance="0.04"/>
     <texture name="obs_check" type="2d" builtin="checker" width="128" height="128"
              rgb1="0.05 0.04 0.04" rgb2="0.85 0.25 0.18"/>
     <material name="obs_mat" texture="obs_check" texrepeat="6 6" reflectance="0.04"/>
+    <texture name="loom_check" type="2d" builtin="checker" width="128" height="128"
+             rgb1="0.00 0.00 0.00" rgb2="0.92 0.90 0.84"/>
+    <material name="loom_mat" texture="loom_check" texrepeat="8 8" reflectance="0.0"/>
     
     <!-- flybody mesh assets (Apache-2.0). Scale: millimetres × 0.01 → metres (10× life-size). -->
     <mesh name="thorax_mesh" file="thorax_body.obj" scale=""" + f'"{_S}"' + """/>
@@ -83,8 +89,16 @@ FLY_MJCF = """
     <body name="obstacle_2" pos="-2 -2 0.3">
       <geom type="cylinder" size="0.2 0.3" material="obs_mat"/>
     </body>
+    <body name="sky" pos="0 0 4.2">
+      <geom type="box" size="6 6 0.05" rgba="0.70 0.80 0.92 1" contype="0" conaffinity="0"/>
+    </body>
     <body name="obstacle_3" pos="-1 3 0.4">
       <geom type="sphere" size="0.4" material="obs_mat"/>
+    </body>
+    <!-- Compact dark loom (mocap). Hidden at z=−8 until a scenario moves it. -->
+    <body name="loom_target" mocap="true" pos="0 0 -8">
+      <geom name="loom_geom" type="sphere" size="0.85" material="loom_mat"
+            rgba="0.02 0.02 0.03 1" contype="0" conaffinity="0"/>
     </body>
     
     <!-- Fruit fly: flybody topology (head / thorax / abdomen / wings / legs / halteres).

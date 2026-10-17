@@ -33,6 +33,10 @@ def _mean_dns(brain: ClosedLoopBrain, hex_L, hex_R, n: int = 8):
         "hse_R": float(ro.hse_R),
         "dnp01_L": float(ro.dnp01_L),
         "dnp01_R": float(ro.dnp01_R),
+        "lc4_L": float(ro.lc4_L),
+        "lc4_R": float(ro.lc4_R),
+        "lplc2_L": float(ro.lplc2_L),
+        "lplc2_R": float(ro.lplc2_R),
     }
 
 
@@ -88,9 +92,11 @@ def test_hex_swap_mirrors_dn_outputs():
     d02_a = a["dna02_L"] - a["dna02_R"]
     d02_b = b["dna02_L"] - b["dna02_R"]
     assert d02_a * d02_b < 0, f"DNa02 L−R did not flip: A={a} B={b}"
-    # Left-eye loom should prefer DNp03_L (ipsi).
+    # Left-eye loom should prefer DNp03_L (ipsi) and LC4_L.
     assert a["dnp03_L"] > a["dnp03_R"], f"left-eye loom should raise DNp03_L: {a}"
     assert b["dnp03_R"] > b["dnp03_L"], f"right-eye loom should raise DNp03_R: {b}"
+    assert a["lc4_L"] > a["lc4_R"], f"left-eye loom should raise LC4_L: {a}"
+    assert b["lc4_R"] > b["lc4_L"], f"right-eye loom should raise LC4_R: {b}"
 
 
 @needs_stack
@@ -112,33 +118,42 @@ def test_lateral_approaches_turn_away_from_threat():
     _spec = importlib.util.spec_from_file_location("cla_laterality", _acc)
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
-    lateral_loom_pose = _mod.lateral_loom_pose
-
-    params = FlightParams(prewarm_steps=12, flyvis_stride=2, flyvis_torch_threads=2)
+    params = FlightParams(flyvis_stride=3, flyvis_torch_threads=2)
     brain = ClosedLoopBrain.build(params=params, quick=True)
     env = FlyEnvironment(render_mode="rgb_array", camera_width=80, camera_height=60)
     ctl = DNFlightController(params)
+    lateral_loom_object = _mod.lateral_loom_object
 
     def _approach(side: str):
-        pose = lateral_loom_pose(side)
+        spec = lateral_loom_object(side)
         env.reset(seed=0)
-        env.set_pose(pose["pose"], yaw=pose["yaw"], vel=pose["vel"])
+        env.set_pose(spec["pose"], yaw=spec["yaw"], vel=spec["vel"])
+        env.hide_loom_object()
         brain.reset()
         ctl.reset()
         ctl.bind_hover(env.hover_action)
         left, right = env.get_eye_images()
-        n_pre = int(params.side_loom_prewarm_steps)
-        warmed = brain.prewarm(left, right, env.get_fly_angular_velocity(), n=n_pre)
+        warmed = brain.prewarm(left, right, env.get_fly_angular_velocity(), n=params.prewarm_steps)
         if warmed is not None:
             ctl.capture_baseline(warmed.readout)
+        env.set_loom_object(spec["loom_start"])
         heads = []
+        loom_pos = np.asarray(spec["loom_start"], dtype=float)
+        loom_v = np.asarray(spec["loom_vel"], dtype=float)
+        brain.params.flyvis_stride = 1
         for _ in range(160):
+            loom_pos = loom_pos + loom_v * float(env.control_dt)
+            if loom_pos[0] < -0.4:
+                env.hide_loom_object()
+            else:
+                env.set_loom_object(loom_pos)
             res = brain.step(left, right, env.get_fly_angular_velocity())
             act = ctl.compute(res.readout)
             left, right, info = env.step(act, wing_strokes=ctl.last_wing_strokes)
             heads.append(heading_from_quaternion(info["orientation"]))
             if env.check_collision():
                 env.recover_from_collision()
+        brain.params.flyvis_stride = int(params.flyvis_stride)
         return heads, list(ctl.escape_events)
 
     for side in ("L", "R"):

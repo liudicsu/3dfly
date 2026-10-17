@@ -77,3 +77,8 @@ def stereo_to_hex(
     uv_r = np.asarray(uv, dtype=np.float32).copy()
     uv_r[:, 1] = 1.0 - uv_r[:, 1]
     return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv_r)
+
+
+def mirror_stereo_images(left_img: np.ndarray, right_img: np.ndarray):
+    """Mirror the scene: swap eyes and flip each image left–right."""
+    return np.fliplr(np.asarray(right_img)), np.fliplr(np.asarray(left_img))

@@ -63,6 +63,32 @@ def test_walls_use_high_contrast_checker():
     assert 'texrepeat="48 20"' in xml
     # Flat beige rgba must not wash out the texture on the room walls.
     assert "rgba=\"0.8 0.8 0.9 1\"" not in xml
+    assert 'name="loom_target"' in xml
+    assert 'mocap="true"' in xml
+    # Expanding-edge loom: black/light checkers, not a near-black blob.
+    assert 'rgb2="0.92 0.90 0.84"' in xml or "0.92 0.90 0.84" in xml
+
+
+def test_mirror_stereo_images_swaps_and_flips():
+    from threedfly.brain.eyes import mirror_stereo_images, stereo_to_hex
+
+    left = np.zeros((8, 8, 3), dtype=np.uint8)
+    right = np.zeros((8, 8, 3), dtype=np.uint8)
+    left[:, :3] = 200
+    right[:, 5:] = 80
+    mL, mR = mirror_stereo_images(left, right)
+    assert mL[0, 0, 0] == 80
+    assert mR[0, -1, 0] == 200
+    # Swap-and-flip must move a left-eye blob onto the right hex lattice.
+    # (Right-eye V-flip is a vertical remap only; energy still changes eye.)
+    h, w = 64, 64
+    blob_L = np.zeros((h, w, 3), dtype=np.uint8)
+    blob_L[:, : w // 4] = 255
+    gray = np.full((h, w, 3), 32, dtype=np.uint8)
+    hL, hR = stereo_to_hex(blob_L, gray)
+    mhL, mhR = stereo_to_hex(*mirror_stereo_images(blob_L, gray))
+    assert float(hL.mean()) > float(hR.mean()) + 0.05
+    assert float(mhR.mean()) > float(mhL.mean()) + 0.05
 
 
 def test_hex_fovy_matches_camera():

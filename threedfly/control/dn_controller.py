@@ -60,6 +60,8 @@ class DNFlightController:
         self._baseline_step: Optional[int] = None
         self._rise_hold = 0
         self._approach_threat = ""
+        self._d01_hist: List[float] = []
+        self._steep_climb = False
         self.last_yaw_terms: Dict[str, float] = {}
 
     def bind_hover(self, hover_action: float) -> None:
@@ -86,6 +88,8 @@ class DNFlightController:
         self._baseline_step = None
         self._rise_hold = 0
         self._approach_threat = ""
+        self._d01_hist = []
+        self._steep_climb = False
         self.last_yaw_terms = {}
 
     def capture_baseline(self, readout: DNReadout, dnp01_rest: Optional[float] = None) -> None:
@@ -100,6 +104,8 @@ class DNFlightController:
         self._rise_hold = 0
         self._escape_armed = True
         self._approach_threat = ""
+        self._d01_hist = []
+        self._steep_climb = False
         if self.params.use_engineered_eye_laterality:
             eye = float(readout.eye_L) - float(readout.eye_R)
             if abs(eye) >= float(self.params.eye_threat_min):
@@ -177,23 +183,19 @@ class DNFlightController:
         return float(-p.eye_yaw_gain * _tanh(self._raw_eye_lr() / max(p.eye_scale, 1e-6)))
 
     def _loom_lr(self, ro: DNReadout) -> tuple[float, float]:
-        """(DNp03 L−R, VPN laterality). Positive = left-side loom.
+        """(DNp03 L−R, VPN L−R). Positive = left-side (ipsilateral) loom.
 
-        DNp03 is ipsilateral (M1 hex-swap). On textured walls LC4/LPLC2
-        L−R is *contralateral* (left wall raises LC4_R), so VPN enters
-        as (R−L). Both terms are RateCore rates, not pixels.
+        Hex-swap and single-eye movies: LC4/LPLC2/DNp03 are ipsilateral.
+        ``ro`` is already baseline-subtracted so residual DC does not steer.
         """
         p = self.params
         left = max(0.0, float(ro.dnp03_L) - p.dnp03_deadzone_hz)
         right = max(0.0, float(ro.dnp03_R) - p.dnp03_deadzone_hz)
         d03 = left - right
-        # VPN side is an absolute RateCore laterality. Subtracting the
-        # prewarm snapshot zeroes the wall-driven LC4 L−R (the signal).
-        raw = self._last_readout
         vpn = (
-            float(p.lplc2_threat_gain) * (float(raw.lplc2_R) - float(raw.lplc2_L))
-            + float(p.lplc1_threat_gain) * (float(raw.lplc1_R) - float(raw.lplc1_L))
-            + float(p.lc4_threat_gain) * (float(raw.lc4_R) - float(raw.lc4_L))
+            float(p.lplc2_threat_gain) * (float(ro.lplc2_L) - float(ro.lplc2_R))
+            + float(p.lplc1_threat_gain) * (float(ro.lplc1_L) - float(ro.lplc1_R))
+            + float(p.lc4_threat_gain) * (float(ro.lc4_L) - float(ro.lc4_R))
         )
         return float(d03), float(vpn)
 
@@ -263,6 +265,9 @@ class DNFlightController:
 
         if self.dnp01_rest is not None:
             rise = dnp01_raw - float(self.dnp01_rest)
+            if (not p.dnp01_freeze_rest) and self.escape_timer <= 0:
+                tau = max(float(p.dnp01_rest_tau_steps), 1.0)
+                self.dnp01_rest += (dnp01_raw - float(self.dnp01_rest)) / tau
         elif self._base is not None:
             rise = max(float(ro.dnp01_L), float(ro.dnp01_R))
             self.dnp01_rest = dnp01_raw
@@ -270,10 +275,21 @@ class DNFlightController:
         else:
             rise = self._update_rest(dnp01_raw)
         self.last_rise = float(rise)
-
+        self._d01_hist.append(float(dnp01_raw))
+        if len(self._d01_hist) > 8:
+            self._d01_hist.pop(0)
+        if len(self._d01_hist) >= 5:
+            slope = (self._d01_hist[-1] - self._d01_hist[-5]) / 4.0
+        elif len(self._d01_hist) >= 2:
+            slope = self._d01_hist[-1] - self._d01_hist[-2]
+        else:
+            slope = float(rise)
+        if slope >= float(getattr(p, "dnp01_slope_min", 0.0)):
+            self._steep_climb = True
         if rise < float(p.dnp01_rearm_delta_hz):
             self._escape_armed = True
             self._rise_hold = 0
+            self._steep_climb = False
         if rise >= p.dnp01_escape_delta_hz:
             self._rise_hold += 1
         else:
@@ -286,10 +302,15 @@ class DNFlightController:
             if self._baseline_step is not None:
                 post_base = (self.steps - self._baseline_step) >= delay
             hold_ok = self._rise_hold >= int(p.dnp01_escape_hold_steps)
+        lat_ok = True
+        if self._base is not None and not p.use_engineered_eye_laterality:
+            lat_ok = abs(self._loom_laterality(ro)) >= float(p.dnp01_loom_lat_min)
         brain_fire = (
             warmed
             and post_base
             and hold_ok
+            and lat_ok
+            and self._steep_climb
             and self._escape_armed
             and self.escape_timer <= 0
             and self.escape_cooldown <= 0
@@ -303,7 +324,8 @@ class DNFlightController:
 
         if brain_fire or engineered_fire:
             self.escape_timer = int(p.escape_duration_steps)
-            self.escape_cooldown = int(p.escape_duration_steps) + 4
+            extra = int(getattr(p, "escape_cooldown_extra", 4))
+            self.escape_cooldown = int(p.escape_duration_steps) + extra
             if brain_fire:
                 self._escape_armed = False
             self._last_threat = self._threat_side(ro)
@@ -336,6 +358,15 @@ class DNFlightController:
 
         yaw = self._steer_yaw(ro)
         pitch = 0.0
+        loom_amp = (
+            max(0.0, float(ro.dnp03_L), float(ro.dnp03_R))
+            + 0.35 * max(0.0, float(ro.lc4_L), float(ro.lc4_R))
+            + 0.80 * max(0.0, float(rise))
+        )
+        brake = _tanh(loom_amp / max(float(getattr(p, "loom_brake_scale_hz", 0.25)), 1e-6))
+        thrust_forward = float(np.clip(thrust_forward - float(getattr(p, "loom_brake_gain", 0.0)) * brake, -1.0, 1.0))
+        pitch = float(getattr(p, "loom_pitch_gain", 0.0)) * brake
+        self.last_yaw_terms["loom_brake"] = float(brake)
         if self.escape_timer > 0:
             pitch = p.escape_pitch
             thrust_forward = float(np.clip(thrust_forward + p.escape_forward, -1.0, 1.0))

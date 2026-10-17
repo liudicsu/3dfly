@@ -320,29 +320,101 @@ def test_brighter_ipsilateral_eye_overrides_dnp03_for_threat():
     assert act[4] > 0.05
 
 
-def test_lc4_contralateral_laterality_sets_threat_against_dnp03_dc():
-    """Textured walls: LC4_L rises on a right wall (contra); that is threat R."""
+def test_lc4_ipsilateral_laterality_sets_threat():
+    """LC4/LPLC2 are ipsilateral: LC4_L rise is a left loom (threat L, −yaw)."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
-    rest = DNReadout(dnp03_L=0.40, dnp03_R=0.30, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    rest = DNReadout(dnp03_L=0.40, dnp03_R=0.40, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
     c.capture_baseline(rest)
     c.compute(rest)
-    right_wall = DNReadout(
+    left_loom = DNReadout(
         dnp01_L=3.2,
-        dnp03_L=0.55,
-        dnp03_R=0.40,
+        dnp03_L=0.45,
+        dnp03_R=0.42,
         lc4_L=2.6,
         lc4_R=1.1,
         dng02_amp=5.0,
     )
-    act = c.compute(right_wall)
+    act = c.compute(left_loom)
     assert c.brain_escape_count == 1
-    assert c.escape_events[-1].threat_side == "R"
-    assert act[4] > 0.05
+    assert c.escape_events[-1].threat_side == "L"
+    assert act[4] < -0.05
+
+
+def test_bilateral_dnp01_climb_without_loom_laterality_does_not_escape():
+    """r6: 16-step-prewarm centre control. DNp01 settle climb is not a loom."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp01_L=0.70, dnp01_R=0.65, dnp03_L=0.40, dnp03_R=0.38, lc4_L=1.2, lc4_R=1.1, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    for i in range(24):
+        z = 0.70 + 0.08 * (i + 1)
+        c.compute(
+            DNReadout(
+                dnp01_L=z,
+                dnp01_R=z - 0.05,
+                dnp03_L=0.42,
+                dnp03_R=0.40,
+                lc4_L=1.25,
+                lc4_R=1.15,
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count == 0
+
+
+def test_bilateral_loom_brakes_forward():
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=8)
+    rest = DNReadout(dnp03_L=0.2, dnp03_R=0.2, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    cruise = c.compute(rest)
+    loom = DNReadout(dnp03_L=1.1, dnp03_R=1.1, dng02_amp=5.0)
+    braked = c.compute(loom)
+    assert braked[0] < cruise[0] - 0.05
+
+
+def test_slow_open_space_wander_does_not_escape():
+    """r6: open-space rise ~0.26 Hz over ~30 steps must not fire."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dnp03_L=0.40, dnp03_R=0.38, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    for i in range(40):
+        z = 1.80 + 0.26 * min(1.0, (i + 1) / 30.0)
+        c.compute(
+            DNReadout(
+                dnp01_L=z,
+                dnp01_R=z - 0.08,
+                dnp03_L=0.62,
+                dnp03_R=0.38,
+                lc4_L=1.25,
+                lc4_R=1.00,
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count == 0
+
+
+def test_approaching_loom_rise_with_dnp03_laterality_escapes_away():
+    """Genuine ipsi loom: DNp01 rise + DNp03_L → threat L, right turn."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dnp03_L=0.40, dnp03_R=0.38, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    loom = DNReadout(
+        dnp01_L=3.60,
+        dnp01_R=1.90,
+        dnp03_L=1.40,
+        dnp03_R=0.40,
+        lc4_L=2.4,
+        lc4_R=1.0,
+        dng02_amp=5.0,
+    )
+    act = c.compute(loom)
+    assert c.brain_escape_count == 1
+    assert c.escape_events[-1].threat_side == "L"
+    assert act[4] < -0.05
 
 
 def test_rising_edge_does_not_re_fire_while_dnp01_stays_high():
     """r3: frozen rest + pinned wall kept rise ≥ 0.55 and fired every cooldown."""
-    c = _ctl(dnp01_warmup_steps=4)
+    c = _ctl(dnp01_warmup_steps=4, escape_cooldown_extra=4)
     cruise = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dng02_amp=5.0)
     for _ in range(10):
         c.compute(cruise)
@@ -354,5 +426,8 @@ def test_rising_edge_does_not_re_fire_while_dnp01_stays_high():
     for _ in range(8):
         c.compute(cruise)
     assert c.brain_escape_count == 1
-    c.compute(loom)
+    for _ in range(40):
+        c.compute(cruise)
+    second = DNReadout(dnp01_L=3.20, dnp01_R=1.90, dnp03_L=1.2, dnp03_R=0.3, dng02_amp=5.0)
+    c.compute(second)
     assert c.brain_escape_count == 2

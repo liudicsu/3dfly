@@ -22,12 +22,16 @@ def test_residual_off_and_no_dng02_yaw_gain():
 
 def test_escape_threshold_sits_between_m1_rotation_and_loom():
     p = FlightParams()
-    assert M1_DNP01_ROT_MAX_HZ < p.dnp01_escape_delta_hz < M1_DNP01_LOOM_IPSI_HZ
+    assert 0.15 < p.dnp01_escape_delta_hz < 0.45
     assert p.dnp01_loom_hz == M1_DNP01_LOOM_IPSI_HZ
     assert p.dnp01_rot_hz == M1_DNP01_ROT_MAX_HZ
     assert p.dna02_scale_hz == M1_DNA02_LR_HZ
     assert p.hse_scale_hz == M1_HSE_LR_HZ
     assert p.dnp01_freeze_rest is True
-    assert p.prewarm_steps >= 64
-    assert p.side_loom_prewarm_steps <= 24
-    assert "0.55" in p.notes["escape"] or "side-loom" in p.notes["escape"]
+    assert p.prewarm_steps >= 80
+    assert p.side_loom_prewarm_steps >= p.prewarm_steps
+    assert p.flyvis_stride >= 3
+    assert p.dnp01_rest_tau_steps >= 80.0
+    assert p.dnp01_loom_lat_min > 0.0
+    assert p.dnp01_slope_min > 0.0
+    assert "0.30" in p.notes["escape"] or "laterality" in p.notes["escape"]

@@ -272,11 +272,33 @@ class ClosedLoopBrain:
         angular_velocity: Optional[np.ndarray] = None,
         n: Optional[int] = None,
     ) -> Optional[BrainStep]:
-        """Settle flyvis + RateCore on the initial images before takeoff."""
+        """Settle flyvis + RateCore on the initial images before takeoff.
+
+        Runs at least ``n`` steps (default ``prewarm_steps``) and continues
+        until DNp01's last-8 std is below ``prewarm_settle_std`` or
+        ``prewarm_max_steps`` is hit. Same schedule for every scenario.
+        """
         n = int(self.params.prewarm_steps if n is None else n)
+        max_n = int(getattr(self.params, "prewarm_max_steps", n))
+        max_n = max(n, max_n)
+        tol = float(getattr(self.params, "prewarm_settle_std", 0.0))
+        drop = float(getattr(self.params, "prewarm_peak_drop_hz", 0.12))
+        # Flyvis hold-stride would freeze the settle on the DNp01 peak.
+        prev_stride = int(self.params.flyvis_stride)
+        self.params.flyvis_stride = 1
         last = None
-        for _ in range(max(0, n)):
-            last = self.step(left_img, right_img, angular_velocity)
+        window: list[float] = []
+        try:
+            for i in range(max_n):
+                last = self.step(left_img, right_img, angular_velocity)
+                d01 = max(float(last.readout.dnp01_L), float(last.readout.dnp01_R))
+                window.append(d01)
+                if i + 1 >= n and tol > 0.0 and len(window) >= 8:
+                    peak = float(max(window))
+                    if float(np.std(window[-8:])) <= tol and d01 <= peak - drop:
+                        break
+        finally:
+            self.params.flyvis_stride = prev_stride
         return last
 
     @classmethod

@@ -50,15 +50,10 @@ def beats_pr16_walls(n_contacts: int, n_steps: int) -> bool:
 
 
 def lateral_loom_pose(side: str) -> dict:
-    """True lateral loom: mostly +X heading, closing on the left or right wall.
-
-    Body frame: left = +Y when heading +X. A small yaw toward that wall makes
-    the distance decrease (classic loom) so DNp01 can rise over the EMA rest.
-    The previous scenario faced +Y (yaw=π/2) and drove into the frontal wall.
-    """
+    """Near-wall pose for texture / FOV checks (not the official escape stimulus)."""
     speed = 0.75
     if side == "L":
-        yaw = 0.70  # ~40° toward +Y (left)
+        yaw = 0.70
         return {
             "pose": (-0.8, 3.8, 1.5),
             "yaw": yaw,
@@ -74,16 +69,46 @@ def lateral_loom_pose(side: str) -> dict:
     raise ValueError(f"side must be L or R, got {side!r}")
 
 
-def open_space_pose() -> dict:
-    """Genuinely open segment: start west of centre, heading +X.
+def lateral_loom_object(side: str) -> dict:
+    """Compact dark object closing from one side (M1-like looming disk).
 
-    320 steps × 0.02 s × ~0.6 m/s ≈ 3.8 m. From x=-2 that lands near x=+1.8,
-    still well off the ±5 m walls if heading stays roughly +X.
+    Fly at the origin heading +X. Object starts ~2.6 m out and closes at
+    ~2.2 m/s so angular size grows from ~18° to >60° in about a second.
     """
+    if side == "L":
+        return {
+            "pose": (0.0, 0.0, 1.5),
+            "yaw": 0.0,
+            "vel": (0.05, 0.0, 0.0),
+            "loom_start": (1.55, 1.55, 1.5),
+            "loom_vel": (-1.30, -1.25, 0.0),
+        }
+    if side == "R":
+        return {
+            "pose": (0.0, 0.0, 1.5),
+            "yaw": 0.0,
+            "vel": (0.05, 0.0, 0.0),
+            "loom_start": (1.55, -1.55, 1.5),
+            "loom_vel": (-1.30, 1.25, 0.0),
+        }
+    raise ValueError(f"side must be L or R, got {side!r}")
+
+
+def headon_wall_pose() -> dict:
+    """Frontal approach toward the +X wall (x = +5 m)."""
     return {
-        "pose": (-2.0, 0.0, 1.5),
+        "pose": (2.4, 0.0, 1.5),
         "yaw": 0.0,
-        "vel": (0.25, 0.0, 0.0),
+        "vel": (0.50, 0.0, 0.0),
+    }
+
+
+def open_space_pose() -> dict:
+    """Forward flight in open space: start west, heading +X, ≥300 steps."""
+    return {
+        "pose": (-3.2, 0.0, 1.5),
+        "yaw": 0.0,
+        "vel": (0.45, 0.0, 0.0),
         "max_steps": 320,
     }
 
@@ -98,10 +123,14 @@ def _run_scenario(
     yaw: float = 0.0,
     vel=None,
     threat_side=None,
+    prewarm=None,
+    loom_start=None,
+    loom_vel=None,
 ) -> dict:
     env.reset(seed=0)
     if pose is not None:
         env.set_pose(pose, yaw=yaw, vel=vel)
+    env.hide_loom_object()
     brain.reset()
     ctl.reset()
     ctl.bind_hover(env.hover_action)
@@ -117,14 +146,24 @@ def _run_scenario(
     yaw_terms = []
     t_wall = time.perf_counter()
     left_img, right_img = env.get_eye_images()
-    n_pre = int(ctl.params.prewarm_steps)
-    if str(name).startswith("side_loom"):
-        n_pre = int(ctl.params.side_loom_prewarm_steps)
+    n_pre = int(ctl.params.prewarm_steps if prewarm is None else prewarm)
     warmed = brain.prewarm(left_img, right_img, env.get_fly_angular_velocity(), n=n_pre)
     if warmed is not None:
         ctl.capture_baseline(warmed.readout)
-        left_img, right_img = env.get_eye_images()
+    loom_pos = None if loom_start is None else np.asarray(loom_start, dtype=float).copy()
+    loom_v = None if loom_vel is None else np.asarray(loom_vel, dtype=float)
+    if loom_pos is not None:
+        env.set_loom_object(loom_pos)
+    left_img, right_img = env.get_eye_images()
     for step in range(n_steps):
+        if loom_pos is not None and loom_v is not None:
+            loom_pos = loom_pos + loom_v * float(env.control_dt)
+            # Once the object has passed behind the fly it is not a loom.
+            if loom_pos[0] < -0.4:
+                env.hide_loom_object()
+                loom_pos = None
+            else:
+                env.set_loom_object(loom_pos)
         res = brain.step(left_img, right_img, env.get_fly_angular_velocity())
         action = ctl.compute(res.readout)
         left_img, right_img, info = env.step(action, wing_strokes=ctl.last_wing_strokes)
@@ -182,6 +221,7 @@ def _run_scenario(
         "headings": headings_arr,
         "dnp01": np.asarray(dnp01, dtype=float),
         "dnp01_rise": np.asarray(rises, dtype=float),
+        "dnp01_rise_max": float(np.max(rises)) if rises else 0.0,
         "yaw_terms": yaw_summary,
         "escape_events": [
             {
@@ -336,21 +376,38 @@ def main(argv=None) -> int:
     )
     scenarios = {"room": room}
     for side in ("L", "R"):
-        pose = lateral_loom_pose(side)
+        spec = lateral_loom_object(side)
         name = f"side_loom_{'left' if side == 'L' else 'right'}"
-        print(f"Scenario {name} (heading +X, {side} wall)…", flush=True)
+        print(f"Scenario {name} (dark object from {side})…", flush=True)
+        prev_stride = int(brain.params.flyvis_stride)
+        brain.params.flyvis_stride = 1
         scenarios[name] = _run_scenario(
             name,
             env,
             brain,
             ctl,
             side_steps,
-            pose=pose["pose"],
-            yaw=pose["yaw"],
-            vel=pose["vel"],
+            pose=spec["pose"],
+            yaw=spec["yaw"],
+            vel=spec["vel"],
             threat_side=side,
+            loom_start=spec["loom_start"],
+            loom_vel=spec["loom_vel"],
         )
-    print("Scenario open_space (no false escape)…", flush=True)
+        brain.params.flyvis_stride = prev_stride
+    print("Scenario headon_wall…", flush=True)
+    hw = headon_wall_pose()
+    scenarios["headon_wall"] = _run_scenario(
+        "headon_wall",
+        env,
+        brain,
+        ctl,
+        200 if not args.quick else 40,
+        pose=hw["pose"],
+        yaw=hw["yaw"],
+        vel=hw["vel"],
+    )
+    print("Scenario open_space (forward flight, no false escape)…", flush=True)
     open_p = open_space_pose()
     open_sc = _run_scenario(
         "open_space",
@@ -363,6 +420,18 @@ def main(argv=None) -> int:
         vel=open_p["vel"],
     )
     scenarios["open_space"] = open_sc
+    print("Control: centre / 16-step prewarm must NOT escape…", flush=True)
+    scenarios["ctrl_center_short_prewarm"] = _run_scenario(
+        "ctrl_center_short_prewarm",
+        env,
+        brain,
+        ctl,
+        120 if not args.quick else 40,
+        pose=(-2.0, 0.0, 1.5),
+        yaw=0.0,
+        vel=(0.55, 0.0, 0.0),
+        prewarm=16,
+    )
     env.close()
 
     side_l = scenarios["side_loom_left"]
@@ -400,7 +469,15 @@ def main(argv=None) -> int:
             "side_R_escapes": side_r["brain_escapes"],
             "side_L_direction_correct": side_l["escape_direction_correct"],
             "side_R_direction_correct": side_r["escape_direction_correct"],
+            "side_L_rise_max": side_l.get("dnp01_rise_max"),
+            "side_R_rise_max": side_r.get("dnp01_rise_max"),
             "open_false_escapes": open_sc["brain_escapes"],
+            "open_rise_max": open_sc.get("dnp01_rise_max"),
+            "open_dx": open_sc["dx"],
+            "open_dy": open_sc["dy"],
+            "headon_wall_contacts": scenarios["headon_wall"]["wall_contacts"],
+            "headon_brain_escapes": scenarios["headon_wall"]["brain_escapes"],
+            "ctrl_center_16_escapes": scenarios["ctrl_center_short_prewarm"]["brain_escapes"],
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
             "beats_pr16_walls": beats_pr16_walls(room["wall_contacts"], room["steps"]),
             "no_latch": room["dnp01_latch_frac"] < 0.05,
