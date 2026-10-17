@@ -177,6 +177,29 @@ S2 scaling defaults to the research full-matrix radius (`0.9 / 4085.83`), the
 same denominator r3sim uses on subgraphs. `--rho-mode subgraph` rescales the
 coreTplus slice itself to ρ=0.9 (~3× stronger recurrence; HS saturates).
 
+### Closed-loop flight (M2–M4)
+
+Default `threedfly run` / `run-interactive` use the M1 stack when connectome +
+flyvis are present: rendered MuJoCo eyes → 721-hex BoxEye sample → flyvis
+(state kept across steps) → handoff → coreTplus `RateCore` → DN readouts →
+`DNFlightController`. The old 976-input full-brain path is `--legacy-brain`.
+
+Engineered parameters live in **`threedfly/control/flight_params.py`** (gains
+and thresholds only). Escape fires **only** from DNp01 ≥ 12 Hz. Direction is
+DNp03 (ipsi loom → contralateral turn). Yaw is DNa02 + DNp15 L−R. Thrust /
+wing amplitude is DNg02 mean(L,R) — **no DNg02 L−R yaw**. The hand-coded
+looming residual is **off** (`--engineered-looming-residual` for ablations).
+
+```bash
+# 3.12 venv with flyvis + data/full_connectome.npz
+python scripts/closed_loop_acceptance.py          # room + side-loom + open-space
+python scripts/closed_loop_acceptance.py --quick
+threedfly run --headless --steps 400              # auto coreTplus when available
+threedfly run-interactive                         # viser UI on the new brain
+```
+
+`--quick` / unit tests skip the real stack when data or flyvis is missing.
+
 ---
 
 ## Quick Start

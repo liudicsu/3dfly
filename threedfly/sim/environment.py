@@ -162,6 +162,21 @@ class FlyEnvironment:
         self._wing_phase = 0.0
         
         return self.get_eye_images()
+
+    def set_pose(
+        self,
+        xyz,
+        yaw: float = 0.0,
+        vel=None,
+    ) -> None:
+        """Place the fly at ``xyz`` with heading ``yaw`` (rad about +Z)."""
+        xyz = np.asarray(xyz, dtype=np.float64).reshape(3)
+        self.data.qpos[0:3] = xyz
+        self.data.qpos[3:7] = [np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)]
+        self.data.qvel[:] = 0.0
+        if vel is not None:
+            self.data.qvel[0:3] = np.asarray(vel, dtype=np.float64).reshape(3)
+        mujoco.mj_forward(self.model, self.data)
     
     def step(
         self,

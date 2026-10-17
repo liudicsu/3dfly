@@ -155,3 +155,14 @@ def test_collision_uses_fly_body_geoms_not_geom_zero():
     assert thorax_id in env._fly_geom_ids
     assert floor_id not in env._fly_geom_ids
     env.close()
+
+
+def test_set_pose_places_fly():
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.set_pose((1.5, -2.0, 1.6), yaw=np.pi / 2)
+    pos = env.get_fly_position()
+    assert pos[0] == pytest.approx(1.5, abs=1e-6)
+    assert pos[1] == pytest.approx(-2.0, abs=1e-6)
+    assert pos[2] == pytest.approx(1.6, abs=1e-6)
+    env.close()

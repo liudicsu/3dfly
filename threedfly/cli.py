@@ -333,7 +333,17 @@ def diagnose_looming(subgraph_path, no_ei, looming):
     is_flag=True,
     help="Disable soft collision recovery (stop on first collision)"
 )
-def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery):
+@click.option(
+    "--legacy-brain",
+    is_flag=True,
+    help="Force the pre-M2 976-input RateSimulator path (default: coreTplus when available)",
+)
+@click.option(
+    "--engineered-looming-residual",
+    is_flag=True,
+    help="Opt-in ablation: trigger escape from stereo looming if DNp01 is silent",
+)
+def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, legacy_brain, engineered_looming_residual):
     """Run 3dfly exploration simulation (static visualization)."""
     from threedfly.runner import run_simulation
     
@@ -360,6 +370,8 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
             seed=seed,
             max_collisions=max_collisions,
             enable_soft_recovery=not no_soft_recovery,
+            use_core_tplus=False if legacy_brain else None,
+            engineered_looming_residual=engineered_looming_residual,
         )
         click.echo("\n✓ Simulation complete!")
     except Exception as e:
@@ -423,7 +435,17 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
     is_flag=True,
     help="Disable soft collision recovery (pause on collision)"
 )
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery):
+@click.option(
+    "--legacy-brain",
+    is_flag=True,
+    help="Force the pre-M2 976-input RateSimulator path (default: coreTplus when available)",
+)
+@click.option(
+    "--engineered-looming-residual",
+    is_flag=True,
+    help="Opt-in ablation: trigger escape from stereo looming if DNp01 is silent",
+)
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, legacy_brain, engineered_looming_residual):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -447,6 +469,8 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
             port=port,
             max_collisions=max_collisions,
             enable_soft_recovery=not no_soft_recovery,
+            use_core_tplus=False if legacy_brain else None,
+            engineered_looming_residual=engineered_looming_residual,
         )
     except Exception as e:
         click.echo(f"\nError running interactive simulation: {e}", err=True)

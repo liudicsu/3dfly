@@ -20,7 +20,9 @@ from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
 from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
 from threedfly.control.controller import BiologicalFlightController
+from threedfly.control.dn_controller import DNFlightController
 from threedfly.control.exploration import heading_from_quaternion
+from threedfly.control.flight_params import FlightParams
 from threedfly.viz import Visualizer
 
 
@@ -35,6 +37,8 @@ def run_simulation(
     enable_soft_recovery: bool = True,
     warmup_steps: int = 800,
     apply_ei_signs: bool = True,
+    use_core_tplus=None,
+    engineered_looming_residual: bool = False,
 ):
     """
     Run complete 3dfly simulation.
@@ -56,41 +60,77 @@ def run_simulation(
     # Output directory
     output_dir = Path(save_output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    print("\n[1/7] Loading connectome subgraph...")
-    subgraph = ConnectomeLoader.load_subgraph(Path(subgraph_path))
-    n_neurons = subgraph["n_neurons"]
-    adjacency = subgraph["adjacency"]
-    annotations = subgraph.get("annotations")
-    body_ids = subgraph.get("body_ids")
-    body_id_to_idx = subgraph.get("body_id_to_idx")
-    use_biological = annotations is not None and body_ids is not None and body_id_to_idx is not None
 
-    nt_data = None
-    transmitter_signs = None
-    if use_biological:
-        nt_path = "data/connectome-raw/body-neurotransmitters-male-cns-v1.0.feather"
-        nt_data = load_neurotransmitter_data(nt_path)
-        if nt_data is not None:
-            print(f"  Loaded neurotransmitter data ({len(nt_data)} entries)")
-            transmitter_signs = build_transmitter_sign_vector(
-                n_neurons, body_ids, body_id_to_idx, nt_data
-            )
-    
-    print(f"\n[2/7] Initializing brain simulator ({simulator_type})...")
-    ei_kwargs = {}
-    if apply_ei_signs and transmitter_signs is not None:
-        ei_kwargs = {"apply_ei_signs": True, "transmitter_signs": transmitter_signs}
-        print("  Applying E/I signs from neurotransmitter table (sparse.diags @ adj)")
-    if simulator_type == "lif":
-        brain = BrainSimulator(adjacency, dt=0.001, **ei_kwargs)
-        brain_dt = 0.001
+    from threedfly.brain.closed_loop import ClosedLoopBrain, core_stack_available
+
+    flight_params = FlightParams(use_engineered_looming_residual=engineered_looming_residual)
+    core_brain = None
+    dn_controller = None
+    if use_core_tplus is False:
+        use_core = False
+    elif use_core_tplus is True or core_stack_available():
+        use_core = True
     else:
-        brain = RateSimulator(adjacency, dt=0.010, **ei_kwargs)
-        brain_dt = 0.010
-
+        use_core = False
+    if use_core and not core_stack_available():
+        raise RuntimeError(
+            "coreTplus closed loop requested but connectome/flyvis is missing. "
+            "On Python 3.12: pip install -e '.[brain]' (flyvis --no-deps if local editable)."
+        )
+    
+    use_biological = False
+    brain_depth = None
+    subgraph = None
+    adjacency = None
+    n_neurons = 0
+    brain = None
+    controller = None
     sim_dt = 0.02  # 20ms per physics/control step
-    brain_steps_per_sim = max(1, int(round(sim_dt / brain_dt)))
+    brain_steps_per_sim = 2
+
+    if use_core:
+        print("\n[1/7] Building coreTplus closed-loop brain (flyvis → RateCore)...")
+        core_brain = ClosedLoopBrain.build(params=flight_params)
+        dn_controller = DNFlightController(flight_params)
+        controller = dn_controller
+        brain = core_brain
+        n_neurons = core_brain.n
+        brain_dt = 0.010
+        brain_steps_per_sim = 1
+        print(f"  n={n_neurons}  engineered_residual={flight_params.use_engineered_looming_residual}")
+    else:
+        print("\n[1/7] Loading connectome subgraph...")
+        subgraph = ConnectomeLoader.load_subgraph(Path(subgraph_path))
+        n_neurons = subgraph["n_neurons"]
+        adjacency = subgraph["adjacency"]
+        annotations = subgraph.get("annotations")
+        body_ids = subgraph.get("body_ids")
+        body_id_to_idx = subgraph.get("body_id_to_idx")
+        use_biological = annotations is not None and body_ids is not None and body_id_to_idx is not None
+
+        nt_data = None
+        transmitter_signs = None
+        if use_biological:
+            nt_path = "data/connectome-raw/body-neurotransmitters-male-cns-v1.0.feather"
+            nt_data = load_neurotransmitter_data(nt_path)
+            if nt_data is not None:
+                print(f"  Loaded neurotransmitter data ({len(nt_data)} entries)")
+                transmitter_signs = build_transmitter_sign_vector(
+                    n_neurons, body_ids, body_id_to_idx, nt_data
+                )
+
+        print(f"\n[2/7] Initializing brain simulator ({simulator_type})...")
+        ei_kwargs = {}
+        if apply_ei_signs and transmitter_signs is not None:
+            ei_kwargs = {"apply_ei_signs": True, "transmitter_signs": transmitter_signs}
+            print("  Applying E/I signs from neurotransmitter table (sparse.diags @ adj)")
+        if simulator_type == "lif":
+            brain = BrainSimulator(adjacency, dt=0.001, **ei_kwargs)
+            brain_dt = 0.001
+        else:
+            brain = RateSimulator(adjacency, dt=0.010, **ei_kwargs)
+            brain_dt = 0.010
+        brain_steps_per_sim = max(1, int(round(sim_dt / brain_dt)))
     
     print("\n[3/7] Creating MuJoCo environment...")
     # Always render camera images for vision system (even in headless mode)
@@ -105,15 +145,21 @@ def run_simulation(
     mapper = PointCloudMapper(voxel_size=0.05)
     
     print("\n[5/7] Setting up brain depth estimation...")
-    brain_depth = BrainDepthEstimator(
-        n_neurons=n_neurons,
-        adjacency=adjacency,
-        use_rate_model=(simulator_type == "rate")
-    )
+    if not use_core:
+        brain_depth = BrainDepthEstimator(
+            n_neurons=n_neurons,
+            adjacency=adjacency,
+            use_rate_model=(simulator_type == "rate")
+        )
+    else:
+        print("  coreTplus path: stereo depth for mapping (no 184k brain-depth router)")
     
     print("\n[6/7] Setting up control and exploration...")
-    
-    if use_biological:
+    explorer = ExplorationPolicy(exploration_weight=0.8, random_exploration_prob=0.05)
+    if use_core:
+        dn_controller.bind_hover(env.hover_action)
+        print("  DNFlightController (DNp01 escape, DNp03 dodge, DNa02 yaw, DNg02 thrust)")
+    elif use_biological:
         print("  Using biological neuron mappings from annotations")
         controller = BiologicalFlightController(
             n_neurons=n_neurons,
@@ -123,12 +169,6 @@ def run_simulation(
             nt_data=nt_data,
             warmup_steps=warmup_steps,
         )
-    else:
-        print("  No annotations found, using legacy controller")
-        controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
-    
-    explorer = ExplorationPolicy(exploration_weight=0.8, random_exploration_prob=0.05)
-    if use_biological:
         controller.hover_action = env.hover_action
         loom_idx = np.concatenate([
             controller.input_mapping["looming_left"],
@@ -142,6 +182,9 @@ def run_simulation(
         )
         brain.adj = calibrate_looming_to_dnp01(brain.adj, loom_idx, dnp_idx)
         print("  Calibrated looming→DNp01 incoming gain (engineered path assist if 1-hop missing)")
+    else:
+        print("  No annotations found, using legacy controller")
+        controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
     
     print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":
@@ -209,88 +252,89 @@ def run_simulation(
         # *** NEW: Get fly velocity for motion parallax ***
         fly_velocity = env.get_fly_velocity()
         
-        # *** NEW: Prepare optical flow features for brain (motion parallax) ***
-        flow_features, flow_info = brain_depth.prepare_flow_features_for_brain(
-            left_img,
-            right_img,
-            fly_velocity
-        )
-        
-        # Exploration biases sensory input before the brain step; it does not override action.
         fly_pos = env.get_fly_position()
         heading = heading_from_quaternion(env.get_fly_orientation())
         exploration_signal = explorer.compute_exploration_signal(
             fly_pos, mapper, current_heading=heading
         )
 
-        # Feed to brain
-        if use_biological:
-            optic_flow_features = extract_t4_t5_flow_features(
-                flow_info.get("flow_left"), flow_info.get("flow_right")
+        flow_features = np.zeros(8, dtype=np.float32)
+        flow_info = {"flow_left": None, "flow_right": None, "flow_magnitude": 0.0}
+        if use_core:
+            core_step = core_brain.step(
+                left_img, right_img, env.get_fly_angular_velocity()
             )
-            left_lum, right_lum = explorer.apply_visual_bias_pattern(
-                visual_features["left_ommatidia"],
-                visual_features["right_ommatidia"],
-                exploration_signal,
+            brain_activity = core_step.rates
+            loom_l = float(visual_features["looming_features"][:4].mean())
+            loom_r = float(visual_features["looming_features"][4:].mean())
+            action = dn_controller.compute(
+                core_step.readout, looming_left=loom_l, looming_right=loom_r
             )
-            controller.set_visual_input(
-                left_luminance=left_lum,
-                right_luminance=right_lum,
-                optic_flow_features=optic_flow_features,
-                looming_features={
-                    "left": visual_features["looming_features"][:4].mean(),
-                    "right": visual_features["looming_features"][4:].mean(),
-                },
-                brain=brain,
-                angular_velocity=env.get_fly_angular_velocity(),
-            )
+            brain_depth_map_upsampled = visual_features["depth_map"]
+            brain_confidence_upsampled = visual_features["confidence"]
         else:
-            # Legacy input
-            brain_input = np.concatenate([
-                visual_features["left_ommatidia"],
-                visual_features["right_ommatidia"],
-                visual_features["looming_features"],
-                flow_features
-            ])
-            brain.set_input(brain_input)
-        
-        # Run brain for multiple timesteps (connectome processes flow features)
-        for _ in range(brain_steps_per_sim):
-            if simulator_type == "lif":
-                brain.step()
-                brain_activity = brain.get_firing_rates(window=50)
+            flow_features, flow_info = brain_depth.prepare_flow_features_for_brain(
+                left_img,
+                right_img,
+                fly_velocity
+            )
+            if use_biological:
+                optic_flow_features = extract_t4_t5_flow_features(
+                    flow_info.get("flow_left"), flow_info.get("flow_right")
+                )
+                left_lum, right_lum = explorer.apply_visual_bias_pattern(
+                    visual_features["left_ommatidia"],
+                    visual_features["right_ommatidia"],
+                    exploration_signal,
+                )
+                controller.set_visual_input(
+                    left_luminance=left_lum,
+                    right_luminance=right_lum,
+                    optic_flow_features=optic_flow_features,
+                    looming_features={
+                        "left": visual_features["looming_features"][:4].mean(),
+                        "right": visual_features["looming_features"][4:].mean(),
+                    },
+                    brain=brain,
+                    angular_velocity=env.get_fly_angular_velocity(),
+                )
             else:
-                brain_activity = brain.step()
-        
-        # *** BRAIN-BASED DEPTH ESTIMATION (now using motion parallax) ***
-        # Extract depth from brain activity after connectome processing
-        visual_features_with_flow = {
-            **visual_features,
-            "flow_magnitude": flow_info["flow_magnitude"],
-            "left_img": left_img,
-            "right_img": right_img,
-        }
-        brain_depth_result = brain_depth.estimate_depth_from_activity(
-            brain_activity,
-            stereo_features=visual_features_with_flow,
-            velocity=fly_velocity
-        )
-        
-        # Upsample brain depth map to match camera resolution
-        h, w = visual_features["depth_map"].shape
-        brain_depth_map_upsampled = brain_depth.upsample_depth_map(
-            brain_depth_result["depth_map"],
-            target_height=h,
-            target_width=w
-        )
-        brain_confidence_upsampled = brain_depth.upsample_depth_map(
-            brain_depth_result["confidence"],
-            target_height=h,
-            target_width=w
-        )
-        
-        # Compute control action (biological path ignores exploration_signal)
-        action = controller.compute_action(brain_activity)
+                brain_input = np.concatenate([
+                    visual_features["left_ommatidia"],
+                    visual_features["right_ommatidia"],
+                    visual_features["looming_features"],
+                    flow_features
+                ])
+                brain.set_input(brain_input)
+            for _ in range(brain_steps_per_sim):
+                if simulator_type == "lif":
+                    brain.step()
+                    brain_activity = brain.get_firing_rates(window=50)
+                else:
+                    brain_activity = brain.step()
+            visual_features_with_flow = {
+                **visual_features,
+                "flow_magnitude": flow_info["flow_magnitude"],
+                "left_img": left_img,
+                "right_img": right_img,
+            }
+            brain_depth_result = brain_depth.estimate_depth_from_activity(
+                brain_activity,
+                stereo_features=visual_features_with_flow,
+                velocity=fly_velocity
+            )
+            h, w = visual_features["depth_map"].shape
+            brain_depth_map_upsampled = brain_depth.upsample_depth_map(
+                brain_depth_result["depth_map"],
+                target_height=h,
+                target_width=w
+            )
+            brain_confidence_upsampled = brain_depth.upsample_depth_map(
+                brain_depth_result["confidence"],
+                target_height=h,
+                target_width=w
+            )
+            action = controller.compute_action(brain_activity)
         
         # Step environment (DNg02 L/R → wing strokes when the controller provides them)
         wing_strokes = getattr(controller, "last_wing_strokes", None)
@@ -379,7 +423,7 @@ def run_simulation(
     
     # Statistics
     map_stats = mapper.get_statistics()
-    brain_depth_stats = brain_depth.get_statistics()
+    brain_depth_stats = brain_depth.get_statistics() if brain_depth is not None else {}
     
     print("\n" + "=" * 70)
     print("Final Statistics:")
@@ -388,7 +432,19 @@ def run_simulation(
     print(f"Simulated time: {(step + 1) * sim_dt:.1f} s (control dt={sim_dt*1000:.0f} ms)")
     print(f"Total collisions: {collision_count}")
     print(f"Brain neurons: {n_neurons}")
-    if use_biological:
+    if use_core:
+        print(
+            f"DNp01 escapes: brain-triggered={dn_controller.brain_escape_count}, "
+            f"engineered-residual={dn_controller.engineered_escape_count}, "
+            f"latch_frac={dn_controller.dnp01_latch_frac:.3f}"
+        )
+        if core_brain.last_ms:
+            print(
+                f"Last step ms: flyvis={core_brain.last_ms.get('flyvis', 0):.2f} "
+                f"brain={core_brain.last_ms.get('brain', 0):.2f} "
+                f"total={core_brain.last_ms.get('total', 0):.2f}"
+            )
+    elif use_biological:
         print(f"DNp01 escapes: brain-triggered={controller.brain_escape_count}, "
               f"engineered-residual={controller.engineered_escape_count}")
     print(f"\nPrimary (Brain Depth):")

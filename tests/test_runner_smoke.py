@@ -71,4 +71,5 @@ def test_run_simulation_biological_mode_smoke(tmp_path):
         seed=0,
         warmup_steps=2,
         enable_soft_recovery=True,
+        use_core_tplus=False,
     )
