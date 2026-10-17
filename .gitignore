@@ -38,6 +38,9 @@ data/*.npz
 data/connectome-raw/
 !data/demo_subgraph.npz
 
+# Optional full flybody menagerie fetch (~140 MB)
+assets/flybody/full/
+
 # MuJoCo recordings
 recordings/
 *.mp4

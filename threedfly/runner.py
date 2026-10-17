@@ -173,14 +173,15 @@ def run_simulation(
                 flow_info.get("flow_left"), flow_info.get("flow_right")
             )
             controller.set_visual_input(
-                left_luminance=visual_features["left_ommatidia"].mean(),
-                right_luminance=visual_features["right_ommatidia"].mean(),
+                left_luminance=visual_features["left_ommatidia"],
+                right_luminance=visual_features["right_ommatidia"],
                 optic_flow_features=optic_flow_features,
                 looming_features={
                     "left": visual_features["looming_features"][:4].mean(),
                     "right": visual_features["looming_features"][4:].mean(),
                 },
                 brain=brain,
+                angular_velocity=env.get_fly_angular_velocity(),
             )
             for _ in range(brain_steps_per_sim):
                 if simulator_type == "lif":
@@ -227,9 +228,9 @@ def run_simulation(
             optic_flow_features = extract_t4_t5_flow_features(
                 flow_info.get("flow_left"), flow_info.get("flow_right")
             )
-            left_lum, right_lum = explorer.apply_visual_bias(
-                visual_features["left_ommatidia"].mean(),
-                visual_features["right_ommatidia"].mean(),
+            left_lum, right_lum = explorer.apply_visual_bias_pattern(
+                visual_features["left_ommatidia"],
+                visual_features["right_ommatidia"],
                 exploration_signal,
             )
             controller.set_visual_input(
@@ -241,6 +242,7 @@ def run_simulation(
                     "right": visual_features["looming_features"][4:].mean(),
                 },
                 brain=brain,
+                angular_velocity=env.get_fly_angular_velocity(),
             )
         else:
             # Legacy input
@@ -290,8 +292,9 @@ def run_simulation(
         # Compute control action (biological path ignores exploration_signal)
         action = controller.compute_action(brain_activity)
         
-        # Step environment
-        left_img, right_img, info = env.step(action)
+        # Step environment (DNg02 L/R → wing strokes when the controller provides them)
+        wing_strokes = getattr(controller, "last_wing_strokes", None)
+        left_img, right_img, info = env.step(action, wing_strokes=wing_strokes)
         
         # Update point cloud map
         left_pose, right_pose = env.get_camera_poses()

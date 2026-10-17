@@ -194,8 +194,8 @@ def run_interactive_simulation(
                 left_img, right_img, fly_velocity
             )
             controller.set_visual_input(
-                left_luminance=visual_features["left_ommatidia"].mean(),
-                right_luminance=visual_features["right_ommatidia"].mean(),
+                left_luminance=visual_features["left_ommatidia"],
+                right_luminance=visual_features["right_ommatidia"],
                 optic_flow_features=extract_t4_t5_flow_features(
                     flow_info.get("flow_left"), flow_info.get("flow_right")
                 ),
@@ -204,6 +204,7 @@ def run_interactive_simulation(
                     "right": visual_features["looming_features"][4:].mean(),
                 },
                 brain=brain,
+                angular_velocity=env.get_fly_angular_velocity(),
             )
             for _ in range(brain_steps_per_sim):
                 if simulator_type == "lif":
@@ -272,9 +273,9 @@ def run_interactive_simulation(
             )
 
             if use_biological:
-                left_lum, right_lum = explorer.apply_visual_bias(
-                    visual_features["left_ommatidia"].mean(),
-                    visual_features["right_ommatidia"].mean(),
+                left_lum, right_lum = explorer.apply_visual_bias_pattern(
+                    visual_features["left_ommatidia"],
+                    visual_features["right_ommatidia"],
                     exploration_signal,
                 )
                 controller.set_visual_input(
@@ -288,6 +289,7 @@ def run_interactive_simulation(
                         "right": visual_features["looming_features"][4:].mean(),
                     },
                     brain=brain,
+                    angular_velocity=env.get_fly_angular_velocity(),
                 )
             else:
                 brain_input = np.concatenate([
@@ -334,8 +336,9 @@ def run_interactive_simulation(
             
             action = controller.compute_action(brain_activity)
             
-            # Step environment
-            left_img, right_img, info = env.step(action)
+            # Step environment (DNg02 L/R → wing strokes when the controller provides them)
+            wing_strokes = getattr(controller, "last_wing_strokes", None)
+            left_img, right_img, info = env.step(action, wing_strokes=wing_strokes)
             
             # Update point cloud map
             left_pose, right_pose = env.get_camera_poses()
@@ -380,6 +383,7 @@ def run_interactive_simulation(
                     point_cloud_mapper=mapper,
                     brain_stats=brain_stats,
                     control_stats=control_stats,
+                    wing_angles=env.get_wing_angles(),
                 )
             
             # Check collision

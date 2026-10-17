@@ -72,8 +72,11 @@ class InteractiveVisualizer:
         
         # Visualization handles (3D scene)
         self._fly_handle = None
+        self._fly_wing_l_handle = None
+        self._fly_wing_r_handle = None
         self._trajectory_handle = None
         self._point_cloud_handle = None
+        self.wing_angles = np.array([0.0, 0.0])
         
         # Dashboard panel handles (GUI images)
         self._dashboard_folder = None
@@ -255,6 +258,7 @@ class InteractiveVisualizer:
         point_cloud_mapper = None,
         brain_stats: Optional[Dict] = None,
         control_stats: Optional[Dict] = None,
+        wing_angles: Optional[np.ndarray] = None,
     ):
         """
         Update visualization with new data.
@@ -277,6 +281,8 @@ class InteractiveVisualizer:
             
         if fly_orientation is not None:
             self.fly_orientation = fly_orientation
+        if wing_angles is not None:
+            self.wing_angles = np.asarray(wing_angles, dtype=float).reshape(-1)[:2]
             
         # Update images
         if left_img is not None:
@@ -320,76 +326,141 @@ class InteractiveVisualizer:
         self._render_status()
         
     def _load_fly_mesh(self):
-        """Load and combine fruit fly meshes into a single mesh."""
+        """Load flybody meshes: fused body + separate wings for flapping."""
         assets_dir = Path(__file__).parent.parent.parent / "assets" / "fly_meshes"
         
-        # Load main body parts
         try:
-            # Scale factor to match MuJoCo (0.01) and adjust for Viser
+            # Scale factor to match MuJoCo (0.01 mm→m, 10× life-size)
             scale = 0.01
             
-            # Load thorax (main body)
             thorax = trimesh.load(assets_dir / "thorax_body.obj", force="mesh")
             thorax.apply_scale(scale)
             
-            # Load head
             head = trimesh.load(assets_dir / "head_body.obj", force="mesh")
             head.apply_scale(scale)
             head.apply_translation([0.012, 0, 0])
             
-            # Load abdomen
             abdomen = trimesh.load(assets_dir / "abdomen_1_body.obj", force="mesh")
             abdomen.apply_scale(scale)
             abdomen.apply_translation([-0.012, 0, -0.002])
+
+            parts = [thorax, head, abdomen]
+            for mesh_name, offset in (
+                ("femur_T2_left_body.obj", [0.001, 0.006, -0.003]),
+                ("femur_T2_right_body.obj", [0.001, -0.006, -0.003]),
+            ):
+                path = assets_dir / mesh_name
+                if path.exists():
+                    leg = trimesh.load(path, force="mesh")
+                    leg.apply_scale(scale)
+                    leg.apply_translation(offset)
+                    parts.append(leg)
             
-            # Load wings
+            body = trimesh.util.concatenate(parts)
+            body.visual.vertex_colors = np.array([76, 51, 25, 255], dtype=np.uint8)
+
             wing_left = trimesh.load(assets_dir / "wing_left_membrane.obj", force="mesh")
             wing_left.apply_scale(scale)
-            wing_left.apply_translation([-0.002, 0.008, 0.002])
-            
+            wing_left.visual.vertex_colors = np.array([180, 180, 200, 140], dtype=np.uint8)
+
             wing_right = trimesh.load(assets_dir / "wing_right_membrane.obj", force="mesh")
             wing_right.apply_scale(scale)
-            wing_right.apply_translation([-0.002, -0.008, 0.002])
-            
-            # Combine all parts
-            combined = trimesh.util.concatenate([thorax, head, abdomen, wing_left, wing_right])
-            
-            # Set consistent color (brown for body)
-            combined.visual.vertex_colors = np.array([76, 51, 25, 255], dtype=np.uint8)
-            
-            return combined
+            wing_right.visual.vertex_colors = np.array([180, 180, 200, 140], dtype=np.uint8)
+
+            return {"body": body, "wing_left": wing_left, "wing_right": wing_right}
             
         except Exception as e:
             print(f"Warning: Could not load fly mesh: {e}")
             print("Falling back to simple sphere representation")
             return None
+
+    @staticmethod
+    def _quat_multiply(q1, q2):
+        """Hamilton product of (w, x, y, z) quaternions."""
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+        return np.array([
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ], dtype=float)
+
+    @staticmethod
+    def _quat_from_axis_angle(axis, angle):
+        axis = np.asarray(axis, dtype=float)
+        axis = axis / (np.linalg.norm(axis) + 1e-12)
+        half = 0.5 * float(angle)
+        s = np.sin(half)
+        return np.array([np.cos(half), axis[0] * s, axis[1] * s, axis[2] * s], dtype=float)
+
+    @staticmethod
+    def _rotate_vec(quat, vec):
+        w, x, y, z = quat
+        r = np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ])
+        return r @ np.asarray(vec, dtype=float)
     
     def _render_fly(self):
-        """Render fruit fly body using realistic mesh."""
-        # Remove old fly
+        """Render flybody mesh with wing flapping synced to physics."""
         if self._fly_handle is not None:
             self._fly_handle.remove()
+            self._fly_handle = None
+        if self._fly_wing_l_handle is not None:
+            self._fly_wing_l_handle.remove()
+            self._fly_wing_l_handle = None
+        if self._fly_wing_r_handle is not None:
+            self._fly_wing_r_handle.remove()
+            self._fly_wing_r_handle = None
         
-        # Try to load and display realistic mesh
         if not hasattr(self, '_fly_mesh'):
             self._fly_mesh = self._load_fly_mesh()
         
-        if self._fly_mesh is not None:
-            # Use mesh representation
+        pos = tuple(self.fly_position)
+        body_q = np.asarray(self.fly_orientation, dtype=float)
+
+        if isinstance(self._fly_mesh, dict):
+            self._fly_handle = self.server.scene.add_mesh_trimesh(
+                "/world/fly",
+                mesh=self._fly_mesh["body"],
+                position=pos,
+                wxyz=tuple(body_q),
+            )
+            left_ang = float(self.wing_angles[0]) if len(self.wing_angles) else 0.0
+            right_ang = float(self.wing_angles[1]) if len(self.wing_angles) > 1 else 0.0
+            left_root = np.array([-0.002, 0.008, 0.002])
+            right_root = np.array([-0.002, -0.008, 0.002])
+            left_q = self._quat_multiply(body_q, self._quat_from_axis_angle([1, 0, 0], left_ang))
+            right_q = self._quat_multiply(body_q, self._quat_from_axis_angle([1, 0, 0], right_ang))
+            self._fly_wing_l_handle = self.server.scene.add_mesh_trimesh(
+                "/world/fly_wing_left",
+                mesh=self._fly_mesh["wing_left"],
+                position=tuple(self.fly_position + self._rotate_vec(body_q, left_root)),
+                wxyz=tuple(left_q),
+            )
+            self._fly_wing_r_handle = self.server.scene.add_mesh_trimesh(
+                "/world/fly_wing_right",
+                mesh=self._fly_mesh["wing_right"],
+                position=tuple(self.fly_position + self._rotate_vec(body_q, right_root)),
+                wxyz=tuple(right_q),
+            )
+        elif self._fly_mesh is not None:
             self._fly_handle = self.server.scene.add_mesh_trimesh(
                 "/world/fly",
                 mesh=self._fly_mesh,
-                position=tuple(self.fly_position),
-                wxyz=tuple(self.fly_orientation),
+                position=pos,
+                wxyz=tuple(body_q),
             )
         else:
-            # Fallback to simple sphere
             self._fly_handle = self.server.scene.add_icosphere(
                 "/world/fly",
                 radius=0.015,
-                color=(76, 51, 25),  # Brown
-                position=tuple(self.fly_position),
-                wxyz=tuple(self.fly_orientation),
+                color=(76, 51, 25),
+                position=pos,
+                wxyz=tuple(body_q),
             )
         
         # Add a small directional indicator (forward vector)

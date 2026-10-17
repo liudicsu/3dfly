@@ -114,6 +114,26 @@ class ExplorationPolicy:
         left = float(left_luminance) + scale * max(turn, 0.0)
         right = float(right_luminance) + scale * max(-turn, 0.0)
         return left, right
+
+    def apply_visual_bias_pattern(
+        self,
+        left_samples: np.ndarray,
+        right_samples: np.ndarray,
+        signal: np.ndarray,
+        scale: float = 0.4,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Bias hex-lattice ommatidia by scaling each eye toward the unexplored side."""
+        left_m, right_m = self.apply_visual_bias(
+            float(np.mean(left_samples)), float(np.mean(right_samples)), signal, scale=scale
+        )
+
+        def _scale(arr: np.ndarray, target: float) -> np.ndarray:
+            m = float(np.mean(arr))
+            if m > 1e-8:
+                return arr * (target / m)
+            return np.full_like(arr, target, dtype=arr.dtype)
+
+        return _scale(left_samples, left_m), _scale(right_samples, right_m)
     
     def get_frontier_directions(
         self,

@@ -43,9 +43,10 @@ If you use these meshes, please cite the flybody project:
 - `femur_T2_right_body.obj` - Right middle leg femur
 - `tibia_T2_left_body.obj` - Left middle leg tibia
 - `tibia_T2_right_body.obj` - Right middle leg tibia
+- `haltere_left_body.obj` / `haltere_right_body.obj` - Halteres
 
-## Usage
+The remaining decorative flybody meshes (~130 MB) are **not** vendored. Fetch them with `python scripts/fetch_flybody.py` into gitignored `assets/flybody/full/`. See `THIRD_PARTY.md`.
 
-These meshes are scaled by 0.01 in the MuJoCo model to match the simulation scale. The original meshes are in millimeters and are scaled down to work with the meter-based physics simulation.
+## Usage / scaling
 
-The visual appearance uses these realistic meshes while the physics simulation uses simplified collision geometry for computational efficiency.
+OBJ millimetres × **0.01** → metres: a 2.5 mm fly becomes a **2.5 cm** visual body (10× life-size) in the 10 m room. Mass keeps flybody's thorax-heavy ratios but totals ~1.5 g (~1000× life-size) so SI drag/lift numbers stay well-conditioned. Legs are posed retracted for flight. Wings flap visually; lift is a stroke-averaged quasi-steady model (`threedfly/sim/wings.py`). Full notes: `threedfly/sim/scale.py`.

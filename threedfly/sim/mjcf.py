@@ -1,10 +1,24 @@
-"""Generate MJCF (MuJoCo XML) models for fly and environment."""
+"""Generate MJCF (MuJoCo XML) models for fly and environment.
 
-import os
+The fly is a flybody-derived (Apache-2.0) fruit-fly model: head, thorax,
+abdomen, wings, halteres, and six legs with flybody mesh assets and a
+thorax-heavy mass distribution. See `threedfly/sim/scale.py` and THIRD_PARTY.md
+for license, citation, and the 10× length / ~1000× mass scaling into the 10 m
+room.
+
+Wings have hinge joints (visual flapping). Legs are welded in a retracted
+flight pose. Aerodynamic lift is applied in Python (stroke-averaged), not via
+a 200 Hz wingbeat.
+"""
+
 from pathlib import Path
 
 # Get path to assets directory
 ASSETS_DIR = Path(__file__).parent.parent.parent / "assets" / "fly_meshes"
+
+# OBJ millimetres → metres (10× life-size). Keep this literal so tests can exec this file.
+MESH_SCALE = 0.01
+_S = f"{MESH_SCALE} {MESH_SCALE} {MESH_SCALE}"
 
 FLY_MJCF = """
 <mujoco model="fruit_fly">
@@ -21,21 +35,26 @@ FLY_MJCF = """
              rgb1="0.8 0.75 0.7"/>
     <material name="wall_mat" texture="wall" reflectance="0.2"/>
     
-    <!-- Fly mesh assets -->
-    <mesh name="thorax_mesh" file="thorax_body.obj" scale="0.01 0.01 0.01"/>
-    <mesh name="head_mesh" file="head_body.obj" scale="0.01 0.01 0.01"/>
-    <mesh name="abdomen_mesh" file="abdomen_1_body.obj" scale="0.01 0.01 0.01"/>
-    <mesh name="wing_left_mesh" file="wing_left_membrane.obj" scale="0.01 0.01 0.01"/>
-    <mesh name="wing_right_mesh" file="wing_right_membrane.obj" scale="0.01 0.01 0.01"/>
-    <mesh name="leg_femur_mesh" file="femur_T2_left_body.obj" scale="0.01 0.01 0.01"/>
-    <mesh name="leg_tibia_mesh" file="tibia_T2_left_body.obj" scale="0.01 0.01 0.01"/>
+    <!-- flybody mesh assets (Apache-2.0). Scale: millimetres × 0.01 → metres (10× life-size). -->
+    <mesh name="thorax_mesh" file="thorax_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="head_mesh" file="head_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="abdomen_mesh" file="abdomen_1_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="wing_left_mesh" file="wing_left_membrane.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="wing_right_mesh" file="wing_right_membrane.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="leg_femur_mesh" file="femur_T2_left_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="leg_tibia_mesh" file="tibia_T2_left_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="leg_femur_r_mesh" file="femur_T2_right_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="leg_tibia_r_mesh" file="tibia_T2_right_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="haltere_left_mesh" file="haltere_left_body.obj" scale=""" + f'"{_S}"' + """/>
+    <mesh name="haltere_right_mesh" file="haltere_right_body.obj" scale=""" + f'"{_S}"' + """/>
     
     <material name="fly_body_mat" rgba="0.25 0.15 0.08 1"/>
     <material name="fly_wing_mat" rgba="0.7 0.7 0.8 0.4"/>
+    <material name="fly_haltere_mat" rgba="0.35 0.25 0.12 1"/>
   </asset>
   
   <worldbody>
-    <!-- Ground plane -->
+    <!-- Ground plane (geom 0; collision tests rely on this). -->
     <geom name="floor" type="plane" size="10 10 0.1" material="grid_mat"/>
     
     <!-- Room walls -->
@@ -63,74 +82,130 @@ FLY_MJCF = """
       <geom type="sphere" size="0.4" rgba="0.4 0.4 0.6 1"/>
     </body>
     
-    <!-- Fruit fly body - realistic mesh model -->
+    <!-- Fruit fly: flybody topology (head / thorax / abdomen / wings / legs / halteres).
+         Masses keep flybody's thorax-heavy ratios, scaled to ~1.5 g total (see scale.py). -->
     <body name="fly" pos="0 0 1.5">
       <freejoint name="fly_joint"/>
-      <!-- Body-frame control site at subtree COM so thrust does not induce tumble. -->
+      <!-- Body-frame control site at subtree COM so residual torques do not induce tumble. -->
       <site name="thorax_ctrl" pos="-0.00112645 -0.00015024 0.01175987" size="0.001" rgba="1 0 0 0"/>
       
-      <!-- Main body (thorax) - using realistic mesh -->
       <geom name="thorax" type="mesh" mesh="thorax_mesh" 
             material="fly_body_mat" mass="0.001"/>
       
-      <!-- Head with cameras - using realistic mesh -->
+      <!-- Head with stereo cameras (neck hinge, stiff). -->
       <body name="head" pos="0.012 0 0">
+        <joint name="neck_pitch" type="hinge" axis="0 1 0" range="-0.3 0.3"
+               stiffness="0.05" damping="0.01"/>
         <geom name="head_geom" type="mesh" mesh="head_mesh" 
               material="fly_body_mat" mass="0.0002" contype="0" conaffinity="0"/>
         
-        <!-- Left eye camera -->
         <camera name="left_eye" pos="0.003 0.006 0.002" 
                 xyaxes="0 -1 0  0.342 0 0.940"
                 fovy="90" mode="fixed"/>
-        
-        <!-- Right eye camera -->
         <camera name="right_eye" pos="0.003 -0.006 0.002"
                 xyaxes="0 1 0  0.342 0 0.940"
                 fovy="90" mode="fixed"/>
       </body>
       
-      <!-- Wings - using realistic mesh -->
+      <!-- Wings: stroke hinge for visual flapping; aero force is applied in Python. -->
       <body name="left_wing" pos="-0.002 0.008 0.002">
+        <joint name="wing_left_stroke" type="hinge" axis="1 0 0" range="-1.2 1.2"
+               damping="0.002" stiffness="0.0"/>
+        <site name="left_wing_aero" pos="0 0.006 0" size="0.001" rgba="0 1 0 0"/>
         <geom name="left_wing_geom" type="mesh" mesh="wing_left_mesh" 
               material="fly_wing_mat" mass="0.00005" contype="0" conaffinity="0"/>
       </body>
       <body name="right_wing" pos="-0.002 -0.008 0.002">
+        <joint name="wing_right_stroke" type="hinge" axis="1 0 0" range="-1.2 1.2"
+               damping="0.002" stiffness="0.0"/>
+        <site name="right_wing_aero" pos="0 -0.006 0" size="0.001" rgba="0 1 0 0"/>
         <geom name="right_wing_geom" type="mesh" mesh="wing_right_mesh" 
               material="fly_wing_mat" mass="0.00005" contype="0" conaffinity="0"/>
       </body>
       
-      <!-- Abdomen - using realistic mesh -->
+      <!-- Abdomen (pitch hinge, stiff). -->
       <body name="abdomen" pos="-0.012 0 -0.002">
+        <joint name="abdomen_pitch" type="hinge" axis="0 1 0" range="-0.2 0.2"
+               stiffness="0.08" damping="0.02"/>
         <geom name="abdomen_geom" type="mesh" mesh="abdomen_mesh" 
               material="fly_body_mat" mass="0.0003" contype="0" conaffinity="0"/>
       </body>
       
-      <!-- Left legs (simplified, visual only) -->
-      <body name="left_leg_front" pos="0.005 0.006 -0.003" euler="0 -0.3 0">
-        <geom name="left_femur_front" type="mesh" mesh="leg_femur_mesh" 
-              material="fly_body_mat" mass="0.00001" contype="0" conaffinity="0"/>
-        <body name="left_tibia_front" pos="0 0.008 -0.005" euler="0 0.8 0">
-          <geom name="left_tibia_front_geom" type="mesh" mesh="leg_tibia_mesh" 
-                material="fly_body_mat" mass="0.00001" contype="0" conaffinity="0"/>
+      <!-- Halteres (flybody meshes). Angular rate is read in Python, not from these joints. -->
+      <body name="haltere_left" pos="-0.005 0.005 -0.001">
+        <geom name="haltere_left_geom" type="mesh" mesh="haltere_left_mesh"
+              material="fly_haltere_mat" mass="0.000005" contype="0" conaffinity="0"/>
+      </body>
+      <body name="haltere_right" pos="-0.005 -0.005 -0.001">
+        <geom name="haltere_right_geom" type="mesh" mesh="haltere_right_mesh"
+              material="fly_haltere_mat" mass="0.000005" contype="0" conaffinity="0"/>
+      </body>
+      
+      <!-- Six legs, retracted flight pose, welded (no active joints). T2 meshes reused. -->
+      <body name="left_leg_T1" pos="0.006 0.005 -0.002" euler="0.4 -1.1 0.5">
+        <geom name="left_femur_T1" type="mesh" mesh="leg_femur_mesh" 
+              material="fly_body_mat" mass="0.000008" contype="0" conaffinity="0"/>
+        <body name="left_tibia_T1" pos="0 0.006 -0.004" euler="0.2 1.2 0">
+          <geom name="left_tibia_T1_geom" type="mesh" mesh="leg_tibia_mesh" 
+                material="fly_body_mat" mass="0.000006" contype="0" conaffinity="0"/>
+        </body>
+      </body>
+      <body name="left_leg_T2" pos="0.001 0.006 -0.003" euler="0.2 -0.9 0.2">
+        <geom name="left_femur_T2" type="mesh" mesh="leg_femur_mesh" 
+              material="fly_body_mat" mass="0.000008" contype="0" conaffinity="0"/>
+        <body name="left_tibia_T2" pos="0 0.006 -0.004" euler="0 1.1 0">
+          <geom name="left_tibia_T2_geom" type="mesh" mesh="leg_tibia_mesh" 
+                material="fly_body_mat" mass="0.000006" contype="0" conaffinity="0"/>
+        </body>
+      </body>
+      <body name="left_leg_T3" pos="-0.005 0.005 -0.002" euler="-0.3 -0.8 -0.4">
+        <geom name="left_femur_T3" type="mesh" mesh="leg_femur_mesh" 
+              material="fly_body_mat" mass="0.000008" contype="0" conaffinity="0"/>
+        <body name="left_tibia_T3" pos="0 0.006 -0.004" euler="0 1.0 0">
+          <geom name="left_tibia_T3_geom" type="mesh" mesh="leg_tibia_mesh" 
+                material="fly_body_mat" mass="0.000006" contype="0" conaffinity="0"/>
+        </body>
+      </body>
+      <body name="right_leg_T1" pos="0.006 -0.005 -0.002" euler="-0.4 -1.1 -0.5">
+        <geom name="right_femur_T1" type="mesh" mesh="leg_femur_r_mesh" 
+              material="fly_body_mat" mass="0.000008" contype="0" conaffinity="0"/>
+        <body name="right_tibia_T1" pos="0 -0.006 -0.004" euler="-0.2 1.2 0">
+          <geom name="right_tibia_T1_geom" type="mesh" mesh="leg_tibia_r_mesh" 
+                material="fly_body_mat" mass="0.000006" contype="0" conaffinity="0"/>
+        </body>
+      </body>
+      <body name="right_leg_T2" pos="0.001 -0.006 -0.003" euler="-0.2 -0.9 -0.2">
+        <geom name="right_femur_T2" type="mesh" mesh="leg_femur_r_mesh" 
+              material="fly_body_mat" mass="0.000008" contype="0" conaffinity="0"/>
+        <body name="right_tibia_T2" pos="0 -0.006 -0.004" euler="0 1.1 0">
+          <geom name="right_tibia_T2_geom" type="mesh" mesh="leg_tibia_r_mesh" 
+                material="fly_body_mat" mass="0.000006" contype="0" conaffinity="0"/>
+        </body>
+      </body>
+      <body name="right_leg_T3" pos="-0.005 -0.005 -0.002" euler="0.3 -0.8 0.4">
+        <geom name="right_femur_T3" type="mesh" mesh="leg_femur_r_mesh" 
+              material="fly_body_mat" mass="0.000008" contype="0" conaffinity="0"/>
+        <body name="right_tibia_T3" pos="0 -0.006 -0.004" euler="0 1.0 0">
+          <geom name="right_tibia_T3_geom" type="mesh" mesh="leg_tibia_r_mesh" 
+                material="fly_body_mat" mass="0.000006" contype="0" conaffinity="0"/>
         </body>
       </body>
       
-      <!-- Right legs (simplified, visual only) -->
+      <!-- Legacy aliases kept so older visualisers that look for left_leg_front still find a body. -->
+      <body name="left_leg_front" pos="0.005 0.006 -0.003" euler="0 -0.3 0">
+        <geom name="left_femur_front" type="mesh" mesh="leg_femur_mesh" 
+              material="fly_body_mat" mass="0.000001" contype="0" conaffinity="0" rgba="0.25 0.15 0.08 0"/>
+      </body>
       <body name="right_leg_front" pos="0.005 -0.006 -0.003" euler="0 -0.3 0">
-        <geom name="right_femur_front" type="mesh" mesh="leg_femur_mesh" 
-              material="fly_body_mat" mass="0.00001" contype="0" conaffinity="0"/>
-        <body name="right_tibia_front" pos="0 -0.008 -0.005" euler="0 0.8 0">
-          <geom name="right_tibia_front_geom" type="mesh" mesh="leg_tibia_mesh" 
-                material="fly_body_mat" mass="0.00001" contype="0" conaffinity="0"/>
-        </body>
+        <geom name="right_femur_front" type="mesh" mesh="leg_femur_r_mesh" 
+              material="fly_body_mat" mass="0.000001" contype="0" conaffinity="0" rgba="0.25 0.15 0.08 0"/>
       </body>
     </body>
   </worldbody>
   
   <actuator>
-    <!-- Flight control in the thorax site / body frame (not world-frame freejoint gear).
-         ctrl is SI units (N and N·m) after gainprm=1. Engineered so max lift exceeds
-         body weight; not a biological muscle model. -->
+    <!-- Kept for API/tests (gainprm=1, SI units). Flight forces are applied in Python
+         via the wing model; ctrl is left at 0 so actuators do not double-count lift. -->
     <general name="thrust_forward" gear="1 0 0 0 0 0" site="thorax_ctrl" gainprm="1 0 0"/>
     <general name="thrust_up" gear="0 0 1 0 0 0" site="thorax_ctrl" gainprm="1 0 0"/>
     <general name="torque_roll" gear="0 0 0 1 0 0" site="thorax_ctrl" gainprm="1 0 0"/>
@@ -139,7 +214,6 @@ FLY_MJCF = """
   </actuator>
   
   <sensor>
-    <!-- Fly position and orientation -->
     <framepos name="fly_pos" objtype="body" objname="fly"/>
     <framequat name="fly_quat" objtype="body" objname="fly"/>
     <framelinvel name="fly_vel" objtype="body" objname="fly"/>
@@ -151,6 +225,5 @@ FLY_MJCF = """
 
 def get_fly_mjcf() -> str:
     """Get MJCF XML string for fly environment."""
-    # Format with mesh directory path
     meshdir = str(ASSETS_DIR.absolute())
     return FLY_MJCF.format(meshdir=meshdir)

@@ -48,6 +48,7 @@ class FlightController:
         # Smoothing filter
         self.prev_action = np.zeros(5)
         self.alpha = 0.7  # Exponential smoothing
+        self.last_wing_strokes = np.zeros(2, dtype=np.float64)
     
     def compute_action(
         self,
@@ -102,6 +103,13 @@ class FlightController:
         
         # Clip to valid range
         action = np.clip(action, -1.0, 1.0)
+        mean = float(np.clip(action[1], 0.0, 1.0))
+        diff = float(np.clip(action[4], -1.0, 1.0))
+        self.last_wing_strokes = np.array(
+            [float(np.clip(mean + 0.5 * diff, 0.0, 1.0)),
+             float(np.clip(mean - 0.5 * diff, 0.0, 1.0))],
+            dtype=np.float64,
+        )
         
         return action
     
@@ -149,6 +157,8 @@ class BiologicalFlightController:
             select_input_neurons_for_optic_flow,
             select_input_neurons_for_looming,
             select_output_neurons_for_motor,
+            select_haltere_afferent_neurons,
+            find_optic_lobe_hex_columns,
             create_fixed_input_assignment,
         )
         
@@ -205,6 +215,22 @@ class BiologicalFlightController:
         )
         print(f"Looming → LPLC2+LC4: L={len(self.input_mapping['looming_left'])}, "
               f"R={len(self.input_mapping['looming_right'])}")
+
+        # Haltere afferents: body angular velocity. Empty → engineered damping fallback.
+        hex_cols = find_optic_lobe_hex_columns(annotations)
+        if hex_cols is None:
+            print(
+                "Optic-lobe hex columns: not present in annotations "
+                "(no hexX/hexY/column fields). Using synthetic ~750-ommatidia hex lattice."
+            )
+        else:
+            print(f"Optic-lobe hex columns: {hex_cols[0]}, {hex_cols[1]}")
+        self.optic_lobe_hex_columns = hex_cols
+
+        haltere = select_haltere_afferent_neurons(annotations, body_ids, body_id_to_idx)
+        self.input_mapping["haltere_left"] = haltere["left"]
+        self.input_mapping["haltere_right"] = haltere["right"]
+        self.haltere_fallback = haltere["fallback"]
         
         # Output mapping: DN types → motor commands
         self.output_mapping = select_output_neurons_for_motor(
@@ -235,6 +261,7 @@ class BiologicalFlightController:
         # Smoothing
         self.prev_action = np.zeros(5)
         self.alpha = 0.7
+        self.last_wing_strokes = np.array([self.hover_action, self.hover_action], dtype=np.float64)
     
     def set_visual_input(
         self,
@@ -243,6 +270,7 @@ class BiologicalFlightController:
         optic_flow_features: Dict[str, np.ndarray],
         looming_features: Dict[str, np.ndarray],
         brain,
+        angular_velocity: Optional[np.ndarray] = None,
     ):
         """
         Set visual input to brain via biological neuron mappings.
@@ -276,10 +304,16 @@ class BiologicalFlightController:
             pending_val.extend(values.tolist())
 
         if self.input_mapping["luminance_left"].size > 0:
-            lum_left_val = np.atleast_1d(left_luminance)[0] if np.isscalar(left_luminance) else left_luminance.mean()
+            if np.isscalar(left_luminance):
+                lum_left_val = float(left_luminance)
+            else:
+                lum_left_val = np.asarray(left_luminance, dtype=np.float32).ravel()
             _extend(self.input_mapping["luminance_left"], lum_left_val)
         if self.input_mapping["luminance_right"].size > 0:
-            lum_right_val = np.atleast_1d(right_luminance)[0] if np.isscalar(right_luminance) else right_luminance.mean()
+            if np.isscalar(right_luminance):
+                lum_right_val = float(right_luminance)
+            else:
+                lum_right_val = np.asarray(right_luminance, dtype=np.float32).ravel()
             _extend(self.input_mapping["luminance_right"], lum_right_val)
 
         for key, feature_val in optic_flow_features.items():
@@ -300,6 +334,52 @@ class BiologicalFlightController:
             self._last_looming = max(self._last_looming, abs(raw))
             _extend(self.input_mapping["looming_right"], raw)
 
+        if angular_velocity is not None:
+            self._extend_haltere(pending_idx, pending_val, angular_velocity, _extend)
+
+        if pending_idx:
+            brain.set_input(
+                np.array(pending_val, dtype=np.float32),
+                neuron_indices=np.array(pending_idx, dtype=np.int32),
+            )
+
+    def _extend_haltere(self, pending_idx, pending_val, angular_velocity, _extend) -> None:
+        """Encode body-frame angular velocity onto left/right haltere afferents."""
+        ang = np.atleast_1d(np.asarray(angular_velocity, dtype=np.float32)).ravel()
+        if ang.size < 3:
+            ang = np.pad(ang, (0, 3 - ang.size))
+        wx, wy, wz = float(ang[0]), float(ang[1]), float(ang[2])
+        left = self.input_mapping.get("haltere_left", np.array([], dtype=np.int32))
+        right = self.input_mapping.get("haltere_right", np.array([], dtype=np.int32))
+        if left.size > 0:
+            _extend(left, np.array([wx, wy, wz], dtype=np.float32))
+        if right.size > 0:
+            _extend(right, np.array([wx, -wy, wz], dtype=np.float32))
+
+    def set_haltere_input(self, angular_velocity: np.ndarray, brain) -> None:
+        """Write angular-velocity drive onto annotated haltere neurons (test helper)."""
+        pending_idx: list = []
+        pending_val: list = []
+
+        def _extend(indices, raw_values):
+            indices = np.asarray(indices, dtype=np.int32)
+            if indices.size == 0:
+                return
+            values = np.atleast_1d(np.asarray(raw_values, dtype=np.float32)).ravel()
+            if values.size == 1:
+                values = np.full(indices.size, float(values[0]), dtype=np.float32)
+            elif values.size != indices.size:
+                assignment = self.create_fixed_input_assignment(
+                    values.size, indices.size, seed=42
+                )
+                values = values[assignment].astype(np.float32)
+            mean_abs = float(np.mean(np.abs(values))) + 1e-6
+            values = values * (self.input_drive / mean_abs)
+            values = np.clip(values, -self.input_drive_clip, self.input_drive_clip)
+            pending_idx.extend(indices.tolist())
+            pending_val.extend(values.tolist())
+
+        self._extend_haltere(pending_idx, pending_val, angular_velocity, _extend)
         if pending_idx:
             brain.set_input(
                 np.array(pending_val, dtype=np.float32),
@@ -448,8 +528,22 @@ class BiologicalFlightController:
             Action: [thrust_forward, thrust_up, roll, pitch, yaw]
         """
         dng = self._normalized_readout("DNg02", brain_activity)
+        dng_l = self._normalized_readout("DNg02_L", brain_activity)
+        dng_r = self._normalized_readout("DNg02_R", brain_activity)
         dnb = self._normalized_readout("DNb", brain_activity)
         dnp = self._normalized_readout("DNp01", brain_activity)
+        # DNg02 left/right set wing stroke amplitudes around hover (lift = weight at rest).
+        hover = float(self.hover_action)
+        self.last_wing_strokes = np.array([
+            float(np.clip(hover + 0.25 * dng_l, 0.0, 1.0)),
+            float(np.clip(hover + 0.25 * dng_r, 0.0, 1.0)),
+        ], dtype=np.float64)
+        if not self._pair_usable("DNg02_L", "DNg02_R", brain_activity):
+            mean_dev = 0.20 * dng
+            self.last_wing_strokes = np.array(
+                [float(np.clip(hover + mean_dev, 0.0, 1.0))] * 2,
+                dtype=np.float64,
+            )
         # Engineered residual: strong looming can still trigger escape if DNp01 is silent.
         loom_assist = float(np.tanh(3.0 * (self._last_looming - 0.35)))
         dnp_eff = max(dnp, loom_assist)
@@ -504,4 +598,6 @@ class BiologicalFlightController:
             "warmup_complete": float(self.warmup_complete),
             "brain_escapes": float(self.brain_escape_count),
             "engineered_escapes": float(self.engineered_escape_count),
+            "wing_stroke_left": float(self.last_wing_strokes[0]),
+            "wing_stroke_right": float(self.last_wing_strokes[1]),
         }
