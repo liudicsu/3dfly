@@ -291,6 +291,11 @@ def select_core_tplus_recipe(
 def slice_connectome(connectome: ConnectomeData, keep: np.ndarray) -> ConnectomeData:
     """Restrict a connectome to ``keep`` indices, preserving metadata."""
     keep = np.asarray(keep, dtype=int)
+    extras = {}
+    for key, arr in (connectome.extras or {}).items():
+        a = np.asarray(arr)
+        if a.shape[:1] == (connectome.n,):
+            extras[key] = a[keep]
     return ConnectomeData(
         body_ids=connectome.body_ids[keep],
         W=connectome.W[keep][:, keep].tocsr(),
@@ -302,4 +307,5 @@ def slice_connectome(connectome: ConnectomeData, keep: np.ndarray) -> Connectome
         hex=connectome.hex[keep],
         nt=connectome.nt[keep],
         rho_full_reference=connectome.rho_full_reference,
+        extras=extras,
     )

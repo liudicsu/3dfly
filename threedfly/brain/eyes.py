@@ -63,7 +63,12 @@ def stereo_to_hex(
     right_img: np.ndarray,
     uv: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Left and right MuJoCo eye images → (721,), (721,) hex frames."""
+    """Left and right MuJoCo eye images → (721,), (721,) hex frames.
+
+    Do **not** flip the right-eye UV here. The MJCF cameras are already
+    mirror-symmetric (image-right = nasal on both sides) once the right
+    camera Y axis is flipped so both look +X.
+    """
     if uv is None:
         uv = box_eye_uv()
     return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv)

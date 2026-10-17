@@ -29,6 +29,22 @@ def test_image_to_hex_samples_blob_laterality():
     assert left > right + 0.2
 
 
+def test_right_eye_looks_forward_not_backward():
+    """Root cause of the r2 DNp03_L bias: right camera Y was not mirrored."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "threedfly" / "sim" / "mjcf.py"
+    spec = importlib.util.spec_from_file_location("threedfly_mjcf_camera", path)
+    mjcf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mjcf)
+    look_L = mjcf.camera_look_direction(mjcf.parse_eye_xyaxes(mjcf.FLY_MJCF, "left_eye"))
+    look_R = mjcf.camera_look_direction(mjcf.parse_eye_xyaxes(mjcf.FLY_MJCF, "right_eye"))
+    assert look_L[0] > 0.7, f"left eye should look +X, got {look_L}"
+    assert look_R[0] > 0.7, f"right eye should look +X, got {look_R}"
+    assert look_L[0] * look_R[0] > 0
+
+
 def test_stereo_to_hex_pair():
     left = np.full((32, 32, 3), 128, dtype=np.uint8)
     right = np.zeros((32, 32, 3), dtype=np.uint8)

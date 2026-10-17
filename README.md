@@ -199,6 +199,7 @@ Acceptance runs a true lateral loom from the left **and** right (heading
 
 ```bash
 # 3.12 venv with flyvis + data/full_connectome.npz
+python scripts/export_core_bundle.py              # box: write data/core_bundle.npz (<50 MB)
 python scripts/closed_loop_acceptance.py          # 2000-step room + L/R lateral loom + open-space
 python scripts/closed_loop_acceptance.py --quick
 threedfly run --headless --steps 400              # auto coreTplus when available

@@ -92,8 +92,14 @@ def _as_event(e):
 def direction_correct_frac(
     headings: Sequence[float],
     events: Iterable,
+    threat_side: str,
     window: int = 8,
 ) -> float:
+    """Fraction of events that turned away from the *scenario* threat side.
+
+    Does not use the event's DNp03 label or commanded yaw (those are
+    self-consistent even when the fly turns into the wall).
+    """
     evs = []
     for raw in events:
         e = _as_event(raw)
@@ -104,12 +110,7 @@ def direction_correct_frac(
         return float("nan")
     ok = 0
     for e in evs:
-        side = getattr(e, "threat_side", "")
         step = int(getattr(e, "step", 0))
-        yaw = float(getattr(e, "yaw", 0.0))
-        by_heading = escape_turned_away(headings, step, side, window=window)
-        # Command yaw is a fallback when the heading buffer is too short.
-        by_yaw = (side == "L" and yaw < -0.02) or (side == "R" and yaw > 0.02)
-        if by_heading or by_yaw:
+        if escape_turned_away(headings, step, threat_side, window=window):
             ok += 1
     return float(ok) / float(len(evs))

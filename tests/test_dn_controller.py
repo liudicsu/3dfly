@@ -169,3 +169,43 @@ def test_dna02_normalised_to_m1_lr_scale():
     ro = DNReadout(dna02_L=0.54, dna02_R=0.0, dng02_amp=5.0)
     yaw = float(c.compute(ro)[4])
     assert yaw > 0.20
+
+
+def test_no_escapes_in_first_100_steps_of_open_flight():
+    """Startup artifact: rest EMA at 0 vs flyvis settling 1.7 Hz must not fire."""
+    c = _ctl(dnp01_warmup_steps=40)
+    for i in range(100):
+        hz = 0.0 if i < 8 else 1.75
+        c.compute(
+            DNReadout(
+                dnp01_L=hz,
+                dnp01_R=hz * 0.95,
+                dnp03_L=0.75,
+                dnp03_R=0.35,
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count == 0
+
+
+def test_frozen_calibrated_rest_catches_slow_loom():
+    c = _ctl(dnp01_warmup_steps=10)
+    cruise = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dng02_amp=5.0)
+    for _ in range(20):
+        c.compute(cruise)
+    assert c.brain_escape_count == 0
+    # 1.8 → 2.45 is the r2 side_loom_right rise the moving EMA ate.
+    loom = DNReadout(dnp01_L=2.45, dnp01_R=1.90, dnp03_R=1.2, dnp03_L=0.3, dng02_amp=5.0)
+    c.compute(loom)
+    assert c.brain_escape_count == 1
+    assert c.escape_events[-1].threat_side == "R"
+
+
+def test_per_side_baseline_removes_dc_bias():
+    c = _ctl(dnp01_warmup_steps=0)
+    biased = DNReadout(dnp03_L=0.75, dnp03_R=0.35, dng02_amp=5.0, dnp01_L=1.8, dnp01_R=1.7)
+    c.capture_baseline(biased)
+    yaw = float(c.compute(biased)[4])
+    assert abs(yaw) < 0.05
+    left_loom = DNReadout(dnp03_L=1.30, dnp03_R=0.35, dng02_amp=5.0, dnp01_L=1.8, dnp01_R=1.7)
+    assert float(c.compute(left_loom)[4]) < -0.05

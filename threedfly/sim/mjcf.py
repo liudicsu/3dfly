@@ -102,8 +102,11 @@ FLY_MJCF = """
         <camera name="left_eye" pos="0.003 0.006 0.002" 
                 xyaxes="0 -1 0  0.342 0 0.940"
                 fovy="90" mode="fixed"/>
+        <!-- Right X is mirrored (+Y). Y must also flip so X×Y stays ≈ −X
+             (MuJoCo looks along −Z). The old Y=(0.342,0,0.940) made the
+             right eye look backward and produced a fixed DNp03_L bias. -->
         <camera name="right_eye" pos="0.003 -0.006 0.002"
-                xyaxes="0 1 0  0.342 0 0.940"
+                xyaxes="0 1 0  -0.342 0 -0.940"
                 fovy="90" mode="fixed"/>
       </body>
       
@@ -227,3 +230,27 @@ def get_fly_mjcf() -> str:
     """Get MJCF XML string for fly environment."""
     meshdir = str(ASSETS_DIR.absolute())
     return FLY_MJCF.format(meshdir=meshdir)
+
+
+def camera_look_direction(xyaxes) -> "object":
+    """World-frame look direction. MuJoCo cameras look along −Z; Z = X × Y."""
+    import numpy as np
+
+    a = np.asarray(xyaxes, dtype=float).reshape(6)
+    z = np.cross(a[:3], a[3:])
+    look = -z
+    nrm = float(np.linalg.norm(look))
+    return look / nrm if nrm > 0 else look
+
+
+def parse_eye_xyaxes(xml: str, name: str):
+    """Read the 6 ``xyaxes`` floats for ``camera name=...`` from an MJCF string."""
+    import re
+
+    m = re.search(
+        rf'<camera name="{re.escape(name)}"[^>]*xyaxes="([^"]+)"',
+        xml,
+    )
+    if m is None:
+        raise ValueError(f"camera {name} xyaxes not found")
+    return [float(x) for x in m.group(1).split()]

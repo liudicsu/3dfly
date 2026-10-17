@@ -57,18 +57,21 @@ def test_escape_turned_away_uses_heading_not_label():
     assert not escape_turned_away([0.2, 0.2, 0.2], 0, "L")
 
 
-def test_direction_correct_frac_heading_and_dicts():
+def test_direction_correct_frac_uses_ground_truth_threat_not_label_or_yaw():
+    # Heading decreases = right turn = away from a LEFT threat.
     headings = [0.10, 0.08, 0.02, -0.05]
+    # Event labeled L with yaw=0 — old metric counted the label / yaw fallback.
     events = [
         EscapeEvent(step=0, dnp01=2.2, threat_side="L", yaw=0.0, engineered=False),
-        {"step": 0, "dnp01": 2.0, "threat_side": "L", "yaw": 0.0, "engineered": False},
+        {"step": 0, "dnp01": 2.0, "threat_side": "L", "yaw": -0.8, "engineered": False},
     ]
-    assert direction_correct_frac(headings, events[:1]) == pytest.approx(1.0)
-    assert direction_correct_frac(headings, events[1:]) == pytest.approx(1.0)
-    wrong = [EscapeEvent(step=0, dnp01=2.2, threat_side="L", yaw=0.4, engineered=False)]
-    # Positive yaw is a left turn — toward a left threat, not away.
-    # Headings still decrease, so heading wins; use a heading that increases.
-    assert direction_correct_frac([0.0, 0.2, 0.35], wrong) == pytest.approx(0.0)
+    assert direction_correct_frac(headings, events, threat_side="L") == pytest.approx(1.0)
+    # Same events, but the scenario threat is RIGHT: turning right is INTO the wall.
+    assert direction_correct_frac(headings, events, threat_side="R") == pytest.approx(0.0)
+    # Flat heading + commanded yaw must not count (no yaw fallback).
+    flat = [0.2, 0.2, 0.2]
+    yaw_only = [EscapeEvent(step=0, dnp01=2.2, threat_side="L", yaw=-0.8, engineered=False)]
+    assert direction_correct_frac(flat, yaw_only, threat_side="L") == pytest.approx(0.0)
 
 
 def test_wrap_heading_delta_across_pi():
@@ -100,3 +103,7 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert pose_r["vel"][1] < 0.0
     # Old scenario faced +Y (π/2) and drove into the frontal wall.
     assert abs(pose_l["yaw"] - np.pi / 2) > 0.7
+    open_p = mod.open_space_pose()
+    assert open_p["yaw"] == pytest.approx(0.0)
+    assert open_p["max_steps"] <= 120
+    assert abs(open_p["pose"][0]) < 0.1 and abs(open_p["pose"][1]) < 0.1

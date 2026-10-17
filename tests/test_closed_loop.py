@@ -43,12 +43,15 @@ def _tiny_brain(fn=None) -> ClosedLoopBrain:
         return {"T4a": np.array([0.8], dtype=np.float32)}, {}
 
     eyes = FakeDualEyes(fn or _default)
+    from threedfly.control.flight_params import FlightParams
+
     return ClosedLoopBrain(
         core=core,
         index=index,
         plans={"L": plan_L, "R": plan_R},
         eyes=eyes,
         halt_idx=np.array([], dtype=np.int64),
+        params=FlightParams(flyvis_stride=1),
     )
 
 
@@ -77,6 +80,25 @@ def test_closed_loop_reset_clears_core_not_called_per_step():
     assert brain.eyes.n_steps == 0
 
 
+def test_mirrored_hex_swap_mirrors_fake_eye_outputs():
+    """Eye-swap of a laterality cue must swap the returned type traces."""
+
+    def _fn(hL, hR):
+        return (
+            {"cue": np.array([float(np.mean(hL))], dtype=np.float32)},
+            {"cue": np.array([float(np.mean(hR))], dtype=np.float32)},
+        )
+
+    eyes = FakeDualEyes(_fn)
+    leftish = np.ones(8, dtype=np.float32)
+    rightish = np.full(8, 0.1, dtype=np.float32)
+    vL, vR = eyes.step_pair(leftish, rightish)
+    vL2, vR2 = eyes.step_pair(rightish, leftish)
+    assert vL["cue"][0] > vR["cue"][0]
+    assert vL2["cue"][0] < vR2["cue"][0]
+    assert vL["cue"][0] == pytest.approx(vR2["cue"][0])
+
+
 def test_dual_eyes_share_one_network_with_independent_state():
     class _Eye:
         def __init__(self):
@@ -103,17 +125,30 @@ def test_dual_eyes_share_one_network_with_independent_state():
     assert vR2["T4a"][0] > vR1["T4a"][0]
 
 
-def test_closed_loop_build_defaults_to_one_torch_thread():
+def test_closed_loop_flyvis_stride_holds_voltages():
+    brain = _tiny_brain()
+    brain.params.flyvis_stride = 2
+    blank = np.zeros((8, 8, 3), dtype=np.uint8)
+    brain.step(blank, blank)
+    brain.step(blank, blank)
+    brain.step(blank, blank)
+    assert brain.eyes.n_steps == 2  # steps 0 and 2; step 1 held
+
+
+def test_closed_loop_build_defaults_torch_threads_optional():
     import inspect
 
     sig = inspect.signature(ClosedLoopBrain.build)
-    assert sig.parameters["torch_threads"].default == 1
+    assert sig.parameters["torch_threads"].default is None
 
 
 def test_core_stack_available_is_false_without_data_or_flyvis():
-    # This workspace typically has neither; the helper must not raise.
+    from threedfly.brain.core_bundle import core_bundle_available
+
     flag = core_stack_available()
-    assert flag is (connectome_available() and flyvis_available())
+    assert flag is (
+        flyvis_available() and (connectome_available() or core_bundle_available())
+    )
 
 
 @pytest.mark.skipif(

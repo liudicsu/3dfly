@@ -26,4 +26,5 @@ def test_escape_threshold_sits_between_m1_rotation_and_loom():
     assert p.dnp01_rot_hz == M1_DNP01_ROT_MAX_HZ
     assert p.dna02_scale_hz == M1_DNA02_LR_HZ
     assert p.hse_scale_hz == M1_HSE_LR_HZ
-    assert "0.85" in p.notes["escape"] or "EMA" in p.notes["escape"]
+    assert p.dnp01_freeze_rest is True
+    assert "0.55" in p.notes["escape"] or "frozen" in p.notes["escape"]

@@ -74,6 +74,16 @@ def lateral_loom_pose(side: str) -> dict:
     raise ValueError(f"side must be L or R, got {side!r}")
 
 
+def open_space_pose() -> dict:
+    """Centre of the room, heading +X. Keep the run short so no wall is reached."""
+    return {
+        "pose": (0.0, 0.0, 1.5),
+        "yaw": 0.0,
+        "vel": (0.30, 0.0, 0.0),
+        "max_steps": 120,
+    }
+
+
 def _run_scenario(
     name: str,
     env,
@@ -83,6 +93,7 @@ def _run_scenario(
     pose=None,
     yaw: float = 0.0,
     vel=None,
+    threat_side=None,
 ) -> dict:
     env.reset(seed=0)
     if pose is not None:
@@ -94,12 +105,17 @@ def _run_scenario(
     traj = []
     headings = []
     dnp01 = []
+    rises = []
     ms_brain = []
     ms_flyvis = []
     ms_total = []
     wall = 0
     t_wall = time.perf_counter()
     left_img, right_img = env.get_eye_images()
+    warmed = brain.prewarm(left_img, right_img, env.get_fly_angular_velocity())
+    if warmed is not None:
+        ctl.capture_baseline(warmed.readout)
+        left_img, right_img = env.get_eye_images()
     for step in range(n_steps):
         res = brain.step(left_img, right_img, env.get_fly_angular_velocity())
         action = ctl.compute(res.readout)
@@ -108,6 +124,7 @@ def _run_scenario(
         traj.append(pos)
         headings.append(heading_from_quaternion(info["orientation"]))
         dnp01.append(max(res.readout.dnp01_L, res.readout.dnp01_R))
+        rises.append(float(ctl.last_rise))
         ms_brain.append(res.ms.get("brain", 0.0))
         ms_flyvis.append(res.ms.get("flyvis", 0.0))
         ms_total.append(res.ms.get("total", 0.0))
@@ -124,7 +141,11 @@ def _run_scenario(
     wall_s = time.perf_counter() - t_wall
     traj = np.asarray(traj, dtype=float) if traj else np.zeros((0, 3))
     headings_arr = np.asarray(headings, dtype=float)
-    dir_ok = direction_correct_frac(headings_arr, ctl.escape_events)
+    dir_ok = (
+        direction_correct_frac(headings_arr, ctl.escape_events, threat_side)
+        if threat_side
+        else float("nan")
+    )
     dx, dy = xy_extent(traj)
     return {
         "name": name,
@@ -146,6 +167,7 @@ def _run_scenario(
         "trajectory": traj,
         "headings": headings_arr,
         "dnp01": np.asarray(dnp01, dtype=float),
+        "dnp01_rise": np.asarray(rises, dtype=float),
         "escape_events": [
             {
                 "step": e.step,
@@ -196,11 +218,14 @@ def _plot_escapes(scenarios: dict, path: Path, delta_hz: float) -> None:
         axes = [axes]
     for ax, name in zip(axes, names):
         sc = scenarios[name]
-        ax.plot(sc["dnp01"], color="tab:red", lw=1.0, label="DNp01")
-        ax.axhline(delta_hz, color="gray", ls="--", lw=0.8, label=f"EMA Δ thr {delta_hz:.2f}")
+        rise = sc.get("dnp01_rise")
+        if rise is None or getattr(rise, "size", 0) == 0:
+            rise = sc["dnp01"]
+        ax.plot(rise, color="tab:red", lw=1.0, label="DNp01 rise")
+        ax.axhline(delta_hz, color="gray", ls="--", lw=0.8, label=f"rise thr {delta_hz:.2f}")
         for ev in sc["escape_events"]:
             ax.axvline(ev["step"], color="tab:orange", alpha=0.5)
-        ax.set_ylabel("Hz")
+        ax.set_ylabel("ΔHz")
         ax.set_title(f"{name}: escapes={sc['brain_escapes']} latch={sc['dnp01_latch_frac']:.3f}")
         ax.legend(loc="upper right", fontsize=8)
     axes[-1].set_xlabel("step")
@@ -221,24 +246,30 @@ def main(argv=None) -> int:
     p.add_argument("--engineered-looming-residual", action="store_true")
     args = p.parse_args(argv)
 
-    if not connectome_available() or not flyvis_available() or not core_stack_available():
+    from threedfly.brain.core_bundle import core_bundle_available
+
+    if not flyvis_available() or not core_stack_available():
         print(
-            "ERROR: closed-loop acceptance needs data/full_connectome.npz and flyvis.\n"
-            "Python 3.12: pip install -e '.[brain]'. "
-            "Local editable flyvis + pretrained data: pip install -e /path/to/flyvis --no-deps.",
+            "ERROR: closed-loop acceptance needs flyvis and either\n"
+            "  data/full_connectome.npz  or  data/core_bundle.npz\n"
+            "(export the bundle on the box: python scripts/export_core_bundle.py).\n"
+            "Python 3.12: pip install -e '.[brain]'.",
             file=sys.stderr,
         )
         return 2
+    if not connectome_available() and core_bundle_available():
+        print("Using data/core_bundle.npz (full connectome absent)", flush=True)
 
     room_steps = 80 if args.quick else int(args.steps)
     side_steps = 40 if args.quick else max(160, min(400, args.steps // 5))
-    open_steps = 40 if args.quick else max(80, min(400, args.steps // 5))
+    # 120 steps × 0.02 s × 0.35 m/s ≈ 0.8 m from the centre — stays off the walls.
+    open_steps = 40 if args.quick else 120
     if args.quick:
         print("--quick: unofficial short movies", flush=True)
 
     params = FlightParams(use_engineered_looming_residual=args.engineered_looming_residual)
     print("Building closed-loop brain…", flush=True)
-    brain = ClosedLoopBrain.build(params=params, quick=args.quick, torch_threads=1)
+    brain = ClosedLoopBrain.build(params=params, quick=args.quick)
     env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
     ctl = DNFlightController(params)
     ctl.bind_hover(env.hover_action)
@@ -251,8 +282,8 @@ def main(argv=None) -> int:
         ctl,
         room_steps,
         pose=(0.0, 0.0, 1.5),
-        yaw=0.18,
-        vel=(0.35, 0.06, 0.0),
+        yaw=0.0,
+        vel=(0.30, 0.0, 0.0),
     )
     scenarios = {"room": room}
     for side in ("L", "R"):
@@ -268,17 +299,19 @@ def main(argv=None) -> int:
             pose=pose["pose"],
             yaw=pose["yaw"],
             vel=pose["vel"],
+            threat_side=side,
         )
     print("Scenario open_space (no false escape)…", flush=True)
+    open_p = open_space_pose()
     open_sc = _run_scenario(
         "open_space",
         env,
         brain,
         ctl,
-        open_steps,
-        pose=(0.0, 0.0, 1.5),
-        yaw=0.0,
-        vel=(0.4, 0.0, 0.0),
+        min(open_steps, int(open_p["max_steps"])),
+        pose=open_p["pose"],
+        yaw=open_p["yaw"],
+        vel=open_p["vel"],
     )
     scenarios["open_space"] = open_sc
     env.close()
@@ -291,7 +324,11 @@ def main(argv=None) -> int:
     _plot_escapes(scenarios, out / "escapes.png", params.dnp01_escape_delta_hz)
 
     def _pub(sc):
-        return {k: v for k, v in sc.items() if k not in ("trajectory", "headings", "dnp01")}
+        return {
+            k: v
+            for k, v in sc.items()
+            if k not in ("trajectory", "headings", "dnp01", "dnp01_rise")
+        }
 
     room_w100 = walls_per_100(room["wall_contacts"], room["steps"])
     metrics = {
