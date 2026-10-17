@@ -201,6 +201,15 @@ def run_simulation(
     
     # Reset environment
     left_img, right_img = env.reset(seed=seed)
+    if use_core:
+        if hasattr(env, "hide_loom_object"):
+            env.hide_loom_object()
+            left_img, right_img = env.get_eye_images()
+        print("\n[Warmup] coreTplus prewarm + DNp01 baseline (same as acceptance)…")
+        warmed = core_brain.prewarm(left_img, right_img, env.get_fly_angular_velocity())
+        if warmed is not None:
+            dn_controller.capture_baseline(warmed.readout)
+        left_img, right_img = env.get_eye_images()
     
     # Warmup period for biological controller (brain_steps_per_sim is defined above)
     if use_biological and controller.warmup_steps > 0:

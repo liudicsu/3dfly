@@ -30,8 +30,9 @@ def test_escape_threshold_sits_between_m1_rotation_and_loom():
     assert p.dnp01_freeze_rest is True
     assert p.prewarm_steps >= 80
     assert p.side_loom_prewarm_steps >= p.prewarm_steps
-    assert p.flyvis_stride >= 3
+    assert p.flyvis_stride >= 2
     assert p.dnp01_rest_tau_steps >= 80.0
     assert p.dnp01_loom_lat_min > 0.0
     assert p.dnp01_slope_min > 0.0
-    assert "0.30" in p.notes["escape"] or "laterality" in p.notes["escape"]
+    assert p.threat_integrate_steps >= 8
+    assert "0.20" in p.notes["escape"] or "laterality" in p.notes["escape"]

@@ -72,26 +72,61 @@ def lateral_loom_pose(side: str) -> dict:
 def lateral_loom_object(side: str) -> dict:
     """Compact dark object closing from one side (M1-like looming disk).
 
-    Fly at the origin heading +X. Object starts ~2.6 m out and closes at
-    ~2.2 m/s so angular size grows from ~18° to >60° in about a second.
+    Fly at the origin heading +X. Start ~2.8 m out (≈35°) so the GF
+    window (40–60°) is during the rise, not after the object fills both
+    120° eyes.
     """
     if side == "L":
         return {
             "pose": (0.0, 0.0, 1.5),
             "yaw": 0.0,
             "vel": (0.05, 0.0, 0.0),
-            "loom_start": (1.55, 1.55, 1.5),
-            "loom_vel": (-1.30, -1.25, 0.0),
+            "loom_start": (2.00, 2.00, 1.5),
+            "loom_vel": (-1.40, -1.35, 0.0),
         }
     if side == "R":
         return {
             "pose": (0.0, 0.0, 1.5),
             "yaw": 0.0,
             "vel": (0.05, 0.0, 0.0),
-            "loom_start": (1.55, -1.55, 1.5),
-            "loom_vel": (-1.30, 1.25, 0.0),
+            "loom_start": (2.00, -2.00, 1.5),
+            "loom_vel": (-1.40, 1.35, 0.0),
         }
     raise ValueError(f"side must be L or R, got {side!r}")
+
+
+def loom_variants(side: str) -> list:
+    """Offset / speed / stride robustness cases (box r6 controls)."""
+    base = lateral_loom_object(side)
+    sg = 1.0 if side == "L" else -1.0
+    sx, sy, sz = base["loom_start"]
+    vx, vy, vz = base["loom_vel"]
+    return [
+        {
+            "tag": "far1.4x",
+            "loom_start": (sx * 1.4, sy * 1.4, sz),
+            "loom_vel": (vx, vy, vz),
+            "stride": None,
+        },
+        {
+            "tag": "slow0.7x",
+            "loom_start": (sx, sy, sz),
+            "loom_vel": (vx * 0.7, vy * 0.7, vz),
+            "stride": None,
+        },
+        {
+            "tag": "offset_x+0.8",
+            "loom_start": (sx + 0.8, sg * abs(sy), sz),
+            "loom_vel": (vx, vy, vz),
+            "stride": None,
+        },
+        {
+            "tag": "stride_hold",
+            "loom_start": (sx, sy, sz),
+            "loom_vel": (vx, vy, vz),
+            "stride": 3,
+        },
+    ]
 
 
 def headon_wall_pose() -> dict:
@@ -213,6 +248,7 @@ def _run_scenario(
         "ms_per_step_brain": float(np.median(ms_brain)) if ms_brain else 0.0,
         "ms_per_step_flyvis": float(np.median(ms_flyvis)) if ms_flyvis else 0.0,
         "ms_per_step_brain_flyvis": float(np.median(ms_total)) if ms_total else 0.0,
+        "ms_per_step_brain_flyvis_mean": float(np.mean(ms_total)) if ms_total else 0.0,
         "room_coverage": coverage(traj),
         "dx": dx,
         "dy": dy,
@@ -223,6 +259,7 @@ def _run_scenario(
         "dnp01_rise": np.asarray(rises, dtype=float),
         "dnp01_rise_max": float(np.max(rises)) if rises else 0.0,
         "yaw_terms": yaw_summary,
+        "would_fire": int(ctl.would_fire_count),
         "escape_events": [
             {
                 "step": e.step,
@@ -233,6 +270,25 @@ def _run_scenario(
             }
             for e in ctl.escape_events
         ],
+    }
+
+
+def _variant_direction(scenarios: dict) -> dict:
+    """≥80% away across official + offset/speed/stride L/R variants."""
+    dirs = []
+    per = {}
+    for name, sc in scenarios.items():
+        if not (name.startswith("side_loom_") or name.startswith("loomL_") or name.startswith("loomR_")):
+            continue
+        d = sc.get("escape_direction_correct")
+        per[name] = d
+        if d is not None:
+            dirs.append(float(d))
+    return {
+        "per_scenario": per,
+        "mean": float(np.mean(dirs)) if dirs else None,
+        "n": int(len(dirs)),
+        "pass": bool(dirs) and float(np.mean(dirs)) >= 0.80,
     }
 
 
@@ -378,9 +434,7 @@ def main(argv=None) -> int:
     for side in ("L", "R"):
         spec = lateral_loom_object(side)
         name = f"side_loom_{'left' if side == 'L' else 'right'}"
-        print(f"Scenario {name} (dark object from {side})…", flush=True)
-        prev_stride = int(brain.params.flyvis_stride)
-        brain.params.flyvis_stride = 1
+        print(f"Scenario {name} (dark object from {side}, stride={brain.params.flyvis_stride})…", flush=True)
         scenarios[name] = _run_scenario(
             name,
             env,
@@ -394,7 +448,27 @@ def main(argv=None) -> int:
             loom_start=spec["loom_start"],
             loom_vel=spec["loom_vel"],
         )
-        brain.params.flyvis_stride = prev_stride
+        if not args.quick:
+            for var in loom_variants(side):
+                vname = f"loom{side}_{var['tag']}"
+                print(f"Scenario {vname}…", flush=True)
+                prev = int(brain.params.flyvis_stride)
+                if var.get("stride"):
+                    brain.params.flyvis_stride = int(var["stride"])
+                scenarios[vname] = _run_scenario(
+                    vname,
+                    env,
+                    brain,
+                    ctl,
+                    160,
+                    pose=spec["pose"],
+                    yaw=spec["yaw"],
+                    vel=spec["vel"],
+                    threat_side=side,
+                    loom_start=var["loom_start"],
+                    loom_vel=var["loom_vel"],
+                )
+                brain.params.flyvis_stride = prev
     print("Scenario headon_wall…", flush=True)
     hw = headon_wall_pose()
     scenarios["headon_wall"] = _run_scenario(
@@ -478,7 +552,12 @@ def main(argv=None) -> int:
             "headon_wall_contacts": scenarios["headon_wall"]["wall_contacts"],
             "headon_brain_escapes": scenarios["headon_wall"]["brain_escapes"],
             "ctrl_center_16_escapes": scenarios["ctrl_center_short_prewarm"]["brain_escapes"],
+            "side_L_would_fire": side_l.get("would_fire"),
+            "side_R_would_fire": side_r.get("would_fire"),
+            "variant_direction_correct": _variant_direction(scenarios),
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
+            "ms_per_step_mean": room.get("ms_per_step_brain_flyvis_mean"),
+            "flyvis_stride": int(params.flyvis_stride),
             "beats_pr16_walls": beats_pr16_walls(room["wall_contacts"], room["steps"]),
             "no_latch": room["dnp01_latch_frac"] < 0.05,
             "use_engineered_eye_laterality": bool(params.use_engineered_eye_laterality),

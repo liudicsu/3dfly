@@ -65,6 +65,7 @@ def test_walls_use_high_contrast_checker():
     assert "rgba=\"0.8 0.8 0.9 1\"" not in xml
     assert 'name="loom_target"' in xml
     assert 'mocap="true"' in xml
+    assert 'size="0.58"' in xml
     # Expanding-edge loom: black/light checkers, not a near-black blob.
     assert 'rgb2="0.92 0.90 0.84"' in xml or "0.92 0.90 0.84" in xml
 
@@ -108,18 +109,15 @@ def test_stereo_to_hex_pair():
     assert hR.mean() == pytest.approx(0.0)
 
 
-def test_right_eye_hex_mirrors_v_for_inverted_camera():
-    """Right camera Y ≈ −Z; a top-of-image blob must map as if the image were upright."""
+def test_right_eye_hex_mirrors_u_for_mirrored_camera():
+    """Right camera X is sagittally mirrored: a left-of-image blob maps to large u."""
     h = w = 64
     img = np.zeros((h, w, 3), dtype=np.uint8)
-    img[: h // 4] = 255  # top rows
+    img[:, : w // 4] = 255  # left columns
     left = np.zeros_like(img)
     hL, hR = stereo_to_hex(left, img)
     uv = box_eye_uv()
-    # After V-flip, top-of-image (world-down on the inverted camera) lands
-    # on +yd hex cells (v_orig small → v_flip large? wait: top = small v).
-    # Flipped UV samples top rows at large v, i.e. −yd (bottom of lattice).
-    top = hR[uv[:, 1] < 0.35].mean()
-    bot = hR[uv[:, 1] > 0.65].mean()
-    assert bot > top + 0.2
+    lo = hR[uv[:, 0] < 0.35].mean()
+    hi = hR[uv[:, 0] > 0.65].mean()
+    assert hi > lo + 0.2
     assert float(hL.max()) == pytest.approx(0.0)

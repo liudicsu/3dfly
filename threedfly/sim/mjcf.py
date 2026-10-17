@@ -96,8 +96,10 @@ FLY_MJCF = """
       <geom type="sphere" size="0.4" material="obs_mat"/>
     </body>
     <!-- Compact dark loom (mocap). Hidden at z=−8 until a scenario moves it. -->
+    <!-- Radius 0.58 m: compact enough that a 40°-cant right loom stays
+         ipsilateral, large enough to drive DNp01 ≥ 0.20 at stride 2–3. -->
     <body name="loom_target" mocap="true" pos="0 0 -8">
-      <geom name="loom_geom" type="sphere" size="0.85" material="loom_mat"
+      <geom name="loom_geom" type="sphere" size="0.58" material="loom_mat"
             rgba="0.02 0.02 0.03 1" contype="0" conaffinity="0"/>
     </body>
     
@@ -118,16 +120,18 @@ FLY_MJCF = """
         <geom name="head_geom" type="mesh" mesh="head_mesh" 
               material="fly_body_mat" mass="0.0002" contype="0" conaffinity="0"/>
         
-        <!-- 120° FOV, 30° outward cant. A 90° forward FOV misses the ±Y
-             walls (bearing 90°) so DNp03 never saw a true side loom. -->
+        <!-- 120° FOV, 40° outward cant. 30° cant put a frontal-right
+         object (az −35°) in the left eye; 40° moves the nasal edge to
+         −20° so offset_x+0.8 stays ipsilateral. ±Y walls at 90° remain
+         inside each eye (look 40° + half-FOV 60°). -->
         <camera name="left_eye" pos="0.003 0.006 0.002"
-                xyaxes="0.500 -0.866 0.000  0.296 0.171 0.940"
+                xyaxes="0.643 -0.766 0.000  0.262 0.220 0.940"
                 fovy="120" mode="fixed"/>
-        <!-- Right X is mirrored (+Y). Y must also flip so X×Y stays forward
-             (MuJoCo looks along −Z). That inverts the image; stereo_to_hex
-             mirrors V so flyvis still sees upright flow. -->
+        <!-- Right X is sagittally mirrored. Y also flips so X×Y stays
+             forward (MuJoCo looks along −Z). stereo_to_hex U-flips the
+             right hex (image-right = nasal → flyvis u). -->
         <camera name="right_eye" pos="0.003 -0.006 0.002"
-                xyaxes="0.500 0.866 0.000  -0.296 0.171 -0.940"
+                xyaxes="0.643 0.766 0.000  -0.262 0.220 -0.940"
                 fovy="120" mode="fixed"/>
       </body>
       
@@ -253,9 +257,9 @@ def get_fly_mjcf() -> str:
     return FLY_MJCF.format(meshdir=meshdir)
 
 
-# Match Drosophila-ish frontolateral coverage: each eye cants out 30°
-# (left toward +Y, right toward −Y) with a 20° downward tilt and 120° fovy.
-EYE_CANT_DEG = 30.0
+# Frontolateral coverage: 40° outward cant (left +Y, right −Y), 20° down,
+# 120° fovy. 30° cant left a −35° offset object in both eyes.
+EYE_CANT_DEG = 40.0
 EYE_DOWN_DEG = 20.0
 EYE_FOVY_DEG = 120.0
 
@@ -264,7 +268,7 @@ def eye_xyaxes(side: str, cant_deg: float = EYE_CANT_DEG, down_deg: float = EYE_
     """6-float MuJoCo xyaxes for an outward-canted eye.
 
     Image-right is nasal on both sides. The right eye's Y axis is flipped so
-    look stays forward (the image is inverted; ``stereo_to_hex`` V-flips).
+    look stays forward (the image is inverted; ``stereo_to_hex`` U-flips).
     """
     import numpy as np
 

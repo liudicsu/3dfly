@@ -371,6 +371,93 @@ def test_bilateral_loom_brakes_forward():
     assert braked[0] < cruise[0] - 0.05
 
 
+def test_threat_uses_integrated_laterality_not_fire_instant():
+    """r7: last-instant flip must not override the rise-window L−R mean."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=3)
+    rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.40, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    left = DNReadout(
+        dnp01_L=2.20, dnp03_L=1.30, dnp03_R=0.40, lc4_L=2.2, lc4_R=1.0, dng02_amp=5.0
+    )
+    for _ in range(6):
+        c.compute(left)
+    # One contralateral frame must not out-peak the rise LC4_L.
+    flipped = DNReadout(
+        dnp01_L=2.30, dnp03_L=0.30, dnp03_R=1.40, lc4_L=1.0, lc4_R=1.4, dng02_amp=5.0
+    )
+    c.compute(flipped)
+    assert c.brain_escape_count == 1
+    assert c.escape_events[-1].threat_side == "L"
+
+
+def test_first_decisive_laterality_locks_threat_through_binocular_flip():
+    """offset_x+0.8: lock R on the lateral rise, keep it when last-8 goes L."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=3)
+    rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.40, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    right = DNReadout(
+        dnp01_R=2.10, dnp03_L=0.42, dnp03_R=0.85, lc4_L=1.05, lc4_R=2.30, dng02_amp=5.0
+    )
+    for _ in range(4):
+        c.compute(right)
+    assert c._loom_threat == "R"
+    flipped = DNReadout(
+        dnp01_R=2.30, dnp03_L=1.40, dnp03_R=0.40, lc4_L=2.10, lc4_R=1.80, dng02_amp=5.0
+    )
+    for _ in range(4):
+        c.compute(flipped)
+    assert c.brain_escape_count == 1
+    assert c.escape_events[-1].threat_side == "R"
+
+
+def test_peak_lc4_tiebreak_when_integrated_laterality_is_weak():
+    c = _ctl()
+    c._loom_threat = ""
+    c._peak_lc4_L = 0.15
+    c._peak_lc4_R = 1.35
+    c.last_lat_integrated = 0.10
+    assert c._threat_side(DNReadout()) == "R"
+
+
+def test_brief_slope_bump_does_not_latch_through_slow_open_climb():
+    """Open wander can have one steep 4-step window; that must not stay armed."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dnp03_L=0.40, dnp03_R=0.38, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    for _ in range(4):
+        c.compute(rest)
+    bump = DNReadout(dnp01_L=1.87, dnp01_R=1.78, dnp03_L=0.70, dnp03_R=0.38, lc4_L=1.4, lc4_R=1.0, dng02_amp=5.0)
+    c.compute(bump)
+    for i in range(36):
+        z = 1.87 + 0.20 * min(1.0, (i + 1) / 32.0)
+        c.compute(
+            DNReadout(
+                dnp01_L=z,
+                dnp01_R=z - 0.08,
+                dnp03_L=0.70,
+                dnp03_R=0.38,
+                lc4_L=1.35,
+                lc4_R=1.00,
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count == 0
+
+
+def test_would_fire_counts_cooldown_masked_edges():
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1, escape_cooldown_extra=40)
+    rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.38, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    loom = DNReadout(dnp01_L=3.20, dnp03_L=1.40, dnp03_R=0.40, lc4_L=2.4, lc4_R=1.0, dng02_amp=5.0)
+    c.compute(loom)
+    assert c.brain_escape_count == 1
+    for _ in range(8):
+        c.compute(rest)
+    c.compute(loom)
+    assert c.brain_escape_count == 1
+    assert c.would_fire_count >= 2
+
+
 def test_slow_open_space_wander_does_not_escape():
     """r6: open-space rise ~0.26 Hz over ~30 steps must not fire."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)

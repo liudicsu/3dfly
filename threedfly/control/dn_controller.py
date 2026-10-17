@@ -46,6 +46,7 @@ class DNFlightController:
         self.escape_cooldown = 0
         self.brain_escape_count = 0
         self.engineered_escape_count = 0
+        self.would_fire_count = 0
         self.dnp01_prev = 0.0
         self.dnp01_rest: Optional[float] = None
         self.steps = 0
@@ -61,7 +62,14 @@ class DNFlightController:
         self._rise_hold = 0
         self._approach_threat = ""
         self._d01_hist: List[float] = []
+        self._lat_hist: List[tuple] = []
         self._steep_climb = False
+        self._steep_hist: List[bool] = []
+        self._loom_threat = ""
+        self.last_lat_integrated = 0.0
+        self.last_lat_now = 0.0
+        self._peak_lc4_L = 0.0
+        self._peak_lc4_R = 0.0
         self.last_yaw_terms: Dict[str, float] = {}
 
     def bind_hover(self, hover_action: float) -> None:
@@ -75,6 +83,7 @@ class DNFlightController:
         self.escape_cooldown = 0
         self.brain_escape_count = 0
         self.engineered_escape_count = 0
+        self.would_fire_count = 0
         self.dnp01_prev = 0.0
         self.dnp01_rest = None
         self.steps = 0
@@ -89,7 +98,14 @@ class DNFlightController:
         self._rise_hold = 0
         self._approach_threat = ""
         self._d01_hist = []
+        self._lat_hist = []
         self._steep_climb = False
+        self._steep_hist = []
+        self._loom_threat = ""
+        self.last_lat_integrated = 0.0
+        self.last_lat_now = 0.0
+        self._peak_lc4_L = 0.0
+        self._peak_lc4_R = 0.0
         self.last_yaw_terms = {}
 
     def capture_baseline(self, readout: DNReadout, dnp01_rest: Optional[float] = None) -> None:
@@ -105,7 +121,14 @@ class DNFlightController:
         self._escape_armed = True
         self._approach_threat = ""
         self._d01_hist = []
+        self._lat_hist = []
         self._steep_climb = False
+        self._steep_hist = []
+        self._loom_threat = ""
+        self.last_lat_integrated = 0.0
+        self.last_lat_now = 0.0
+        self._peak_lc4_L = 0.0
+        self._peak_lc4_R = 0.0
         if self.params.use_engineered_eye_laterality:
             eye = float(readout.eye_L) - float(readout.eye_R)
             if abs(eye) >= float(self.params.eye_threat_min):
@@ -169,6 +192,8 @@ class DNFlightController:
     def _steer_yaw(self, ro: DNReadout) -> float:
         t = self._steer_terms(ro)
         yaw = t["dna02"] + t["dnp15"] + t["hse"] + t["dnp03"] + t["vpn_loom"] + t["eye"]
+        if abs(yaw) < float(getattr(self.params, "steer_deadzone", 0.0)):
+            yaw = 0.0
         t["steer"] = float(yaw)
         self.last_yaw_terms = t
         return float(yaw)
@@ -202,6 +227,9 @@ class DNFlightController:
     def _loom_yaw_parts(self, ro: DNReadout) -> tuple[float, float]:
         p = self.params
         d03, vpn = self._loom_lr(ro)
+        raw = float(d03 + vpn)
+        if abs(raw) < float(getattr(p, "loom_yaw_deadzone", 0.0)):
+            return 0.0, 0.0
         scale = max(p.dnp03_scale_hz, 1e-6)
         # Ipsi loom → contralateral turn: +L → −yaw.
         return (
@@ -217,6 +245,41 @@ class DNFlightController:
         d03, vpn = self._loom_lr(ro)
         return d03 + vpn
 
+    def _integrated_laterality(self, ro: DNReadout) -> float:
+        """Rise-weighted L−R over the current climb, not the fire instant."""
+        p = self.params
+        now = float(self._loom_laterality(ro))
+        self.last_lat_now = now
+        n = max(1, int(getattr(p, "threat_integrate_steps", 8)))
+        if self.last_rise < float(p.dnp01_rearm_delta_hz):
+            self._lat_hist = []
+            self._peak_lc4_L = 0.0
+            self._peak_lc4_R = 0.0
+            self._loom_threat = ""
+        if self.last_rise >= 0.08:
+            self._peak_lc4_L = max(self._peak_lc4_L, max(0.0, float(ro.lc4_L)))
+            self._peak_lc4_R = max(self._peak_lc4_R, max(0.0, float(ro.lc4_R)))
+            lat_min = float(p.dnp01_loom_lat_min)
+            # Lock the first decisive L−R while the object is still lateral.
+            # Last-8 mean can flip once a 120° eye pair goes binocular.
+            if (
+                not self._loom_threat
+                and abs(now) >= lat_min
+                and self.last_rise >= 0.5 * float(p.dnp01_escape_delta_hz)
+            ):
+                self._loom_threat = "L" if now > 0.0 else "R"
+        w = max(float(self.last_rise), 0.0) if self.last_rise >= 0.08 else 0.0
+        self._lat_hist.append((now, w))
+        if len(self._lat_hist) > n:
+            self._lat_hist.pop(0)
+        den = float(sum(wt for _, wt in self._lat_hist))
+        if den > 1e-6:
+            integ = float(sum(lat * wt for lat, wt in self._lat_hist) / den)
+        else:
+            integ = float(np.mean([lat for lat, _ in self._lat_hist])) if self._lat_hist else now
+        self.last_lat_integrated = integ
+        return integ
+
     def _threat_side(self, ro: DNReadout) -> str:
         if self.params.use_engineered_eye_laterality:
             if self._approach_threat:
@@ -224,7 +287,17 @@ class DNFlightController:
             eye = self._raw_eye_lr()
             if abs(eye) >= float(self.params.eye_threat_min):
                 return "L" if eye > 0.0 else "R"
-        d = self._loom_laterality(ro)
+        if self._loom_threat:
+            return self._loom_threat
+        d = float(self.last_lat_integrated)
+        peak = float(self._peak_lc4_L) - float(self._peak_lc4_R)
+        lat_min = float(self.params.dnp01_loom_lat_min)
+        # Peak LC4 over the rise is the fallback when last-8 DNp03 is weak
+        # or disagrees (binocular overlap / offset_x+0.8).
+        if abs(peak) >= 0.08 and (abs(d) < 2.0 * lat_min or peak * d <= 0.0):
+            d = peak
+        if abs(d) < 1e-9:
+            d = self._loom_laterality(ro)
         if d > 1e-6:
             return "L"
         if d < -1e-6:
@@ -284,12 +357,16 @@ class DNFlightController:
             slope = self._d01_hist[-1] - self._d01_hist[-2]
         else:
             slope = float(rise)
-        if slope >= float(getattr(p, "dnp01_slope_min", 0.0)):
+        # Sticky steep during this climb (rise ≥ 0.08). Open-space false
+        # fires are blocked by laterality, not by forgetting a real onset.
+        steep_now = slope >= float(getattr(p, "dnp01_slope_min", 0.0))
+        if steep_now and rise >= 0.08:
             self._steep_climb = True
         if rise < float(p.dnp01_rearm_delta_hz):
             self._escape_armed = True
             self._rise_hold = 0
             self._steep_climb = False
+            self._steep_hist = []
         if rise >= p.dnp01_escape_delta_hz:
             self._rise_hold += 1
         else:
@@ -302,19 +379,27 @@ class DNFlightController:
             if self._baseline_step is not None:
                 post_base = (self.steps - self._baseline_step) >= delay
             hold_ok = self._rise_hold >= int(p.dnp01_escape_hold_steps)
+        lat_int = self._integrated_laterality(ro)
         lat_ok = True
         if self._base is not None and not p.use_engineered_eye_laterality:
-            lat_ok = abs(self._loom_laterality(ro)) >= float(p.dnp01_loom_lat_min)
-        brain_fire = (
+            lat_min = float(p.dnp01_loom_lat_min)
+            same = (self.last_lat_now * lat_int) > 0.0 or abs(self.last_lat_now) < 0.5 * lat_min
+            lat_ok = (abs(lat_int) >= lat_min and same) or bool(self._loom_threat)
+        would_fire = (
             warmed
             and post_base
             and hold_ok
             and lat_ok
             and self._steep_climb
             and self._escape_armed
+            and rise >= p.dnp01_escape_delta_hz
+        )
+        if would_fire:
+            self.would_fire_count += 1
+        brain_fire = (
+            would_fire
             and self.escape_timer <= 0
             and self.escape_cooldown <= 0
-            and rise >= p.dnp01_escape_delta_hz
         )
         engineered_fire = False
         if p.use_engineered_looming_residual and not brain_fire:
@@ -423,6 +508,11 @@ class DNFlightController:
             "warmup_complete": 1.0 if self.steps >= int(self.params.dnp01_warmup_steps) else 0.0,
             "brain_escapes": float(self.brain_escape_count),
             "engineered_escapes": float(self.engineered_escape_count),
+            "would_fire": float(self.would_fire_count),
+            "lat_integrated": float(self.last_lat_integrated),
+            "loom_threat": 1.0 if self._loom_threat == "L" else (-1.0 if self._loom_threat == "R" else 0.0),
+            "peak_lc4_L": float(self._peak_lc4_L),
+            "peak_lc4_R": float(self._peak_lc4_R),
             "dnp01": float(max(ro.dnp01_L, ro.dnp01_R)),
             "dnp01_rest": float(self.dnp01_rest or 0.0),
             "dnp01_rise": float(self.last_rise),

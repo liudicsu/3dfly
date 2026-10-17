@@ -41,14 +41,16 @@ class FlightParams:
     # --- Giant fiber / escape (DNp01) ---
     dnp01_loom_hz: float = M1_DNP01_LOOM_IPSI_HZ
     dnp01_rot_hz: float = M1_DNP01_ROT_MAX_HZ
-    # Checkered-object looms peak ~0.68 Hz (L) / ~0.84 Hz (R). Open
-    # wander tops out ~0.28 Hz. 0.30 sits in that gap; slope rejects
-    # the slow open climb if it grazes the threshold.
-    dnp01_escape_delta_hz: float = 0.30
+    # U-flip right hex: camera-object DNp01 ~0.70 / 0.86 Hz. Open wander
+    # ~0.28 Hz. 0.20 fires earlier (40–60° GF) with slope + integrated
+    # laterality so slow open climb cannot pass.
+    dnp01_escape_delta_hz: float = 0.20
     # Re-arm only after rise falls below this (rising-edge).
-    dnp01_rearm_delta_hz: float = 0.20
+    dnp01_rearm_delta_hz: float = 0.12
     # Genuine close is steep (≈0.016–0.025 Hz/step). Open wander is ≈0.009.
     dnp01_slope_min: float = 0.012
+    # Threat from the mean L−R over the rise, not the fire instant.
+    threat_integrate_steps: int = 10
     # Slow rest: eats the 16-step settle climb, keeps a 1 s compact loom.
     dnp01_rest_tau_steps: float = 100.0
     dnp01_freeze_rest: bool = True
@@ -58,12 +60,13 @@ class FlightParams:
     dnp01_escape_hold_steps: int = 3
     # Closed-loop (baseline set): DNp01 rise alone is not a loom. Require
     # DNp03/LC4/LPLC laterality so the flyvis settle climb cannot fire.
-    dnp01_loom_lat_min: float = 0.15
+    dnp01_loom_lat_min: float = 0.20
     dnp01_escape_hz: float = M1_DNP01_LOOM_IPSI_HZ
     escape_duration_steps: int = 8
     # One loom = one burst. Short cooldown allowed a second fire that
     # wrecked side-R direction after the object had already passed.
-    escape_cooldown_extra: int = 200
+    # One loom = one burst for a 400-step side-loom (object is gone after ~80).
+    escape_cooldown_extra: int = 400
     escape_pitch: float = 0.45
     escape_forward: float = 0.30
     escape_up: float = 0.20
@@ -83,6 +86,11 @@ class FlightParams:
     loom_pitch_gain: float = 0.0
     dnp03_scale_hz: float = 0.50
     dnp03_deadzone_hz: float = 0.04
+    # Ignore weak binocular L−R so residual LC4_L cannot yaw the fly
+    # into a frontal-right object (offset_x+0.8) or spin in open space.
+    loom_yaw_deadzone: float = 0.14
+    # Residual DNa02/HSE also spin the fly in open space onto a wall.
+    steer_deadzone: float = 0.0
     # LPLC2 / LPLC1 / LC4 are ipsilateral looming VPNs (hex-swap / L-only).
     # Use baseline-subtracted L−R, not a contralateral wall-DC hack.
     lplc2_threat_gain: float = 0.45
@@ -127,7 +135,9 @@ class FlightParams:
     prewarm_max_steps: int = 140
     prewarm_settle_std: float = 0.02
     prewarm_peak_drop_hz: float = 0.12
-    flyvis_stride: int = 3  # hold last flyvis voltages; box target ≪ 25 ms
+    # One stride for room and looms. Batch both eyes; box live frame ~41 ms
+    # sequential → target mean ≤ 25 with stride 2 after the batch.
+    flyvis_stride: int = 2
     flyvis_torch_threads: int = 2
 
     # --- Dynamics ---
@@ -138,9 +148,10 @@ class FlightParams:
 
     notes: Dict[str, str] = field(default_factory=lambda: {
         "escape": (
-            "DNp01 rise ≥ 0.30 Hz over frozen post-settle rest AND slope "
-            "≥ 0.012 Hz/step AND DNp03/LC4 laterality; one ≥80-step "
-            "past-peak prewarm for every scenario"
+            "DNp01 rise ≥ 0.20 Hz over frozen post-settle rest AND recent "
+            "slope ≥ 0.012 Hz/step AND integrated DNp03/LC4 laterality "
+            "(first-decisive lock + peak LC4); one ≥80-step past-peak "
+            "prewarm; right-eye hex U-flip; one stride"
         ),
         "dnp03": (
             "DNp03 + LC4/LPLC ipsilateral L−R after per-side baseline → "
@@ -153,7 +164,7 @@ class FlightParams:
         ),
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",
-        "camera": "right-eye Y flipped so both cameras look +X (r2 bias source)",
+        "camera": "40° outward cant, 120° FOV; right-eye hex U-flip (X-mirror)",
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })
 

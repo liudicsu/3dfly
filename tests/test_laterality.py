@@ -68,6 +68,100 @@ def test_side_walls_brighten_ipsilateral_eye():
 
 
 @needs_stack
+def test_m1_hex_loom_via_closed_loop_path_is_ipsilateral():
+    """M1 loom movie through camera-free hex → flyvis → RateCore stays ipsi."""
+    params = FlightParams(prewarm_steps=12, flyvis_stride=1, flyvis_torch_threads=2)
+    brain = ClosedLoopBrain.build(params=params, quick=True)
+    gray = np.full(N_HEX, 0.5, dtype=np.float32)
+    movie = loom(0.4, x0=0.0)
+    blank = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    def _play(hex_L, hex_R):
+        brain.reset()
+        last = None
+        for _ in range(12):
+            last = brain.step(blank, blank, hex_L=gray, hex_R=gray)
+        rest = last.readout
+        peak = {
+            "dnp01_L": 0.0, "dnp01_R": 0.0, "lc4_L": 0.0, "lc4_R": 0.0,
+            "dnp03_L": 0.0, "dnp03_R": 0.0,
+        }
+        for i in range(len(movie)):
+            last = brain.step(blank, blank, hex_L=hex_L[i], hex_R=hex_R[i])
+            ro = last.readout
+            peak["dnp01_L"] = max(peak["dnp01_L"], float(ro.dnp01_L) - float(rest.dnp01_L))
+            peak["dnp01_R"] = max(peak["dnp01_R"], float(ro.dnp01_R) - float(rest.dnp01_R))
+            peak["lc4_L"] = max(peak["lc4_L"], float(ro.lc4_L) - float(rest.lc4_L))
+            peak["lc4_R"] = max(peak["lc4_R"], float(ro.lc4_R) - float(rest.lc4_R))
+            peak["dnp03_L"] = max(peak["dnp03_L"], float(ro.dnp03_L) - float(rest.dnp03_L))
+            peak["dnp03_R"] = max(peak["dnp03_R"], float(ro.dnp03_R) - float(rest.dnp03_R))
+        return peak
+
+    left = _play(movie, np.repeat(gray[None, :], len(movie), axis=0))
+    right = _play(np.repeat(gray[None, :], len(movie), axis=0), movie)
+    assert left["dnp01_L"] > left["dnp01_R"] + 0.10, left
+    assert right["dnp01_R"] > right["dnp01_L"] + 0.10, right
+    assert left["lc4_L"] > left["lc4_R"] + 0.10, left
+    assert right["lc4_R"] > right["lc4_L"] + 0.10, right
+    # DNp01 L↔R within ~20%; LC4 is ipsi but streaming R is a bit stronger.
+    a, b = left["dnp01_L"], right["dnp01_R"]
+    err = abs(a - b) / max(a, b, 1e-6)
+    assert err < 0.25, f"dnp01 L↔R err {err:.2f}: {left} {right}"
+
+
+@needs_stack
+@pytest.mark.skipif(not core_stack_available(), reason="open-loop camera path needs the stack")
+def test_open_loop_mirrored_object_flips_dns():
+    """Stationary fly: L object vs exact mirrored R object → mirrored DN/VPN."""
+    pytest.importorskip("mujoco")
+    from threedfly.sim import FlyEnvironment
+
+    params = FlightParams(prewarm_steps=16, flyvis_stride=1, flyvis_torch_threads=2)
+    brain = ClosedLoopBrain.build(params=params, quick=True)
+    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
+    env.reset(seed=0)
+    env.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
+
+    def _movie(start, vel, n=36):
+        frames = []
+        pos = np.asarray(start, dtype=float)
+        v = np.asarray(vel, dtype=float)
+        for _ in range(n):
+            env.set_loom_object(pos)
+            frames.append(env.get_eye_images())
+            pos = pos + v * 0.02
+        return frames
+
+    def _run(frames):
+        brain.reset()
+        gray = np.full_like(frames[0][0], 140)
+        last = None
+        for _ in range(16):
+            last = brain.step(gray, gray)
+        rest = last.readout
+        peak = {"dnp01_L": 0.0, "dnp01_R": 0.0, "lc4_L": 0.0, "lc4_R": 0.0,
+                "lplc2_L": 0.0, "lplc2_R": 0.0, "dnp03_L": 0.0, "dnp03_R": 0.0}
+        for left, right in frames:
+            last = brain.step(left, right)
+            ro = last.readout
+            for k in peak:
+                peak[k] = max(peak[k], float(getattr(ro, k)) - float(getattr(rest, k)))
+        return peak
+
+    left = _run(_movie((1.55, 1.55, 1.5), (-1.30, -1.25, 0.0), n=50))
+    right = _run(_movie((1.55, -1.55, 1.5), (-1.30, 1.25, 0.0), n=50))
+    env.close()
+    assert left["lc4_L"] > left["lc4_R"], left
+    assert right["lc4_R"] > right["lc4_L"], right
+    assert left["dnp01_L"] > left["dnp01_R"], left
+    assert right["dnp01_R"] > right["dnp01_L"], right
+    for key, lim in (("dnp01", 0.32), ("lc4", 0.35)):
+        a, b = left[f"{key}_L"], right[f"{key}_R"]
+        err = abs(a - b) / max(abs(a), abs(b), 1e-6)
+        assert err < lim, f"{key} L↔R err {err:.2f} (want <{lim}): L={left} R={right}"
+
+
+@needs_stack
 def test_hex_swap_mirrors_dn_outputs():
     """Swapping the two hex frames must swap per-side DNp03 / DNa02 / HSE."""
     params = FlightParams(prewarm_steps=16, flyvis_stride=1, flyvis_torch_threads=2)
@@ -118,9 +212,9 @@ def test_lateral_approaches_turn_away_from_threat():
     _spec = importlib.util.spec_from_file_location("cla_laterality", _acc)
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
-    params = FlightParams(flyvis_stride=3, flyvis_torch_threads=2)
+    params = FlightParams(flyvis_stride=2, flyvis_torch_threads=2)
     brain = ClosedLoopBrain.build(params=params, quick=True)
-    env = FlyEnvironment(render_mode="rgb_array", camera_width=80, camera_height=60)
+    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
     ctl = DNFlightController(params)
     lateral_loom_object = _mod.lateral_loom_object
 
@@ -140,7 +234,6 @@ def test_lateral_approaches_turn_away_from_threat():
         heads = []
         loom_pos = np.asarray(spec["loom_start"], dtype=float)
         loom_v = np.asarray(spec["loom_vel"], dtype=float)
-        brain.params.flyvis_stride = 1
         for _ in range(160):
             loom_pos = loom_pos + loom_v * float(env.control_dt)
             if loom_pos[0] < -0.4:
@@ -153,7 +246,6 @@ def test_lateral_approaches_turn_away_from_threat():
             heads.append(heading_from_quaternion(info["orientation"]))
             if env.check_collision():
                 env.recover_from_collision()
-        brain.params.flyvis_stride = int(params.flyvis_stride)
         return heads, list(ctl.escape_events)
 
     for side in ("L", "R"):

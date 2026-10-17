@@ -65,17 +65,16 @@ def stereo_to_hex(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Left and right MuJoCo eye images → (721,), (721,) hex frames.
 
-    Horizontal: do **not** flip U. After the r3 right-camera X flip both
-    eyes have image-right = nasal and look +X.
-
-    Vertical: the same r3 Y flip that restored look=+X inverts the right
-    image (camera Y ≈ −Z). flyvis loom/T4/T5 expect upright flow, so V is
-    mirrored for the right eye only.
+    Right camera: X is sagittally mirrored and Y is flipped so look stays
+    +X. That is a horizontal remap in the image, not a vertical one.
+    Open-loop L vs mirrored-R objects: a **U-flip** on the right hex
+    (no V-flip) makes LC4/DNp01 L↔R match within ~20%; V-flip alone
+    left a right-side object driving left-side cells nearly as hard.
     """
     if uv is None:
         uv = box_eye_uv()
     uv_r = np.asarray(uv, dtype=np.float32).copy()
-    uv_r[:, 1] = 1.0 - uv_r[:, 1]
+    uv_r[:, 0] = 1.0 - uv_r[:, 0]
     return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv_r)
 
 

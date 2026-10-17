@@ -126,3 +126,20 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert loom_r["loom_start"][1] < -1.5
     assert loom_l["loom_vel"][1] < -0.5
     assert loom_r["loom_vel"][1] > 0.5
+    vars_l = {v["tag"]: v for v in mod.loom_variants("L")}
+    vars_r = {v["tag"]: v for v in mod.loom_variants("R")}
+    assert set(vars_l) == {"far1.4x", "slow0.7x", "offset_x+0.8", "stride_hold"}
+    assert vars_l["far1.4x"]["loom_start"][1] > loom_l["loom_start"][1]
+    assert vars_r["offset_x+0.8"]["loom_start"][0] > loom_r["loom_start"][0]
+    assert vars_l["stride_hold"]["stride"] == 3
+    vd = mod._variant_direction(
+        {
+            "side_loom_left": {"escape_direction_correct": 1.0},
+            "loomR_far1.4x": {"escape_direction_correct": 1.0},
+            "loomR_slow0.7x": {"escape_direction_correct": 0.0},
+            "room": {"escape_direction_correct": None},
+        }
+    )
+    assert vd["n"] == 3
+    assert vd["mean"] == pytest.approx(2.0 / 3.0)
+    assert vd["pass"] is False

@@ -218,7 +218,13 @@ def run_interactive_simulation(
             core_brain.reset()
             dn_controller.reset()
             dn_controller.bind_hover(env.hover_action)
-            return left_img, right_img
+            if hasattr(env, "hide_loom_object"):
+                env.hide_loom_object()
+                left_img, right_img = env.get_eye_images()
+            warmed = core_brain.prewarm(left_img, right_img, env.get_fly_angular_velocity())
+            if warmed is not None:
+                dn_controller.capture_baseline(warmed.readout)
+            return env.get_eye_images()
         if not use_biological or controller.warmup_steps <= 0:
             return left_img, right_img
         print(f"\n[Warmup] Up to {controller.warmup_steps} grounded brain steps...")

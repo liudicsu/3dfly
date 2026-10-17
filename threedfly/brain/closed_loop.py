@@ -90,7 +90,7 @@ class DualFlyvisEyes:
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
         if not self._shared:
             return self.eye_L.step(hex_L), self.eye_R.step(hex_R)
-        if hasattr(self.eye_L, "step_pair_batched"):
+        if getattr(self, "_batch_ok", True) and hasattr(self.eye_L, "step_pair_batched"):
             try:
                 vL, vR, sL, sR = self.eye_L.step_pair_batched(
                     hex_L, hex_R, self._state_L, self._state_R
@@ -98,7 +98,7 @@ class DualFlyvisEyes:
                 self._state_L, self._state_R = sL, sR
                 return vL, vR
             except Exception:
-                pass
+                self._batch_ok = False
         eye = self.eye_L
         eye._state = self._state_L
         vL = eye.step(hex_L)

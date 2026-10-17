@@ -231,6 +231,39 @@ class FlyvisEye:
         out = {t: act[:, idx] for t, idx in self.type_index.items() if idx.size}
         return out, float(ms)
 
+    def step_pair_batched(self, hex_L, hex_R, state_L, state_R):
+        """One flyvis forward for both eyes (batch=2). Returns vL, vR, sL, sR."""
+        import torch
+
+        fL = np.asarray(hex_L, dtype=np.float32).reshape(-1)
+        fR = np.asarray(hex_R, dtype=np.float32).reshape(-1)
+        if fL.size != N_HEX or fR.size != N_HEX:
+            raise ValueError(f"hex frames must have {N_HEX} cells")
+        if state_L is None or state_R is None:
+            raise RuntimeError("batched step needs both eye states")
+        stacked = _stack_autoderef(state_L, state_R)
+        x = torch.as_tensor(np.stack([fL, fR], axis=0)[:, None, None, :], dtype=torch.float32)
+        with torch.inference_mode():
+            states = self._net.simulate(
+                x, self.dt, initial_state=stacked, as_states=True
+            )
+        if isinstance(states, (list, tuple)):
+            last = states[-1]
+        else:
+            last = states
+        sL, sR = _split_autoderef(last)
+        act = _activity_from_state(last)
+        if act is None:
+            raise RuntimeError("flyvis batched state has no nodes.activity")
+        act = np.asarray(act)
+        if act.ndim == 1:
+            raise RuntimeError("batched activity is not (2, n)")
+        if act.shape[0] != 2:
+            act = act.reshape(2, -1)
+        def _volts(row):
+            return {t: row[idx] for t, idx in self.type_index.items() if idx.size}
+        return _volts(act[0].reshape(-1)), _volts(act[1].reshape(-1)), sL, sR
+
     def step(self, hex_frame: np.ndarray) -> Dict[str, np.ndarray]:
         """Advance one frame, keeping network state. ``hex_frame`` is (721,) in [0, 1]."""
         import torch
@@ -240,8 +273,8 @@ class FlyvisEye:
             raise ValueError(f"hex frame must have {N_HEX} cells, got {frame.size}")
         if self._state is None:
             self.reset()
-        x = torch.as_tensor(frame.reshape(1, 1, 1, -1))
-        with torch.no_grad():
+        x = torch.as_tensor(frame.reshape(1, 1, 1, -1), dtype=torch.float32)
+        with torch.inference_mode():
             states = self._net.simulate(
                 x, self.dt, initial_state=self._state, as_states=True
             )
@@ -281,6 +314,45 @@ class FlyvisEye:
             V_gray[t] = base.astype(np.float32)
             p99[t] = p
         return FlyvisCalibration(V_gray=V_gray, p99=p99, uv=self.uv, rmax=RMAX)
+
+
+def _stack_autoderef(a, b):
+    """Stack two flyvis states on the batch axis."""
+    import torch
+    from flyvis.utils.tensor_utils import AutoDeref, RefTensor
+
+    if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+        if a.shape[0] == 1 and b.shape[0] == 1:
+            return torch.cat([a, b], dim=0)
+        return torch.stack([a.reshape(-1), b.reshape(-1)], dim=0)
+    if isinstance(a, RefTensor) or isinstance(b, RefTensor):
+        raise TypeError("cannot stack RefTensor states")
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = AutoDeref() if isinstance(a, AutoDeref) else {}
+        for k in a:
+            out[k] = _stack_autoderef(a[k], b[k])
+        return out
+    return a
+
+
+def _split_autoderef(state):
+    """Split a batch-2 flyvis state into two batch-1 states."""
+    import torch
+    from flyvis.utils.tensor_utils import AutoDeref
+
+    if isinstance(state, torch.Tensor):
+        if state.shape[0] != 2:
+            raise ValueError(f"expected batch 2, got {tuple(state.shape)}")
+        return state[0:1].contiguous(), state[1:2].contiguous()
+    if isinstance(state, dict):
+        cls = AutoDeref if isinstance(state, AutoDeref) else dict
+        left, right = cls(), cls()
+        for k, v in state.items():
+            a, b = _split_autoderef(v)
+            left[k] = a
+            right[k] = b
+        return left, right
+    return state, state
 
 
 def _activity_from_state(state) -> Optional[np.ndarray]:
