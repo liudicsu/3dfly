@@ -9,8 +9,8 @@ def test_collision_recovery_moves_fly():
     env = FlyEnvironment(render_mode=None)
     env.reset(seed=42)
     
-    # Move fly to ceiling
-    env.data.qpos[2] = 2.7  # Above ceiling threshold
+    # Move fly above the actual room ceiling (walls span z≈0–4 m)
+    env.data.qpos[2] = 3.9
     initial_z = env.data.qpos[2]
     
     # Trigger recovery
@@ -35,30 +35,46 @@ def test_collision_recovery_dampens_velocity():
     # Trigger recovery
     env.recover_from_collision()
     
-    # Check that velocity was dampened
+    # Check that velocity was dampened (now gentler: 0.3 factor instead of 0.05)
     final_vel = np.linalg.norm(env.data.qvel[:3])
-    assert final_vel < initial_vel * 0.2, "Velocity should be significantly dampened"
+    assert final_vel < initial_vel * 0.4, "Velocity should be dampened"
     
     env.close()
 
 
-def test_collision_recovery_randomizes_orientation():
-    """Test that collision recovery randomizes orientation for exploration."""
+def test_collision_recovery_does_not_teleport_randomly():
+    """Recovery is a small deterministic nudge, not a random teleport."""
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.data.qpos[:3] = np.array([0.4, -0.3, 1.4])
+    env.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    start = env.data.qpos[:3].copy()
+
+    env.recover_from_collision()
+    first = env.data.qpos[:3].copy()
+    env.data.qpos[:3] = start
+    env.recover_from_collision()
+    second = env.data.qpos[:3].copy()
+
+    assert np.allclose(first, second), "Recovery must be deterministic"
+    assert np.linalg.norm(first - start) <= 0.35, "Recovery must not teleport far"
+    env.close()
+
+
+def test_collision_recovery_keeps_orientation():
+    """Test that minimal collision recovery keeps orientation (no randomization)."""
     env = FlyEnvironment(render_mode=None)
     env.reset(seed=42)
     
     initial_quat = env.data.qpos[3:7].copy()
     
-    # Trigger recovery multiple times and check orientations differ
-    orientations = [initial_quat]
-    for _ in range(5):
-        env.recover_from_collision()
-        orientations.append(env.data.qpos[3:7].copy())
+    # Trigger recovery - orientation should NOT change (minimal recovery)
+    env.recover_from_collision()
+    final_quat = env.data.qpos[3:7]
     
-    # Check that at least some orientations are different
-    diffs = [np.linalg.norm(orientations[i] - orientations[i+1]) 
-             for i in range(len(orientations)-1)]
-    assert any(d > 0.1 for d in diffs), "Orientations should vary across recoveries"
+    # Check that orientation stayed the same
+    diff = np.linalg.norm(initial_quat - final_quat)
+    assert diff < 0.01, "Minimal recovery should not randomize orientation"
     
     env.close()
 
@@ -79,12 +95,27 @@ def test_collision_recovery_stays_in_bounds():
         # Trigger recovery
         env.recover_from_collision()
         
-        # Check bounds
+        # Check bounds: room walls at ±5 m / z≈4 m, not an inner ±1.9 box
         pos = env.get_fly_position()
-        assert -1.9 <= pos[0] <= 1.9, f"X position {pos[0]} out of bounds"
-        assert -1.9 <= pos[1] <= 1.9, f"Y position {pos[1]} out of bounds"
-        assert 0.3 <= pos[2] <= 2.5, f"Z position {pos[2]} out of bounds"
+        assert -4.9 <= pos[0] <= 4.9, f"X position {pos[0]} out of bounds"
+        assert -4.9 <= pos[1] <= 4.9, f"Y position {pos[1]} out of bounds"
+        assert 0.2 <= pos[2] <= 3.85, f"Z position {pos[2]} out of bounds"
     
+    env.close()
+
+
+def test_collision_recovery_does_not_clamp_xy_to_inner_box():
+    """Open-room positions must not be snapped to ±1.9 m (walls are at ±5 m)."""
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.data.qpos[:3] = np.array([2.4, -2.3, 1.5])
+    env.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    env.data.qvel[:] = 0.0
+    env.recover_from_collision()
+    pos = env.get_fly_position()
+    assert abs(pos[0]) > 1.95, f"X was clamped inward to {pos[0]:.3f}"
+    assert abs(pos[1]) > 1.95, f"Y was clamped inward to {pos[1]:.3f}"
+    assert abs(pos[0]) < 4.9 and abs(pos[1]) < 4.9
     env.close()
 
 
@@ -144,20 +175,23 @@ def test_soft_recovery_extends_flight():
         env.close()
         return steps_completed, collision_count
     
-    # Test without recovery (should stop early)
+    # Test without recovery (stops on first real contact)
     steps_no_recovery, collisions_no_recovery = run_simulation(enable_recovery=False)
     
-    # Test with recovery (should run longer)
+    # Test with recovery (continues after contacts)
     steps_with_recovery, collisions_with_recovery = run_simulation(enable_recovery=True)
     
-    # Verify improvement
-    assert steps_with_recovery > steps_no_recovery, \
-        f"Soft recovery should extend flight: {steps_with_recovery} vs {steps_no_recovery} steps"
-    assert collisions_with_recovery > collisions_no_recovery, \
-        "Soft recovery should handle multiple collisions"
+    # Overspeed is no longer a fake collision, so the demo subgraph may finish
+    # both runs. Recovery must never shorten the flight; if contacts occur it
+    # must extend it.
+    assert steps_with_recovery >= steps_no_recovery, \
+        f"Soft recovery shortened flight: {steps_with_recovery} vs {steps_no_recovery} steps"
+    if collisions_no_recovery > 0:
+        assert steps_with_recovery > steps_no_recovery, \
+            f"Soft recovery should extend flight: {steps_with_recovery} vs {steps_no_recovery} steps"
     
-    print(f"\n✅ Flight extended from {steps_no_recovery} to {steps_with_recovery} steps")
-    print(f"   Recovered from {collisions_with_recovery} collisions vs {collisions_no_recovery} without recovery")
+    print(f"\n✅ Flight steps {steps_no_recovery} → {steps_with_recovery}")
+    print(f"   Collisions {collisions_no_recovery} without recovery vs {collisions_with_recovery} with recovery")
 
 
 if __name__ == "__main__":
@@ -168,8 +202,8 @@ if __name__ == "__main__":
     test_collision_recovery_dampens_velocity()
     print("✓ test_collision_recovery_dampens_velocity")
     
-    test_collision_recovery_randomizes_orientation()
-    print("✓ test_collision_recovery_randomizes_orientation")
+    test_collision_recovery_keeps_orientation()
+    print("✓ test_collision_recovery_keeps_orientation")
     
     test_collision_recovery_stays_in_bounds()
     print("✓ test_collision_recovery_stays_in_bounds")

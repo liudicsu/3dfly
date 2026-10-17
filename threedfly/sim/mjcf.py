@@ -66,6 +66,8 @@ FLY_MJCF = """
     <!-- Fruit fly body - realistic mesh model -->
     <body name="fly" pos="0 0 1.5">
       <freejoint name="fly_joint"/>
+      <!-- Body-frame control site at subtree COM so thrust does not induce tumble. -->
+      <site name="thorax_ctrl" pos="-0.00112645 -0.00015024 0.01175987" size="0.001" rgba="1 0 0 0"/>
       
       <!-- Main body (thorax) - using realistic mesh -->
       <geom name="thorax" type="mesh" mesh="thorax_mesh" 
@@ -74,7 +76,7 @@ FLY_MJCF = """
       <!-- Head with cameras - using realistic mesh -->
       <body name="head" pos="0.012 0 0">
         <geom name="head_geom" type="mesh" mesh="head_mesh" 
-              material="fly_body_mat" mass="0.0002"/>
+              material="fly_body_mat" mass="0.0002" contype="0" conaffinity="0"/>
         
         <!-- Left eye camera -->
         <camera name="left_eye" pos="0.003 0.006 0.002" 
@@ -90,17 +92,17 @@ FLY_MJCF = """
       <!-- Wings - using realistic mesh -->
       <body name="left_wing" pos="-0.002 0.008 0.002">
         <geom name="left_wing_geom" type="mesh" mesh="wing_left_mesh" 
-              material="fly_wing_mat" mass="0.00005"/>
+              material="fly_wing_mat" mass="0.00005" contype="0" conaffinity="0"/>
       </body>
       <body name="right_wing" pos="-0.002 -0.008 0.002">
         <geom name="right_wing_geom" type="mesh" mesh="wing_right_mesh" 
-              material="fly_wing_mat" mass="0.00005"/>
+              material="fly_wing_mat" mass="0.00005" contype="0" conaffinity="0"/>
       </body>
       
       <!-- Abdomen - using realistic mesh -->
       <body name="abdomen" pos="-0.012 0 -0.002">
         <geom name="abdomen_geom" type="mesh" mesh="abdomen_mesh" 
-              material="fly_body_mat" mass="0.0003"/>
+              material="fly_body_mat" mass="0.0003" contype="0" conaffinity="0"/>
       </body>
       
       <!-- Left legs (simplified, visual only) -->
@@ -126,12 +128,14 @@ FLY_MJCF = """
   </worldbody>
   
   <actuator>
-    <!-- Flight control: forces and torques on the fly body -->
-    <general name="thrust_forward" gear="1 0 0 0 0 0" joint="fly_joint" gainprm="0.0001 0 0"/>
-    <general name="thrust_up" gear="0 0 1 0 0 0" joint="fly_joint" gainprm="0.0001 0 0"/>
-    <general name="torque_roll" gear="0 0 0 1 0 0" joint="fly_joint" gainprm="0.00001 0 0"/>
-    <general name="torque_pitch" gear="0 0 0 0 1 0" joint="fly_joint" gainprm="0.00001 0 0"/>
-    <general name="torque_yaw" gear="0 0 0 0 0 1" joint="fly_joint" gainprm="0.00001 0 0"/>
+    <!-- Flight control in the thorax site / body frame (not world-frame freejoint gear).
+         ctrl is SI units (N and N·m) after gainprm=1. Engineered so max lift exceeds
+         body weight; not a biological muscle model. -->
+    <general name="thrust_forward" gear="1 0 0 0 0 0" site="thorax_ctrl" gainprm="1 0 0"/>
+    <general name="thrust_up" gear="0 0 1 0 0 0" site="thorax_ctrl" gainprm="1 0 0"/>
+    <general name="torque_roll" gear="0 0 0 1 0 0" site="thorax_ctrl" gainprm="1 0 0"/>
+    <general name="torque_pitch" gear="0 0 0 0 1 0" site="thorax_ctrl" gainprm="1 0 0"/>
+    <general name="torque_yaw" gear="0 0 0 0 0 1" site="thorax_ctrl" gainprm="1 0 0"/>
   </actuator>
   
   <sensor>

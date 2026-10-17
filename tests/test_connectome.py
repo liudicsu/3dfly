@@ -211,5 +211,127 @@ def test_large_sparse_simulator():
     assert np.all(rates <= sim.max_rate)
 
 
+def test_rate_simulator_ei_signs():
+    """Test E/I sign application in rate simulator."""
+    # Create simple 3-neuron network: 0→1, 0→2
+    # 0 is excitatory (+1), 1 is inhibitory (-1), 2 is unclear (+1)
+    adjacency = sparse.csr_matrix([
+        [0, 1, 1],  # 0 → 1, 2
+        [0, 0, 0],
+        [0, 0, 0],
+    ], dtype=float)
+    
+    transmitter_signs = {0: 1.0, 1: -1.0, 2: 1.0}
+    
+    # Without E/I signs
+    sim_no_ei = RateSimulator(adjacency, apply_ei_signs=False, transmitter_signs=transmitter_signs)
+    # Should have positive weights
+    assert sim_no_ei.adj[0, 1] > 0
+    assert sim_no_ei.adj[0, 2] > 0
+    
+    # With E/I signs
+    sim_with_ei = RateSimulator(adjacency, apply_ei_signs=True, transmitter_signs=transmitter_signs)
+    # 0→1 should be positive (excitatory presynaptic)
+    # 0→2 should be positive (excitatory presynaptic)
+    assert sim_with_ei.adj[0, 1] > 0
+    assert sim_with_ei.adj[0, 2] > 0
+
+
+def test_inhibitory_presynaptic_row_is_negative():
+    """Presynaptic GABA/glutamate/histamine rows must flip sign."""
+    adjacency = sparse.csr_matrix([
+        [0, 0, 0],
+        [0, 0, 2.0],  # neuron 1 → 2
+        [0, 0, 0],
+    ], dtype=float)
+    transmitter_signs = {0: 1.0, 1: -1.0, 2: 1.0}
+    sim = RateSimulator(adjacency, apply_ei_signs=True, transmitter_signs=transmitter_signs)
+    assert sim.adj[1, 2] < 0
+
+
+def test_apply_ei_signs_is_vectorized_and_fast():
+    """sparse.diags @ adj must finish quickly on a large sparse graph."""
+    import time
+    from threedfly.connectome.simulator import apply_ei_signs
+
+    n = 20000
+    adj = sparse.random(n, n, density=0.0005, format="csr", dtype=np.float32)
+    signs = np.ones(n, dtype=np.float32)
+    signs[::3] = -1.0
+    t0 = time.perf_counter()
+    signed = apply_ei_signs(adj, signs)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0, f"apply_ei_signs took {elapsed:.2f}s, expected < 1s"
+    assert signed.shape == adj.shape
+    assert signed.nnz == adj.nnz
+
+
+def test_lif_simulator_ei_signs():
+    """Test E/I sign application in LIF simulator."""
+    adjacency = sparse.csr_matrix([
+        [0, 1, 1],
+        [0, 0, 0],
+        [0, 0, 0],
+    ], dtype=float)
+    
+    transmitter_signs = {0: 1.0, 1: -1.0, 2: 1.0}
+    
+    # Without E/I signs
+    sim_no_ei = BrainSimulator(adjacency, apply_ei_signs=False, transmitter_signs=transmitter_signs)
+    assert sim_no_ei.adj[0, 1] > 0
+    
+    # With E/I signs
+    sim_with_ei = BrainSimulator(adjacency, apply_ei_signs=True, transmitter_signs=transmitter_signs)
+    assert sim_with_ei.adj[0, 1] > 0
+
+
+def test_amplify_incoming_scales_positive_synapses_to_targets():
+    """Incoming gain to DNp01 must strengthen existing positive 1-hop weights."""
+    from threedfly.connectome.simulator import amplify_incoming_to_targets
+
+    adj = sparse.csr_matrix(np.array([
+        [0.0, 0.0, 0.2],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ], dtype=np.float32))
+    out = amplify_incoming_to_targets(adj, targets=np.array([2]), gain=5.0)
+    assert float(out[0, 2]) == pytest.approx(1.0)
+
+
+def test_diagnose_looming_reports_dnp01_rise():
+    """Diagnostic helper injects looming into LPLC2/LC4 and reports DNp01 vs rest."""
+    from threedfly.connectome.simulator import diagnose_looming_to_dnp01
+    from tests.test_control import _synthetic_bio_annotations
+    from threedfly.control.controller import BiologicalFlightController
+
+    n, annotations, body_ids, body_id_to_idx = _synthetic_bio_annotations()
+    controller = BiologicalFlightController(
+        n_neurons=n,
+        annotations=annotations,
+        body_ids=body_ids,
+        body_id_to_idx=body_id_to_idx,
+        warmup_steps=3,
+    )
+    adj = sparse.csr_matrix((n, n), dtype=np.float32).tolil()
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+    dnp = controller.output_mapping["DNp01"]
+    for pre in loom:
+        for post in dnp:
+            adj[int(pre), int(post)] = 2.0
+    report = diagnose_looming_to_dnp01(
+        adjacency=adj.tocsr(),
+        looming_indices=loom,
+        dnp01_indices=dnp,
+        n_rest=6,
+        n_drive=12,
+        looming_current=1.0,
+    )
+    assert report["n_one_hop"] > 0
+    assert report["dnp01_driven"] > report["dnp01_rest"] + 0.05
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

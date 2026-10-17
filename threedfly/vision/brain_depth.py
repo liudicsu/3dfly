@@ -30,6 +30,39 @@ from typing import Optional, Dict, Tuple
 from scipy import sparse
 
 
+def extract_t4_t5_flow_features(
+    flow_left: Optional[np.ndarray],
+    flow_right: Optional[np.ndarray],
+    scale: float = 5.0,
+) -> Dict[str, float]:
+    """
+    Engineered mapping from optic-flow fields to T4/T5 directional channels.
+
+    T4a/T5a: +x (front-to-back / rightward in the image)
+    T4b/T5b: -x
+    T4c/T5c: upward (negative image y)
+    T4d/T5d: downward
+    T4 (ON) and T5 (OFF) share the same directional magnitude here.
+    """
+    features: Dict[str, float] = {}
+    for side, flow in (("left", flow_left), ("right", flow_right)):
+        if flow is None:
+            fx = fy = 0.0
+        else:
+            fx = float(np.mean(flow[..., 0]))
+            fy = float(np.mean(flow[..., 1]))
+        channels = {
+            "a": float(np.tanh(max(fx, 0.0) / scale)),
+            "b": float(np.tanh(max(-fx, 0.0) / scale)),
+            "c": float(np.tanh(max(-fy, 0.0) / scale)),
+            "d": float(np.tanh(max(fy, 0.0) / scale)),
+        }
+        for cls in ("t4", "t5"):
+            for subtype, value in channels.items():
+                features[f"{cls}{subtype}_{side}"] = value
+    return features
+
+
 class BrainDepthEstimator:
     """
     Brain-based depth estimation using motion parallax and optic flow.
@@ -413,7 +446,12 @@ class BrainDepthEstimator:
         # First frame: return zero features
         if flow_left is None:
             zero_features = np.zeros(self.n_flow_features)
-            return zero_features, {"flow_magnitude": 0.0, "has_flow": False}
+            return zero_features, {
+                "flow_magnitude": 0.0,
+                "has_flow": False,
+                "flow_left": None,
+                "flow_right": None,
+            }
         
         # Sample flow on grid
         flow_features = self.sample_flow_grid(flow_left, flow_right)
@@ -426,6 +464,8 @@ class BrainDepthEstimator:
             "flow_magnitude": mean_flow_magnitude,
             "has_flow": True,
             "velocity": velocity,
+            "flow_left": flow_left,
+            "flow_right": flow_right,
         }
         
         return flow_features, info

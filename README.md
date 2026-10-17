@@ -23,6 +23,38 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 
 **Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. **NEW**: Depth estimation now uses **motion parallax and optic flow** (the primary depth cues real fruit flies use) instead of arbitrary mid-network readouts. Optical flow is computed from consecutive frames, combined with flight velocity (egomotion), routed through the connectome (set_input → simulate → readout), and decoded from visual neuron population activity into a 12×16 spatial depth map. This approach is biologically motivated but the flow extraction, parallax calculation, and neural readout are hand-designed engineering approximations, not biologically validated.
 
+### Biological Mapping (NEW)
+
+**The simulation now supports biologically-grounded input/output mapping** using neuron type annotations from the MaleCNS connectome:
+
+**What is measured connectome data:**
+- Synaptic connectivity (~10M connections, filtered from 150M raw)
+- Neuron type annotations (R1-R6, L1-L5, T4/T5, LPLC2, LC4, DNp01, DNg02, DNa, DNb, etc.)
+- Soma and root side information (left/right brain hemisphere)
+- Neurotransmitter identities (acetylcholine, GABA, glutamate, etc.)
+
+**What is engineered (hand-designed bridges):**
+- Image → neuron encoding:
+  - Luminance → R1-R6 photoreceptors (split by brain hemisphere)
+  - Optic flow → T4a-d / T5a-d direction-selective neurons
+  - Looming detection → LPLC2 + LC4 collision detectors
+- Tonic flight drive baseline with rest lift = body weight (DNg02 modulates around hover)
+- Body-frame thorax-site actuators, linear+quadratic aero drag (terminal ~0.5–1.5 m/s), haltere-like angular-rate damping, and a weak altitude-hold around 1.5 m
+- 20 ms control ticks: each `env.step` runs 10 MuJoCo substeps (2 ms) so 1000 steps = 20 s of flight, aligned with the brain
+- Per-population visual-input normalisation and rate ceiling 50 Hz so DN readouts are not pinned
+- DN → motor readout:
+  - DNp01 → escape (threshold event; brain-triggered count is logged separately from an engineered looming residual)
+  - DNg02 → thrust/altitude deviations around hover
+  - DNa02 / DNg02 L−R → yaw (bilateral, zero-mean at rest; silent side drops the pair)
+  - DNb → roll
+- Warm-up rest stats are median/MAD; convergence is a moving-window median vs spread
+- Exploration biases left/right visual input only; it does not override the DN action
+- Safety limits (minimal collision recovery as last resort; fly-vs-environment contacts; room bounds ±5 m, never an inner ±1.9 teleport)
+- Diagnostic: `threedfly diagnose-looming data/full_connectome.npz` injects synthetic looming into LPLC2/LC4 and prints DNp01 vs rest
+
+**Scientific honesty:**
+This is a connectome-structured simulator with engineered sensory encoding and motor decoding. The synaptic graph is real; the input/output mappings are biologically inspired but not validated against fruit fly physiology. Neural dynamics use simplified rate models. This is exploratory research simulation, not a claim of neuron-for-neuron accuracy.
+
 ---
 
 ## Features
@@ -571,16 +603,16 @@ This mapping is **engineered, not biologically validated**. It provides plausibl
 
 - Samples exploration score in 8 directions around current position (horizontal plane only)
 - Scores based on voxel occupancy (low occupancy → high score)
-- Biases flight toward frontiers with strong forward signal (1.5) and turning
-- **No vertical exploration bias**: Altitude control delegated to brain/controller to avoid ceiling bouncing
-- Random exploration with probability 0.2
+- Computes a **heading error** relative to the current body yaw and biases left vs right photoreceptor drive
+- Does **not** add a world-heading command onto the motor action
+- **No vertical exploration bias**: altitude is hover = weight plus a weak engineered hold at 1.5 m
 
 ### Collision Recovery
 
-- **Soft recovery** automatically handles collisions instead of stopping
-- Backs off from collision point, dampens velocity, randomizes orientation
-- Configurable max collisions (default: 50 non-interactive, 100 interactive)
-- Enables continuous exploration: 1500+ steps vs ~255 without recovery
+- **Soft recovery** is a last-resort safety net, not a teleport
+- Overspeed is not treated as a collision (drag limits speed instead)
+- Fly geoms are identified by body id (geom 0 is the floor, not the thorax)
+- Position is clamped only at actual room bounds (walls at ±5 m, z ≈ 4 m), never an inner ±1.9 m box
 - See [COLLISION_RECOVERY.md](COLLISION_RECOVERY.md) for details
 
 ---
@@ -747,6 +779,38 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
 ### 重要说明
 
 这是一个**基于连接组结构的模拟器**，使用简化的神经元模型（LIF或速率模型）和工程化的输入输出映射。**新版本**：深度估计现在使用**运动视差和光流**（真实果蝇使用的主要深度线索），而不是任意的中间网络神经元读取。从连续帧计算光流，结合飞行速度（自我运动），通过连接组路由（set_input → simulate → readout），从视觉神经元群体活动解码为12×16空间深度图。这种方法有生物学动机，但光流提取、视差计算和神经读取是手工设计的工程近似，未经生物学验证。
+
+### 生物学映射（新功能）
+
+**模拟器现在支持基于生物学的输入输出映射**，使用 MaleCNS 连接组的神经元类型注释：
+
+**什么是测量的连接组数据：**
+- 突触连接（约1000万个连接，从1.5亿原始数据中过滤）
+- 神经元类型注释（R1-R6、L1-L5、T4/T5、LPLC2、LC4、DNp01、DNg02、DNa、DNb等）
+- 胞体和根部位置信息（左右脑半球）
+- 神经递质类型（乙酰胆碱、GABA、谷氨酸等）
+
+**什么是工程化设计的（手工设计的桥接）：**
+- 图像 → 神经元编码：
+  - 亮度 → R1-R6 感光细胞（按脑半球分割）
+  - 光流 → T4a-d / T5a-d 方向选择性神经元
+  - 逼近检测 → LPLC2 + LC4 碰撞检测器
+- 强直性飞行驱动：静息升力=体重（DNg02 在悬停点附近调制）
+- 胸部位姿点上的机体坐标系执行器、线+二次气动阻力（巡航约 0.5–1.5 m/s）、平衡棒式角速度阻尼、以及约 1.5 m 的弱高度保持（均为工程化）
+- 20 ms 控制节拍：每步 10 个 2 ms 物理子步，1000 步 = 20 s 飞行，与脑时间对齐
+- 按群体归一化视觉输入、发放上限 50 Hz，避免 DN 读出顶死在上限
+- DN → 运动读取：
+  - DNp01 → 逃逸（阈值事件；脑触发次数与工程化逼近残差分开统计）
+  - DNg02 → 推力/高度（相对悬停的偏差）
+  - DNa02 / DNg02 左右差 → 偏航（双侧、静息零均值；一侧静默则丢弃该对）
+  - DNb → 滚转
+- 预热用中位数/MAD；收敛看滑动窗口中位数相对散布
+- 探索策略只偏置左右视觉输入，不覆盖 DN 动作
+- 安全限制（最小化碰撞恢复作为最后手段；按果蝇 body 识别接触；房间边界 ±5 m，不做 ±1.9 内框传送）
+- 诊断：`threedfly diagnose-looming data/full_connectome.npz` 向 LPLC2/LC4 注入合成逼近并打印 DNp01 相对静息的变化
+
+**科学诚实性：**
+这是一个基于连接组结构的模拟器，具有工程化的感觉编码和运动解码。突触图是真实的；输入输出映射受生物学启发但未经果蝇生理学验证。神经动力学使用简化的速率模型。这是探索性研究模拟，而非神经元级精确度的声明。
 
 ---
 

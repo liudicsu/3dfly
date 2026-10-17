@@ -211,6 +211,75 @@ def inspect_types(subgraph_path):
         sys.exit(1)
 
 
+@main.command("diagnose-looming")
+@click.argument("subgraph_path", type=click.Path(exists=True))
+@click.option("--no-ei", is_flag=True, help="Skip neurotransmitter E/I signs")
+@click.option("--looming", type=float, default=1.0, help="Injected looming current")
+def diagnose_looming(subgraph_path, no_ei, looming):
+    """Inject strong synthetic looming into LPLC2/LC4 and print DNp01 vs rest."""
+    import numpy as np
+    from threedfly.connectome import ConnectomeLoader
+    from threedfly.connectome.neuron_selection import (
+        load_neurotransmitter_data,
+        build_transmitter_sign_vector,
+    )
+    from threedfly.connectome.simulator import (
+        apply_ei_signs,
+        diagnose_looming_to_dnp01,
+        count_directed_hops,
+    )
+    from threedfly.control.controller import BiologicalFlightController
+
+    subgraph = ConnectomeLoader.load_subgraph(Path(subgraph_path))
+    annotations = subgraph.get("annotations")
+    if annotations is None:
+        click.echo("✗ Subgraph has no annotations.", err=True)
+        sys.exit(1)
+    body_ids = subgraph["body_ids"]
+    body_id_to_idx = subgraph["body_id_to_idx"]
+    adj = subgraph["adjacency"]
+    n_neurons = subgraph["n_neurons"]
+
+    if not no_ei:
+        nt_data = load_neurotransmitter_data(
+            "data/connectome-raw/body-neurotransmitters-male-cns-v1.0.feather"
+        )
+        if nt_data is not None:
+            signs = build_transmitter_sign_vector(
+                n_neurons, body_ids, body_id_to_idx, nt_data
+            )
+            adj = apply_ei_signs(adj, signs)
+            click.echo("Applied E/I signs from neurotransmitter table.")
+
+    controller = BiologicalFlightController(
+        n_neurons=n_neurons,
+        annotations=annotations,
+        body_ids=body_ids,
+        body_id_to_idx=body_id_to_idx,
+        warmup_steps=0,
+    )
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+    dnp = controller.output_mapping.get("DNp01")
+    hops = count_directed_hops(adj, loom, dnp)
+    click.echo(
+        f"LPLC2/LC4 n={hops['n_sources']}  DNp01 n={hops['n_targets']}  "
+        f"1-hop={hops['n_one_hop']}  2-hop={hops['n_two_hop']}"
+    )
+    report = diagnose_looming_to_dnp01(
+        adjacency=adj,
+        looming_indices=loom,
+        dnp01_indices=dnp,
+        looming_current=float(looming),
+    )
+    click.echo(f"Looming cells driven rate: {report['looming_driven']:.4g}")
+    click.echo(f"DNp01 rest:   {report['dnp01_rest']:.4g}")
+    click.echo(f"DNp01 driven: {report['dnp01_driven']:.4g}")
+    click.echo("DNp01 rose above rest." if report["rose"] else "DNp01 did NOT rise above rest.")
+
+
 @main.command()
 @click.option(
     "--subgraph",

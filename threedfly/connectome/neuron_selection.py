@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Set
+from pathlib import Path
 
 
 def find_neurons_by_type(
@@ -186,3 +187,305 @@ def print_neuron_selection_report(selection: Dict[str, Dict[str, np.ndarray]]) -
             print(f"  {name:20s}: {len(indices):6,} neurons")
     
     print("=" * 70)
+
+
+def load_neurotransmitter_data(feather_path: str) -> Optional[pd.DataFrame]:
+    """
+    Load neurotransmitter data from feather file.
+    
+    Args:
+        feather_path: Path to body-neurotransmitters-*.feather
+    
+    Returns:
+        DataFrame with columns: body, consensus_nt, celltype_predicted_nt
+        Returns None if file doesn't exist
+    """
+    if not Path(feather_path).exists():
+        return None
+    
+    try:
+        return pd.read_feather(feather_path)
+    except Exception as e:
+        print(f"Warning: Failed to load neurotransmitter data: {e}")
+        return None
+
+
+def get_neuron_transmitters(
+    body_ids: np.ndarray,
+    nt_data: Optional[pd.DataFrame]
+) -> Dict[int, str]:
+    """
+    Map body IDs to neurotransmitter types.
+    
+    Args:
+        body_ids: Array of body IDs to look up
+        nt_data: Neurotransmitter dataframe (or None)
+    
+    Returns:
+        Dict mapping body_id → transmitter string (lowercase)
+        Falls back to celltype_predicted_nt if consensus_nt is 'unclear'
+        Returns 'unclear' if not found
+    """
+    if nt_data is None:
+        return {int(bid): "unclear" for bid in body_ids}
+    
+    result = {}
+    nt_lookup = nt_data.set_index("body")
+    
+    for bid in body_ids:
+        if bid in nt_lookup.index:
+            row = nt_lookup.loc[bid]
+            consensus = str(row.get("consensus_nt", "unclear")).lower().strip()
+            if consensus == "unclear" or consensus == "":
+                # Fallback to predicted
+                predicted = str(row.get("celltype_predicted_nt", "unclear")).lower().strip()
+                result[int(bid)] = predicted
+            else:
+                result[int(bid)] = consensus
+        else:
+            result[int(bid)] = "unclear"
+    
+    return result
+
+
+DEFAULT_INHIBITORY_TRANSMITTERS = ("gaba", "glutamate", "histamine")
+
+
+def transmitter_to_sign(
+    transmitter: str,
+    inhibitory_transmitters=None,
+    default_sign: float = 1.0,
+) -> float:
+    """
+    Map a neurotransmitter name to a synaptic sign.
+
+    Default: acetylcholine and others/unclear → +1;
+    GABA, glutamate, histamine → -1. Inhibitory set is configurable.
+    """
+    inhibitory = {
+        str(name).lower().strip()
+        for name in (inhibitory_transmitters or DEFAULT_INHIBITORY_TRANSMITTERS)
+    }
+    name = str(transmitter).lower().strip()
+    if name in inhibitory:
+        return -1.0
+    return float(default_sign)
+
+
+def build_transmitter_sign_vector(
+    n_neurons: int,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+    nt_data: Optional[pd.DataFrame],
+    inhibitory_transmitters=None,
+    default_sign: float = 1.0,
+) -> np.ndarray:
+    """Build length-n_neurons sign vector (+1/-1) from neurotransmitter tables."""
+    signs = np.full(n_neurons, default_sign, dtype=np.float32)
+    if nt_data is None:
+        return signs
+    transmitters = get_neuron_transmitters(body_ids, nt_data)
+    for bid, nt in transmitters.items():
+        idx = body_id_to_idx.get(int(bid))
+        if idx is not None:
+            signs[idx] = transmitter_to_sign(
+                nt, inhibitory_transmitters=inhibitory_transmitters, default_sign=default_sign
+            )
+    return signs
+
+
+def create_fixed_input_assignment(
+    population_size: int,
+    feature_size: int,
+    seed: int = 42
+) -> np.ndarray:
+    """
+    Create fixed seeded assignment of input features to neuron population.
+    
+    Spreads features evenly across population with deterministic randomization.
+    
+    Args:
+        population_size: Number of neurons in population
+        feature_size: Number of input features to spread
+        seed: Random seed for reproducibility
+    
+    Returns:
+        Array of neuron indices (length = feature_size)
+    """
+    rng = np.random.RandomState(seed)
+    if population_size == 0:
+        return np.array([], dtype=np.int32)
+    return rng.choice(population_size, size=feature_size, replace=True).astype(np.int32)
+
+
+def _annotation_type_mask(annotations: pd.DataFrame, pattern: str) -> pd.Series:
+    """Match `pattern` against celltype and/or type columns."""
+    mask = pd.Series(False, index=annotations.index)
+    for col in ("celltype", "type"):
+        if col in annotations.columns:
+            mask = mask | annotations[col].astype(str).str.contains(
+                pattern, case=False, na=False, regex=True
+            )
+    return mask
+
+
+def _bodies_to_indices(
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+) -> np.ndarray:
+    return np.array(
+        [body_id_to_idx[bid] for bid in body_ids if bid in body_id_to_idx],
+        dtype=np.int32,
+    )
+
+
+def _get_side_mask(annotations: pd.DataFrame, side: str) -> pd.Series:
+    """Get boolean mask for neurons on specified side (L/R)."""
+    # Check somaSide first, fallback to rootSide if missing/unclear
+    if "somaSide" in annotations.columns and "rootSide" in annotations.columns:
+        soma = annotations["somaSide"].fillna("?")
+        root = annotations["rootSide"].fillna("?")
+        # Use somaSide if available, otherwise rootSide
+        effective_side = soma.where(soma.isin(["L", "R"]), root)
+        return effective_side == side
+    elif "somaSide" in annotations.columns:
+        return annotations["somaSide"] == side
+    elif "rootSide" in annotations.columns:
+        return annotations["rootSide"] == side
+    else:
+        # No side information, return all False
+        return pd.Series([False] * len(annotations))
+
+
+def select_input_neurons_for_luminance(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+    side: str
+) -> np.ndarray:
+    """
+    Select R1-R6 photoreceptor neurons for luminance input.
+    
+    Args:
+        annotations: Annotation DataFrame
+        body_ids: Body IDs in connectome
+        body_id_to_idx: Body ID to index mapping
+        side: "L" or "R"
+    
+    Returns:
+        Array of neuron indices for R1-R6 on specified side
+    """
+    valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
+    side_mask = _get_side_mask(valid_annotations, side)
+    r_mask = _annotation_type_mask(valid_annotations, r"^(?:R[1-6]|R1-R6)(?:$|[^0-9A-Za-z])")
+    matching_body_ids = valid_annotations.loc[r_mask & side_mask, "bodyId"].values
+    indices = _bodies_to_indices(matching_body_ids, body_id_to_idx)
+    if indices.size > 0:
+        return indices
+
+    # Fallback: L1-L5 by somaSide/rootSide when R1-R6 are absent
+    l_mask = _annotation_type_mask(valid_annotations, r"^L[1-5](?:$|[^0-9A-Za-z])")
+    matching_body_ids = valid_annotations.loc[l_mask & side_mask, "bodyId"].values
+    return _bodies_to_indices(matching_body_ids, body_id_to_idx)
+
+
+def select_input_neurons_for_optic_flow(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+    subtype: str,
+    side: str,
+    cell_class: str = "T4",
+) -> np.ndarray:
+    """
+    Select T4 or T5 neurons for optic flow input.
+
+    T4 and T5 are selected separately with anchored regexes so T4a ≠ T5a.
+    """
+    valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
+    prefix = str(cell_class).upper()
+    pattern = rf"^{prefix}{subtype}(?:$|[^A-Za-z0-9])"
+    t_mask = _annotation_type_mask(valid_annotations, pattern)
+    side_mask = _get_side_mask(valid_annotations, side)
+    matching_body_ids = valid_annotations.loc[t_mask & side_mask, "bodyId"].values
+    return _bodies_to_indices(matching_body_ids, body_id_to_idx)
+
+
+def select_input_neurons_for_looming(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+    side: str
+) -> np.ndarray:
+    """
+    Select LPLC2 + LC4 neurons for looming input.
+    
+    Args:
+        annotations: Annotation DataFrame
+        body_ids: Body IDs in connectome
+        body_id_to_idx: Body ID to index mapping
+        side: "L" or "R"
+    
+    Returns:
+        Array of neuron indices for LPLC2 + LC4 on specified side
+    """
+    valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
+    loom_mask = _annotation_type_mask(valid_annotations, r"^(?:LPLC2|LC4)$")
+    side_mask = _get_side_mask(valid_annotations, side)
+    matching_body_ids = valid_annotations.loc[loom_mask & side_mask, "bodyId"].values
+    return _bodies_to_indices(matching_body_ids, body_id_to_idx)
+
+
+def select_output_neurons_for_motor(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int]
+) -> Dict[str, np.ndarray]:
+    """
+    Select descending neurons for motor readout.
+    
+    Maps specific DN types to flight behaviors:
+    - DNp01: escape/sharp avoidance
+    - DNg02: thrust/altitude
+    - DNa01/DNa02: yaw (left-right difference)
+    - DNb: additional motor pathways
+    
+    Args:
+        annotations: Annotation DataFrame
+        body_ids: Body IDs in connectome
+        body_id_to_idx: Body ID to index mapping
+    
+    Returns:
+        Dict with keys "DNp01", "DNg02", "DNa01", "DNa02", "DNb"
+        plus side splits "DNg02_L/R", "DNa01_L/R", "DNa02_L/R" when sides exist.
+    """
+    valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
+
+    def _select(pattern: str) -> np.ndarray:
+        mask = _annotation_type_mask(valid_annotations, pattern)
+        return _bodies_to_indices(
+            valid_annotations.loc[mask, "bodyId"].values, body_id_to_idx
+        )
+
+    def _select_side(pattern: str, side: str) -> np.ndarray:
+        mask = _annotation_type_mask(valid_annotations, pattern) & _get_side_mask(
+            valid_annotations, side
+        )
+        return _bodies_to_indices(
+            valid_annotations.loc[mask, "bodyId"].values, body_id_to_idx
+        )
+
+    result = {
+        "DNp01": _select(r"^DNp01(?:$|[^A-Za-z0-9])"),
+        "DNg02": _select(r"^DNg02"),
+        "DNa01": _select(r"^DNa01(?:$|[^A-Za-z0-9])"),
+        "DNa02": _select(r"^DNa02(?:$|[^A-Za-z0-9])"),
+        "DNb": _select(r"^DNb\d"),
+        "DNg02_L": _select_side(r"^DNg02", "L"),
+        "DNg02_R": _select_side(r"^DNg02", "R"),
+        "DNa01_L": _select_side(r"^DNa01(?:$|[^A-Za-z0-9])", "L"),
+        "DNa01_R": _select_side(r"^DNa01(?:$|[^A-Za-z0-9])", "R"),
+        "DNa02_L": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "L"),
+        "DNa02_R": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "R"),
+    }
+    return result
