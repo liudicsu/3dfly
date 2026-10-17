@@ -7,9 +7,11 @@ import time
 
 from threedfly.connectome import ConnectomeLoader, BrainSimulator
 from threedfly.connectome.simulator import RateSimulator
+from threedfly.connectome.neuron_selection import load_neurotransmitter_data
 from threedfly.sim import FlyEnvironment
 from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
 from threedfly.control import FlightController, ExplorationPolicy
+from threedfly.control.controller import BiologicalFlightController
 from threedfly.viz import Visualizer
 
 
@@ -75,8 +77,39 @@ def run_simulation(
     )
     
     print("\n[6/7] Setting up control and exploration...")
-    controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
-    explorer = ExplorationPolicy(exploration_weight=1.5, random_exploration_prob=0.05)  # Maximum exploration, minimal random
+    
+    # Load annotations if available for biological mapping
+    annotations = None
+    body_ids = None
+    body_id_to_idx = None
+    use_biological = False
+    
+    if "annotations" in subgraph and "body_ids" in subgraph and "body_id_to_idx" in subgraph:
+        annotations = subgraph["annotations"]
+        body_ids = subgraph["body_ids"]
+        body_id_to_idx = subgraph["body_id_to_idx"]
+        print("  Using biological neuron mappings from annotations")
+        
+        # Try to load neurotransmitter data
+        nt_path = "data/connectome-raw/body-neurotransmitters-male-cns-v1.0.feather"
+        nt_data = load_neurotransmitter_data(nt_path)
+        if nt_data is not None:
+            print(f"  Loaded neurotransmitter data ({len(nt_data)} entries)")
+        
+        controller = BiologicalFlightController(
+            n_neurons=n_neurons,
+            annotations=annotations,
+            body_ids=body_ids,
+            body_id_to_idx=body_id_to_idx,
+            nt_data=nt_data,
+            warmup_steps=100,  # 100 grounded brain steps
+        )
+        use_biological = True
+    else:
+        print("  No annotations found, using legacy controller")
+        controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
+    
+    explorer = ExplorationPolicy(exploration_weight=1.5, random_exploration_prob=0.05)
     
     print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":
@@ -93,6 +126,35 @@ def run_simulation(
     
     # Reset environment
     left_img, right_img = env.reset(seed=seed)
+    
+    # Warmup period for biological controller
+    if use_biological and controller.warmup_steps > 0:
+        print(f"\n[Warmup] Running {controller.warmup_steps} grounded brain steps...")
+        for warmup_step in range(controller.warmup_steps):
+            visual_features = stereo.get_visual_features(left_img, right_img)
+            
+            # Set biological input (simplified during warmup)
+            controller.set_visual_input(
+                left_luminance=visual_features["left_ommatidia"].mean(),
+                right_luminance=visual_features["right_ommatidia"].mean(),
+                optic_flow_features={},
+                looming_features={},
+                brain=brain,
+            )
+            
+            # Run brain
+            for _ in range(brain_steps_per_sim):
+                if simulator_type == "lif":
+                    brain.step()
+                    brain_activity = brain.get_firing_rates(window=50)
+                else:
+                    brain_activity = brain.step()
+            
+            # Record resting rates
+            controller.record_resting_rates(brain_activity)
+        
+        controller.finalize_warmup()
+        print("[Warmup complete]\n")
     
     # Simulation loop
     sim_dt = 0.02  # 20ms per step
@@ -117,17 +179,31 @@ def run_simulation(
             fly_velocity
         )
         
-        # Feed to brain: ommatidial samples + looming + FLOW FEATURES (motion parallax)
-        brain_input = np.concatenate([
-            visual_features["left_ommatidia"],
-            visual_features["right_ommatidia"],
-            visual_features["looming_features"],  # Obstacle proximity signals
-            flow_features  # *** NEW: Motion parallax/optic flow features ***
-        ])
+        # Feed to brain
+        if use_biological:
+            # Biological input mapping
+            controller.set_visual_input(
+                left_luminance=visual_features["left_ommatidia"].mean(),
+                right_luminance=visual_features["right_ommatidia"].mean(),
+                optic_flow_features={},  # Simplified - could extract from flow_features
+                looming_features={
+                    "left": visual_features["looming_features"][:4].mean(),
+                    "right": visual_features["looming_features"][4:].mean(),
+                },
+                brain=brain,
+            )
+        else:
+            # Legacy input
+            brain_input = np.concatenate([
+                visual_features["left_ommatidia"],
+                visual_features["right_ommatidia"],
+                visual_features["looming_features"],
+                flow_features
+            ])
+            brain.set_input(brain_input)
         
         # Run brain for multiple timesteps (connectome processes flow features)
         for _ in range(brain_steps_per_sim):
-            brain.set_input(brain_input)
             if simulator_type == "lif":
                 brain.step()
                 brain_activity = brain.get_firing_rates(window=50)
