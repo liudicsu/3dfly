@@ -11,6 +11,10 @@ from threedfly.connectome.neuron_selection import (
     load_neurotransmitter_data,
     build_transmitter_sign_vector,
 )
+from threedfly.connectome.simulator import (
+    calibrate_looming_to_dnp01,
+    count_directed_hops,
+)
 from threedfly.sim import FlyEnvironment
 from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
 from threedfly.vision.brain_depth import extract_t4_t5_flow_features
@@ -126,6 +130,18 @@ def run_simulation(
     explorer = ExplorationPolicy(exploration_weight=0.8, random_exploration_prob=0.05)
     if use_biological:
         controller.hover_action = env.hover_action
+        loom_idx = np.concatenate([
+            controller.input_mapping["looming_left"],
+            controller.input_mapping["looming_right"],
+        ])
+        dnp_idx = controller.output_mapping.get("DNp01", np.array([], dtype=np.int32))
+        hops = count_directed_hops(brain.adj, loom_idx, dnp_idx)
+        print(
+            f"  LPLC2/LC4→DNp01 hops: 1-hop={hops['n_one_hop']}, "
+            f"2-hop={hops['n_two_hop']} (src={hops['n_sources']}, tgt={hops['n_targets']})"
+        )
+        brain.adj = calibrate_looming_to_dnp01(brain.adj, loom_idx, dnp_idx)
+        print("  Calibrated looming→DNp01 incoming gain (engineered path assist if 1-hop missing)")
     
     print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":
@@ -291,16 +307,15 @@ def run_simulation(
                 source="brain"
             )
         
-        # COMPARISON: Add StereoBM observation (every 2 steps, denser for informative comparison)
-        if step % 2 == 0:
-            mapper.add_depth_observation(
-                visual_features["depth_map"],
-                visual_features["rgb_for_cloud"],
-                left_pose,
-                visual_features["confidence"],
-                min_confidence=0.08,  # Lower threshold for denser comparison
-                source="stereo"
-            )
+        # COMPARISON: StereoBM every control step (20 ms); keep density after slower/drag physics
+        mapper.add_depth_observation(
+            visual_features["depth_map"],
+            visual_features["rgb_for_cloud"],
+            left_pose,
+            visual_features["confidence"],
+            min_confidence=0.05,
+            source="stereo"
+        )
         
         # Update visualization
         if viz is not None and step % viz_update_interval == 0:
@@ -345,8 +360,8 @@ def run_simulation(
     stereo_pc_path = output_dir / "point_cloud_stereo.ply"
     
     # Export with very dense voxel size for inspection (1cm instead of 5cm)
-    mapper.save_point_cloud(str(brain_pc_path), voxel_size=0.01, source="brain")
-    mapper.save_point_cloud(str(stereo_pc_path), voxel_size=0.01, source="stereo")
+    mapper.save_point_cloud(str(brain_pc_path), voxel_size=0.005, source="brain")
+    mapper.save_point_cloud(str(stereo_pc_path), voxel_size=0.005, source="stereo")
     
     # Final visualization
     if viz is not None:
@@ -367,8 +382,12 @@ def run_simulation(
     print("Final Statistics:")
     print("=" * 70)
     print(f"Total simulation steps: {step + 1}")
+    print(f"Simulated time: {(step + 1) * sim_dt:.1f} s (control dt={sim_dt*1000:.0f} ms)")
     print(f"Total collisions: {collision_count}")
     print(f"Brain neurons: {n_neurons}")
+    if use_biological:
+        print(f"DNp01 escapes: brain-triggered={controller.brain_escape_count}, "
+              f"engineered-residual={controller.engineered_escape_count}")
     print(f"\nPrimary (Brain Depth):")
     print(f"  Point cloud points: {map_stats['total_points']}")
     print(f"  Mean depth: {brain_depth_stats.get('mean_depth_history', 0):.2f}m")

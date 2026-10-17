@@ -285,5 +285,53 @@ def test_lif_simulator_ei_signs():
     assert sim_with_ei.adj[0, 1] > 0
 
 
+def test_amplify_incoming_scales_positive_synapses_to_targets():
+    """Incoming gain to DNp01 must strengthen existing positive 1-hop weights."""
+    from threedfly.connectome.simulator import amplify_incoming_to_targets
+
+    adj = sparse.csr_matrix(np.array([
+        [0.0, 0.0, 0.2],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ], dtype=np.float32))
+    out = amplify_incoming_to_targets(adj, targets=np.array([2]), gain=5.0)
+    assert float(out[0, 2]) == pytest.approx(1.0)
+
+
+def test_diagnose_looming_reports_dnp01_rise():
+    """Diagnostic helper injects looming into LPLC2/LC4 and reports DNp01 vs rest."""
+    from threedfly.connectome.simulator import diagnose_looming_to_dnp01
+    from tests.test_control import _synthetic_bio_annotations
+    from threedfly.control.controller import BiologicalFlightController
+
+    n, annotations, body_ids, body_id_to_idx = _synthetic_bio_annotations()
+    controller = BiologicalFlightController(
+        n_neurons=n,
+        annotations=annotations,
+        body_ids=body_ids,
+        body_id_to_idx=body_id_to_idx,
+        warmup_steps=3,
+    )
+    adj = sparse.csr_matrix((n, n), dtype=np.float32).tolil()
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+    dnp = controller.output_mapping["DNp01"]
+    for pre in loom:
+        for post in dnp:
+            adj[int(pre), int(post)] = 2.0
+    report = diagnose_looming_to_dnp01(
+        adjacency=adj.tocsr(),
+        looming_indices=loom,
+        dnp01_indices=dnp,
+        n_rest=6,
+        n_drive=12,
+        looming_current=1.0,
+    )
+    assert report["n_one_hop"] > 0
+    assert report["dnp01_driven"] > report["dnp01_rest"] + 0.05
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

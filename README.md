@@ -40,13 +40,17 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
   - Looming detection → LPLC2 + LC4 collision detectors
 - Tonic flight drive baseline with rest lift = body weight (DNg02 modulates around hover)
 - Body-frame thorax-site actuators, linear+quadratic aero drag (terminal ~0.5–1.5 m/s), haltere-like angular-rate damping, and a weak altitude-hold around 1.5 m
+- 20 ms control ticks: each `env.step` runs 10 MuJoCo substeps (2 ms) so 1000 steps = 20 s of flight, aligned with the brain
+- Per-population visual-input normalisation and rate ceiling 50 Hz so DN readouts are not pinned
 - DN → motor readout:
-  - DNp01 → escape (threshold event, plus an engineered looming residual if the giant fiber stays silent)
+  - DNp01 → escape (threshold event; brain-triggered count is logged separately from an engineered looming residual)
   - DNg02 → thrust/altitude deviations around hover
-  - DNa02 L−R and DNg02 L−R → yaw (bilateral)
+  - DNa02 / DNg02 L−R → yaw (bilateral, zero-mean at rest; silent side drops the pair)
   - DNb → roll
+- Warm-up rest stats are median/MAD; convergence is a moving-window median vs spread
 - Exploration biases left/right visual input only; it does not override the DN action
 - Safety limits (minimal collision recovery as last resort; fly-vs-environment contacts; room bounds ±5 m, never an inner ±1.9 teleport)
+- Diagnostic: `threedfly diagnose-looming data/full_connectome.npz` injects synthetic looming into LPLC2/LC4 and prints DNp01 vs rest
 
 **Scientific honesty:**
 This is a connectome-structured simulator with engineered sensory encoding and motor decoding. The synaptic graph is real; the input/output mappings are biologically inspired but not validated against fruit fly physiology. Neural dynamics use simplified rate models. This is exploratory research simulation, not a claim of neuron-for-neuron accuracy.
@@ -793,13 +797,17 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
   - 逼近检测 → LPLC2 + LC4 碰撞检测器
 - 强直性飞行驱动：静息升力=体重（DNg02 在悬停点附近调制）
 - 胸部位姿点上的机体坐标系执行器、线+二次气动阻力（巡航约 0.5–1.5 m/s）、平衡棒式角速度阻尼、以及约 1.5 m 的弱高度保持（均为工程化）
+- 20 ms 控制节拍：每步 10 个 2 ms 物理子步，1000 步 = 20 s 飞行，与脑时间对齐
+- 按群体归一化视觉输入、发放上限 50 Hz，避免 DN 读出顶死在上限
 - DN → 运动读取：
-  - DNp01 → 逃逸（阈值事件；若巨纤维静默则叠加工程化的逼近残差）
+  - DNp01 → 逃逸（阈值事件；脑触发次数与工程化逼近残差分开统计）
   - DNg02 → 推力/高度（相对悬停的偏差）
-  - DNa02 左右差与 DNg02 左右差 → 偏航（双侧）
+  - DNa02 / DNg02 左右差 → 偏航（双侧、静息零均值；一侧静默则丢弃该对）
   - DNb → 滚转
+- 预热用中位数/MAD；收敛看滑动窗口中位数相对散布
 - 探索策略只偏置左右视觉输入，不覆盖 DN 动作
 - 安全限制（最小化碰撞恢复作为最后手段；按果蝇 body 识别接触；房间边界 ±5 m，不做 ±1.9 内框传送）
+- 诊断：`threedfly diagnose-looming data/full_connectome.npz` 向 LPLC2/LC4 注入合成逼近并打印 DNp01 相对静息的变化
 
 **科学诚实性：**
 这是一个基于连接组结构的模拟器，具有工程化的感觉编码和运动解码。突触图是真实的；输入输出映射受生物学启发但未经果蝇生理学验证。神经动力学使用简化的速率模型。这是探索性研究模拟，而非神经元级精确度的声明。

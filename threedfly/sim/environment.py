@@ -77,6 +77,9 @@ class FlyEnvironment:
             self.model, mujoco.mjtObj.mjOBJ_BODY, "fly"
         )
         self._fly_geom_ids = self._collect_fly_geom_ids()
+        # Align physics with the 20 ms brain/control tick (MuJoCo dt = 2 ms → 10 substeps).
+        self.control_dt = 0.02
+        self.n_substeps = max(1, int(round(self.control_dt / float(self.model.opt.timestep))))
         
         # State tracking
         self.time = 0.0
@@ -146,48 +149,44 @@ class FlyEnvironment:
         Returns:
             (left_eye_image, right_eye_image, info_dict)
         """
-        # Clip and apply control
+        # Clip and apply control for n_substeps so one control tick = 20 ms of physics.
         action = np.clip(action, -1.0, 1.0)
-        
-        self.data.ctrl[0] = action[0] * self.thrust_max  # forward thrust (N)
-        self.data.ctrl[1] = action[1] * self.thrust_max  # upward thrust (N)
-        self.data.ctrl[2] = action[2] * self.torque_max  # roll (N·m)
-        self.data.ctrl[3] = action[3] * self.torque_max  # pitch (N·m)
-        self.data.ctrl[4] = action[4] * self.torque_max  # yaw (N·m)
-        
-        # Haltere-like attitude stabilisation: damp angular rate in body frame.
-        # Engineered safety/stability bridge, not a connectome readout.
-        angvel = self.data.qvel[3:6]
-        self.data.ctrl[2] -= self.haltere_kd * angvel[0]
-        self.data.ctrl[3] -= self.haltere_kd * angvel[1]
-        self.data.ctrl[4] -= self.haltere_kd * angvel[2]
-        
-        # Aerodynamic drag F = -b v - c |v| v, plus a weak engineered altitude hold.
-        # Applied at subtree COM (same point as thorax_ctrl) so drag does not tumble the fly.
-        vel = self.data.qvel[:3]
-        speed = float(np.linalg.norm(vel))
-        drag = -self.drag_linear * vel
-        if speed > 1e-8:
-            drag = drag - self.drag_quadratic * speed * vel
-        z_err = self.hover_z - float(self.data.qpos[2])
-        alt = self.altitude_hold_kp * z_err - self.altitude_hold_kd * float(vel[2])
-        force = np.array([drag[0], drag[1], drag[2] + alt], dtype=np.float64)
-        torque = np.zeros(3, dtype=np.float64)
-        point = self.data.subtree_com[self._fly_body_id].copy()
-        self.data.xfrc_applied[:] = 0.0
-        self.data.qfrc_applied[:] = 0.0
-        mujoco.mj_applyFT(
-            self.model,
-            self.data,
-            force,
-            torque,
-            point,
-            self._fly_body_id,
-            self.data.qfrc_applied,
-        )
-        
-        # Step physics
-        mujoco.mj_step(self.model, self.data)
+        for _ in range(self.n_substeps):
+            self.data.ctrl[0] = action[0] * self.thrust_max  # forward thrust (N)
+            self.data.ctrl[1] = action[1] * self.thrust_max  # upward thrust (N)
+            self.data.ctrl[2] = action[2] * self.torque_max  # roll (N·m)
+            self.data.ctrl[3] = action[3] * self.torque_max  # pitch (N·m)
+            self.data.ctrl[4] = action[4] * self.torque_max  # yaw (N·m)
+            
+            # Haltere-like attitude stabilisation: damp angular rate in body frame.
+            angvel = self.data.qvel[3:6]
+            self.data.ctrl[2] -= self.haltere_kd * angvel[0]
+            self.data.ctrl[3] -= self.haltere_kd * angvel[1]
+            self.data.ctrl[4] -= self.haltere_kd * angvel[2]
+            
+            # Aerodynamic drag F = -b v - c |v| v, plus a weak engineered altitude hold.
+            vel = self.data.qvel[:3]
+            speed = float(np.linalg.norm(vel))
+            drag = -self.drag_linear * vel
+            if speed > 1e-8:
+                drag = drag - self.drag_quadratic * speed * vel
+            z_err = self.hover_z - float(self.data.qpos[2])
+            alt = self.altitude_hold_kp * z_err - self.altitude_hold_kd * float(vel[2])
+            force = np.array([drag[0], drag[1], drag[2] + alt], dtype=np.float64)
+            torque = np.zeros(3, dtype=np.float64)
+            point = self.data.subtree_com[self._fly_body_id].copy()
+            self.data.xfrc_applied[:] = 0.0
+            self.data.qfrc_applied[:] = 0.0
+            mujoco.mj_applyFT(
+                self.model,
+                self.data,
+                force,
+                torque,
+                point,
+                self._fly_body_id,
+                self.data.qfrc_applied,
+            )
+            mujoco.mj_step(self.model, self.data)
         
         self.time = self.data.time
         self.step_count += 1

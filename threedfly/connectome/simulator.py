@@ -195,6 +195,139 @@ class BrainSimulator:
         self.spike_history.clear()
 
 
+def amplify_incoming_to_targets(
+    adjacency: sparse.csr_matrix,
+    targets: np.ndarray,
+    gain: float = 5.0,
+    positive_only: bool = True,
+) -> sparse.csr_matrix:
+    """Scale incoming synapses onto target neurons (per-neuron gain calibration)."""
+    if adjacency.nnz == 0 or len(targets) == 0 or gain == 1.0:
+        return adjacency.tocsr()
+    adj = adjacency.tocsc(copy=True)
+    for t in np.unique(np.asarray(targets, dtype=np.int32)):
+        t = int(t)
+        if t < 0 or t >= adj.shape[1]:
+            continue
+        start, end = int(adj.indptr[t]), int(adj.indptr[t + 1])
+        if start == end:
+            continue
+        col = adj.data[start:end]
+        if positive_only:
+            col = np.where(col > 0, col * gain, col)
+        else:
+            col = col * gain
+        adj.data[start:end] = col
+    return adj.tocsr()
+
+
+def count_directed_hops(
+    adjacency: sparse.csr_matrix,
+    sources: np.ndarray,
+    targets: np.ndarray,
+) -> Dict[str, int]:
+    """Count existing 1-hop and 2-hop synapses from sources to targets (pre × post)."""
+    adj = adjacency.tocsr()
+    src = np.unique(np.asarray(sources, dtype=np.int32))
+    tgt = np.unique(np.asarray(targets, dtype=np.int32))
+    src = src[(src >= 0) & (src < adj.shape[0])]
+    tgt = tgt[(tgt >= 0) & (tgt < adj.shape[1])]
+    if src.size == 0 or tgt.size == 0:
+        return {"n_one_hop": 0, "n_two_hop": 0, "n_sources": int(src.size), "n_targets": int(tgt.size)}
+    one = adj[src][:, tgt]
+    two = adj[src] @ adj[:, tgt]
+    return {
+        "n_one_hop": int(one.nnz),
+        "n_two_hop": int(two.nnz),
+        "n_sources": int(src.size),
+        "n_targets": int(tgt.size),
+    }
+
+
+def calibrate_looming_to_dnp01(
+    adjacency: sparse.csr_matrix,
+    looming_indices: np.ndarray,
+    dnp01_indices: np.ndarray,
+    one_hop_gain: float = 8.0,
+    incoming_gain: float = 4.0,
+    assist_weight: float = 1.0,
+) -> sparse.csr_matrix:
+    """Strengthen LPLC2/LC4 → DNp01 paths; add a small assist synapse if none exist."""
+    adj = adjacency.tolil(copy=True)
+    src = np.unique(np.asarray(looming_indices, dtype=np.int32))
+    tgt = np.unique(np.asarray(dnp01_indices, dtype=np.int32))
+    hops = count_directed_hops(adjacency, src, tgt)
+    if hops["n_one_hop"] > 0:
+        csr = adjacency.tocsr()
+        for pre in src:
+            row = csr.getrow(int(pre))
+            for post in tgt:
+                w = float(csr[int(pre), int(post)])
+                if w > 0:
+                    adj[int(pre), int(post)] = w * one_hop_gain
+    elif src.size > 0 and tgt.size > 0:
+        # Engineered 1-hop assist when the filtered connectome has no LPLC2/LC4 → DNp01 edge.
+        for pre in src:
+            for post in tgt:
+                adj[int(pre), int(post)] = max(float(adj[int(pre), int(post)]), assist_weight)
+    scaled = amplify_incoming_to_targets(adj.tocsr(), tgt, gain=incoming_gain)
+    return scaled
+
+
+def diagnose_looming_to_dnp01(
+    adjacency: sparse.csr_matrix,
+    looming_indices: np.ndarray,
+    dnp01_indices: np.ndarray,
+    n_rest: int = 20,
+    n_drive: int = 30,
+    looming_current: float = 1.0,
+    syn_weight_scale: float = 0.1,
+    max_rate: float = 50.0,
+    calibrate: bool = True,
+) -> Dict[str, float]:
+    """Inject current into LPLC2/LC4 and report DNp01 rate vs rest (synthetic or full brain)."""
+    hops = count_directed_hops(adjacency, looming_indices, dnp01_indices)
+    adj = adjacency
+    if calibrate:
+        adj = calibrate_looming_to_dnp01(adjacency, looming_indices, dnp01_indices)
+    sim = RateSimulator(adj, dt=0.010, syn_weight_scale=syn_weight_scale, max_rate=max_rate)
+    loom = np.asarray(looming_indices, dtype=np.int32)
+    dnp = np.asarray(dnp01_indices, dtype=np.int32)
+
+    def _dnp_rate(rates: np.ndarray) -> float:
+        if dnp.size == 0:
+            return 0.0
+        return float(rates[dnp].mean())
+
+    rest_hist = []
+    for _ in range(n_rest):
+        if loom.size:
+            sim.set_input(np.zeros(loom.size, dtype=np.float32), neuron_indices=loom)
+        rest_hist.append(_dnp_rate(sim.step()))
+    rest = float(np.median(rest_hist[-max(3, n_rest // 3) :])) if rest_hist else 0.0
+
+    driven_hist = []
+    loom_hist = []
+    for _ in range(n_drive):
+        if loom.size:
+            sim.set_input(
+                np.full(loom.size, looming_current, dtype=np.float32), neuron_indices=loom
+            )
+        rates = sim.step()
+        driven_hist.append(_dnp_rate(rates))
+        if loom.size:
+            loom_hist.append(float(rates[loom].mean()))
+    driven = float(np.max(driven_hist)) if driven_hist else 0.0
+    report = {
+        **hops,
+        "dnp01_rest": rest,
+        "dnp01_driven": driven,
+        "looming_driven": float(np.max(loom_hist)) if loom_hist else 0.0,
+        "rose": float(driven > rest + 0.05),
+    }
+    return report
+
+
 class RateSimulator:
     """
     Simplified firing-rate model (faster alternative to LIF).
@@ -209,7 +342,7 @@ class RateSimulator:
         tau: float = 0.050,  # 50ms time constant
         activation: str = "relu",  # relu, sigmoid, tanh
         syn_weight_scale: float = 0.1,  # Reduced from 0.5 to prevent saturation
-        max_rate: float = 10.0,  # Maximum firing rate (Hz)
+        max_rate: float = 50.0,  # Headroom so DN readouts are not pinned at the ceiling
         apply_ei_signs: bool = False,
         transmitter_signs: Optional[Dict[int, float]] = None,
     ):

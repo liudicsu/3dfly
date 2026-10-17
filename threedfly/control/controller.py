@@ -159,8 +159,11 @@ class BiologicalFlightController:
         self.create_fixed_input_assignment = create_fixed_input_assignment
         # Rest lift equals weight (env.hover_action ≈ 0.32). Engineered, not a DN.
         self.hover_action = 0.32
-        self.looming_input_gain = 8.0
+        self.input_drive = 0.8
+        self.input_drive_clip = 1.5
         self._last_looming = 0.0
+        self.brain_escape_count = 0
+        self.engineered_escape_count = 0
         
         # Input mapping: visual features → neuron populations
         print("\n[Biological I/O Mapping]")
@@ -218,9 +221,11 @@ class BiologicalFlightController:
         
         print("="*70)
         
-        # Resting rates (set during warmup)
+        # Resting rates (set during warmup) — robust median / MAD
         self.resting_rates = {}
         self.resting_std = {}
+        self.resting_pair_mean = {}
+        self.resting_pair_scale = {}
         self.warmup_history = {}
         self.warmup_complete = False
         self.escape_timer = 0
@@ -249,62 +254,57 @@ class BiologicalFlightController:
             looming_features: Dict with keys "left", "right"
             brain: Brain simulator instance
         """
-        # Build complete input vector
-        all_indices = []
-        all_values = []
-        
-        # Luminance → R1-R6
+        pending_idx: list = []
+        pending_val: list = []
+
+        def _extend(indices, raw_values):
+            indices = np.asarray(indices, dtype=np.int32)
+            if indices.size == 0:
+                return
+            values = np.atleast_1d(np.asarray(raw_values, dtype=np.float32)).ravel()
+            if values.size == 1:
+                values = np.full(indices.size, float(values[0]), dtype=np.float32)
+            elif values.size != indices.size:
+                assignment = self.create_fixed_input_assignment(
+                    values.size, indices.size, seed=42
+                )
+                values = values[assignment].astype(np.float32)
+            mean_abs = float(np.mean(np.abs(values))) + 1e-6
+            values = values * (self.input_drive / mean_abs)
+            values = np.clip(values, -self.input_drive_clip, self.input_drive_clip)
+            pending_idx.extend(indices.tolist())
+            pending_val.extend(values.tolist())
+
         if self.input_mapping["luminance_left"].size > 0:
-            pop_size = len(self.input_mapping["luminance_left"])
             lum_left_val = np.atleast_1d(left_luminance)[0] if np.isscalar(left_luminance) else left_luminance.mean()
-            all_indices.extend(self.input_mapping["luminance_left"])
-            all_values.extend([lum_left_val] * pop_size)
-        
+            _extend(self.input_mapping["luminance_left"], lum_left_val)
         if self.input_mapping["luminance_right"].size > 0:
-            pop_size = len(self.input_mapping["luminance_right"])
             lum_right_val = np.atleast_1d(right_luminance)[0] if np.isscalar(right_luminance) else right_luminance.mean()
-            all_indices.extend(self.input_mapping["luminance_right"])
-            all_values.extend([lum_right_val] * pop_size)
-        
-        # Optic flow → T4/T5 (keys like t4a_left)
+            _extend(self.input_mapping["luminance_right"], lum_right_val)
+
         for key, feature_val in optic_flow_features.items():
             neurons = self.input_mapping.get(key, np.array([], dtype=np.int32))
             if neurons.size == 0:
                 continue
-            values = np.atleast_1d(np.asarray(feature_val, dtype=np.float32)).ravel()
-            if values.size == 1:
-                all_indices.extend(neurons)
-                all_values.extend([float(values[0])] * len(neurons))
-            else:
-                assignment = self.create_fixed_input_assignment(values.size, len(neurons), seed=42)
-                all_indices.extend(neurons)
-                all_values.extend(values[assignment].tolist())
-        
-        # Looming → LPLC2 + LC4 (gain so current can reach DNp01 through signed weights)
+            _extend(neurons, feature_val)
+
         self._last_looming = 0.0
         if "left" in looming_features and self.input_mapping["looming_left"].size > 0:
-            neurons = self.input_mapping["looming_left"]
             raw = np.atleast_1d(looming_features["left"])[0] if np.isscalar(looming_features["left"]) else looming_features["left"].mean()
             raw = float(raw)
             self._last_looming = max(self._last_looming, abs(raw))
-            val = raw * self.looming_input_gain
-            all_indices.extend(neurons)
-            all_values.extend([val] * len(neurons))
-        
+            _extend(self.input_mapping["looming_left"], raw)
         if "right" in looming_features and self.input_mapping["looming_right"].size > 0:
-            neurons = self.input_mapping["looming_right"]
             raw = np.atleast_1d(looming_features["right"])[0] if np.isscalar(looming_features["right"]) else looming_features["right"].mean()
             raw = float(raw)
             self._last_looming = max(self._last_looming, abs(raw))
-            val = raw * self.looming_input_gain
-            all_indices.extend(neurons)
-            all_values.extend([val] * len(neurons))
-        
-        # Set input all at once
-        if len(all_indices) > 0:
-            input_vec = np.array(all_values, dtype=np.float32)
-            neuron_indices = np.array(all_indices, dtype=np.int32)
-            brain.set_input(input_vec, neuron_indices=neuron_indices)
+            _extend(self.input_mapping["looming_right"], raw)
+
+        if pending_idx:
+            brain.set_input(
+                np.array(pending_val, dtype=np.float32),
+                neuron_indices=np.array(pending_idx, dtype=np.int32),
+            )
     
     def record_resting_rates(self, brain_activity: np.ndarray):
         """Record resting rates during warmup."""
@@ -317,41 +317,80 @@ class BiologicalFlightController:
                     float(brain_activity[indices].mean())
                 )
 
-    def warmup_converged(self, window: int = 50, rel_tol: float = 0.03) -> bool:
-        """True when recent resting-rate windows have settled."""
+    @staticmethod
+    def _robust_center_scale(samples) -> tuple:
+        arr = np.asarray(samples, dtype=float)
+        if arr.size == 0:
+            return 0.0, 0.5
+        med = float(np.median(arr))
+        mad = float(np.median(np.abs(arr - med)))
+        scale = max(1.4826 * mad, 0.25 * abs(med), 0.5)
+        return med, scale
+
+    def warmup_converged(self, window: int = 50, rel_tol: float = 1.0) -> bool:
+        """True when window medians of primary DNs are stable relative to spread."""
         if self._warmup_count < self.min_warmup_steps:
             return False
-        tracked = [s for s in self.warmup_history.values() if len(s) > 0]
+        primary = ("DNp01", "DNg02", "DNa02", "DNb", "DNa01")
+        tracked = [
+            self.warmup_history[k]
+            for k in primary
+            if k in self.warmup_history and len(self.warmup_history[k]) >= 20
+        ]
         if not tracked:
             return self._warmup_count >= self.min_warmup_steps
-        w = min(window, min(len(s) for s in tracked))
+        w = min(window, min(len(s) // 2 for s in tracked))
         if w < 5:
             return False
         for samples in tracked:
             recent = np.asarray(samples[-w:], dtype=float)
-            if np.std(recent) > rel_tol * (np.abs(np.mean(recent)) + 0.05):
+            prev = np.asarray(samples[-2 * w:-w], dtype=float)
+            m1 = float(np.median(recent))
+            m0 = float(np.median(prev))
+            spread = max(float(np.median(np.abs(recent - m1))) * 1.4826, 0.05)
+            if abs(m1 - m0) > rel_tol * spread:
                 return False
         return True
     
     def finalize_warmup(self):
-        """Compute mean/std resting rates after warmup."""
+        """Compute robust (median/MAD) resting rates after warmup."""
         if self.warmup_complete:
             return
         
         for dn_type, samples in self.warmup_history.items():
             arr = np.asarray(samples, dtype=float)
-            tail = arr[-50:] if arr.size >= 50 else arr
-            if tail.size == 0:
+            if arr.size == 0:
                 continue
-            self.resting_rates[dn_type] = float(tail.mean())
-            self.resting_std[dn_type] = float(tail.std(ddof=0))
+            med, scale = self._robust_center_scale(arr)
+            self.resting_rates[dn_type] = med
+            self.resting_std[dn_type] = scale
+
+        for left_key, right_key in (
+            ("DNa02_L", "DNa02_R"),
+            ("DNg02_L", "DNg02_R"),
+            ("DNa01_L", "DNa01_R"),
+        ):
+            if left_key in self.warmup_history and right_key in self.warmup_history:
+                diffs = (
+                    np.asarray(self.warmup_history[left_key], dtype=float)
+                    - np.asarray(self.warmup_history[right_key], dtype=float)
+                )
+                rest, scale = self._robust_center_scale(diffs)
+                self.resting_pair_mean[(left_key, right_key)] = rest
+                self.resting_pair_scale[(left_key, right_key)] = scale
         
         self.warmup_complete = True
         
         print("\n[Warmup complete]")
-        print("Resting rates:")
+        print("Resting rates (median ± MAD-scale):")
         for dn_type, rate in self.resting_rates.items():
             print(f"  {dn_type}: {rate:.4f} ± {self.resting_std.get(dn_type, 0):.4f}")
+
+    def _raw_rate(self, dn_type: str, brain_activity: np.ndarray) -> float:
+        indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
+        if len(indices) == 0:
+            return 0.0
+        return float(brain_activity[indices].mean())
 
     def _normalized_readout(self, dn_type: str, brain_activity: np.ndarray) -> float:
         indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
@@ -371,6 +410,20 @@ class BiologicalFlightController:
         current = float(np.abs(brain_activity[indices]).mean())
         rest = abs(self.resting_rates.get(dn_type, 0.0))
         return max(current, rest) > eps
+
+    def _pair_usable(self, left_key: str, right_key: str, brain_activity: np.ndarray) -> bool:
+        return self._channel_usable(left_key, brain_activity) and self._channel_usable(
+            right_key, brain_activity
+        )
+
+    def _pair_yaw(self, left_key: str, right_key: str, brain_activity: np.ndarray) -> float:
+        """Zero-mean L−R of a bilateral pair; 0 if either side is silent."""
+        if not self._pair_usable(left_key, right_key, brain_activity):
+            return 0.0
+        diff = self._raw_rate(left_key, brain_activity) - self._raw_rate(right_key, brain_activity)
+        rest = self.resting_pair_mean.get((left_key, right_key), 0.0)
+        scale = self.resting_pair_scale.get((left_key, right_key), 0.5)
+        return float(np.tanh((diff - rest) / max(scale, 0.5)))
     
     def compute_action(
         self,
@@ -400,6 +453,7 @@ class BiologicalFlightController:
         # Engineered residual: strong looming can still trigger escape if DNp01 is silent.
         loom_assist = float(np.tanh(3.0 * (self._last_looming - 0.35)))
         dnp_eff = max(dnp, loom_assist)
+        brain_fire = dnp > 0.55
 
         # Rest lift = weight; DNg02 is a bounded deviation around hover.
         thrust_forward = 0.35 + 0.25 * dng
@@ -409,18 +463,25 @@ class BiologicalFlightController:
         # DNp01: event trigger on threshold crossing, not a continuous pitch command
         if dnp_eff > 0.55 and self.dnp01_prev_z <= 0.55:
             self.escape_timer = self.escape_duration
+            if brain_fire:
+                self.brain_escape_count += 1
+            else:
+                self.engineered_escape_count += 1
         self.dnp01_prev_z = dnp_eff
         pitch = 0.35 if self.escape_timer > 0 else 0.0
         if self.escape_timer > 0:
             self.escape_timer -= 1
 
-        yaw = 0.45 * (
-            self._normalized_readout("DNa02_L", brain_activity)
-            - self._normalized_readout("DNa02_R", brain_activity)
-        ) + 0.35 * (
-            self._normalized_readout("DNg02_L", brain_activity)
-            - self._normalized_readout("DNg02_R", brain_activity)
-        )
+        yaw = 0.0
+        n_pairs = 0
+        if self._pair_usable("DNa02_L", "DNa02_R", brain_activity):
+            yaw += 0.55 * self._pair_yaw("DNa02_L", "DNa02_R", brain_activity)
+            n_pairs += 1
+        if self._pair_usable("DNg02_L", "DNg02_R", brain_activity):
+            yaw += 0.45 * self._pair_yaw("DNg02_L", "DNg02_R", brain_activity)
+            n_pairs += 1
+        if n_pairs == 0 and self._pair_usable("DNa01_L", "DNa01_R", brain_activity):
+            yaw = 0.5 * self._pair_yaw("DNa01_L", "DNa01_R", brain_activity)
         
         # Assemble action. exploration_signal is intentionally unused here.
         action = np.array([thrust_forward, thrust_up, roll, pitch, yaw])
@@ -441,4 +502,6 @@ class BiologicalFlightController:
             "last_up": float(self.prev_action[1]),
             "last_yaw": float(self.prev_action[4]),
             "warmup_complete": float(self.warmup_complete),
+            "brain_escapes": float(self.brain_escape_count),
+            "engineered_escapes": float(self.engineered_escape_count),
         }

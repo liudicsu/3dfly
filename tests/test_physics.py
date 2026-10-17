@@ -107,10 +107,11 @@ def test_drag_limits_terminal_speed():
     env.data.qvel[:] = 0.0
     action = np.array([0.6, env.hover_action, 0.0, 0.0, 0.0])
     speeds = []
-    for _ in range(400):
+    # 80 control ticks × 20 ms ≈ 1.6 s, before the fly reaches the ±5 m walls.
+    for _ in range(80):
         env.step(action)
         speeds.append(np.linalg.norm(env.get_fly_velocity()[:2]))
-    terminal = float(np.mean(speeds[-50:]))
+    terminal = float(np.mean(speeds[-20:]))
     env.close()
     assert 0.4 <= terminal <= 1.8, f"Terminal speed {terminal:.3f} m/s outside 0.4–1.8"
 
@@ -130,6 +131,17 @@ def test_hover_action_balances_weight():
     mean_z = float(np.mean(zs[-50:]))
     env.close()
     assert 1.1 <= mean_z <= 2.0, f"Hover altitude drifted to {mean_z:.3f} m"
+
+
+def test_control_step_advances_twenty_ms():
+    """Each env.step is a 20 ms control tick (physics substeps), matching the brain."""
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    t0 = float(env.data.time)
+    env.step(np.zeros(5))
+    dt = float(env.data.time) - t0
+    env.close()
+    assert abs(dt - 0.02) < 1e-9, f"Expected 20 ms control step, got {dt*1000:.3f} ms"
 
 
 def test_collision_uses_fly_body_geoms_not_geom_zero():

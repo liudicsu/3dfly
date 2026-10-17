@@ -1,7 +1,14 @@
 """Connectome data loading and neural simulation."""
 
 from threedfly.connectome.loader import ConnectomeLoader
-from threedfly.connectome.simulator import BrainSimulator, RateSimulator
+from threedfly.connectome.simulator import (
+    BrainSimulator,
+    RateSimulator,
+    amplify_incoming_to_targets,
+    calibrate_looming_to_dnp01,
+    count_directed_hops,
+    diagnose_looming_to_dnp01,
+)
 from threedfly.connectome.downloader import download_connectome_data
 from threedfly.connectome.neuron_selection import (
     find_neurons_by_type,
@@ -19,6 +26,10 @@ __all__ = [
     "ConnectomeLoader",
     "BrainSimulator",
     "RateSimulator",
+    "amplify_incoming_to_targets",
+    "calibrate_looming_to_dnp01",
+    "count_directed_hops",
+    "diagnose_looming_to_dnp01",
     "download_connectome_data",
     "find_neurons_by_type",
     "find_visual_neurons",
