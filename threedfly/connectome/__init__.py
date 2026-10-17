@@ -9,6 +9,8 @@ from threedfly.connectome.neuron_selection import (
     find_descending_neurons,
     find_central_complex_neurons,
     get_neuron_selection_summary,
+    load_neurotransmitter_data,
+    get_neuron_transmitters,
 )
 
 __all__ = [
@@ -21,4 +23,6 @@ __all__ = [
     "find_descending_neurons",
     "find_central_complex_neurons",
     "get_neuron_selection_summary",
+    "load_neurotransmitter_data",
+    "get_neuron_transmitters",
 ]

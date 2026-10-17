@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Set
+from pathlib import Path
 
 
 def find_neurons_by_type(
@@ -186,3 +187,62 @@ def print_neuron_selection_report(selection: Dict[str, Dict[str, np.ndarray]]) -
             print(f"  {name:20s}: {len(indices):6,} neurons")
     
     print("=" * 70)
+
+
+def load_neurotransmitter_data(feather_path: str) -> Optional[pd.DataFrame]:
+    """
+    Load neurotransmitter data from feather file.
+    
+    Args:
+        feather_path: Path to body-neurotransmitters-*.feather
+    
+    Returns:
+        DataFrame with columns: body, consensus_nt, celltype_predicted_nt
+        Returns None if file doesn't exist
+    """
+    if not Path(feather_path).exists():
+        return None
+    
+    try:
+        return pd.read_feather(feather_path)
+    except Exception as e:
+        print(f"Warning: Failed to load neurotransmitter data: {e}")
+        return None
+
+
+def get_neuron_transmitters(
+    body_ids: np.ndarray,
+    nt_data: Optional[pd.DataFrame]
+) -> Dict[int, str]:
+    """
+    Map body IDs to neurotransmitter types.
+    
+    Args:
+        body_ids: Array of body IDs to look up
+        nt_data: Neurotransmitter dataframe (or None)
+    
+    Returns:
+        Dict mapping body_id → transmitter string (lowercase)
+        Falls back to celltype_predicted_nt if consensus_nt is 'unclear'
+        Returns 'unclear' if not found
+    """
+    if nt_data is None:
+        return {int(bid): "unclear" for bid in body_ids}
+    
+    result = {}
+    nt_lookup = nt_data.set_index("body")
+    
+    for bid in body_ids:
+        if bid in nt_lookup.index:
+            row = nt_lookup.loc[bid]
+            consensus = str(row.get("consensus_nt", "unclear")).lower().strip()
+            if consensus == "unclear" or consensus == "":
+                # Fallback to predicted
+                predicted = str(row.get("celltype_predicted_nt", "unclear")).lower().strip()
+                result[int(bid)] = predicted
+            else:
+                result[int(bid)] = consensus
+        else:
+            result[int(bid)] = "unclear"
+    
+    return result

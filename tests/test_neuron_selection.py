@@ -10,7 +10,20 @@ from threedfly.connectome.neuron_selection import (
     find_descending_neurons,
     find_central_complex_neurons,
     get_neuron_selection_summary,
+    load_neurotransmitter_data,
+    get_neuron_transmitters,
 )
+
+
+def create_synthetic_nt_data():
+    """Create synthetic neurotransmitter data for testing."""
+    return pd.DataFrame({
+        "body": [1, 2, 3, 4, 5, 6, 7, 8],
+        "consensus_nt": ["acetylcholine", "GABA", "glutamate", "histamine", 
+                         "dopamine", "octopamine", "serotonin", "unclear"],
+        "celltype_predicted_nt": ["acetylcholine", "GABA", "glutamate", "histamine",
+                                  "dopamine", "octopamine", "serotonin", "acetylcholine"],
+    })
 
 
 def test_find_neurons_by_type():
@@ -180,6 +193,27 @@ def test_empty_results():
         annotations, body_ids, body_id_to_idx, {"nonexistent"}
     )
     assert len(indices) == 0
+
+
+def test_load_neurotransmitter_data_fallback():
+    """Test neurotransmitter loading falls back gracefully."""
+    # Should not crash on missing file
+    result = load_neurotransmitter_data("nonexistent.feather")
+    assert result is None or len(result) == 0
+
+
+def test_get_neuron_transmitters():
+    """Test neurotransmitter lookup by body ID."""
+    nt_data = create_synthetic_nt_data()
+    body_ids = np.array([1, 2, 3, 8])
+    
+    transmitters = get_neuron_transmitters(body_ids, nt_data)
+    
+    assert transmitters[1] == "acetylcholine"
+    assert transmitters[2] == "gaba"
+    assert transmitters[3] == "glutamate"
+    # Body 8: unclear → should fallback to celltype_predicted
+    assert transmitters[8] == "acetylcholine"
 
 
 if __name__ == "__main__":
