@@ -1,0 +1,343 @@
+"""flyvis → MaleCNS handoff (research_r4/handoff_map4.py + fv4_run.py)."""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Optional
+
+import numpy as np
+import scipy.sparse as sp
+
+from threedfly.brain.connectome_matrix import ConnectomeData
+from threedfly.brain.constants import (
+    DT,
+    FLYVIS_CHECKPOINT,
+    FLYVIS_TO_CONNECTOME,
+    HALTERE_RATE,
+    HANDOFF_FLYVIS_TYPES,
+    HEX_EXTENT,
+    N_HEX,
+    RMAX,
+    configure_threads,
+    flyvis_available,
+)
+from threedfly.brain.stimuli import calibration_conditions, get_hex_coords
+
+logger = logging.getLogger(__name__)
+
+
+def voltages_to_rates(
+    V: np.ndarray,
+    V_gray: np.ndarray,
+    p99: float,
+    rmax: float = RMAX,
+) -> np.ndarray:
+    """Rate = RMAX · clip(relu(V − V_gray) / p99.9, 0, 1)."""
+    denom = float(p99) + 1e-6
+    return (rmax * np.clip(np.maximum(V - V_gray, 0.0) / denom, 0.0, 1.0)).astype(np.float32)
+
+
+def impute_hex(
+    hex_uv: np.ndarray,
+    has: np.ndarray,
+    target: np.ndarray,
+    W_abs_post_pre: sp.spmatrix,
+    n_iter: int = 4,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Iterative neighbour imputation for neurons lacking assignedOlHex."""
+    cur = hex_uv.copy()
+    known = has.copy()
+    W = abs(W_abs_post_pre).tocsr()
+    for _ in range(n_iter):
+        need = np.flatnonzero(target & ~known)
+        if need.size == 0:
+            break
+        known_idx = np.flatnonzero(known)
+        if known_idx.size == 0:
+            break
+        Wn = W[need][:, known_idx]
+        s = np.asarray(Wn.sum(axis=1)).ravel()
+        ok = s > 0
+        if not np.any(ok):
+            break
+        est = (Wn @ np.nan_to_num(cur[known_idx])) / np.maximum(s, 1.0)[:, None]
+        cur[need[ok]] = est[ok]
+        known[need[ok]] = True
+    return cur, known
+
+
+@dataclass
+class HandoffMap:
+    """Per-eye maps from flyvis types to connectome neurons + scaled (u, v)."""
+
+    index: Dict[str, np.ndarray] = field(default_factory=dict)  # "T4a|L" → neuron idx
+    uv: Dict[str, np.ndarray] = field(default_factory=dict)
+    counts: Dict[str, int] = field(default_factory=dict)
+    centre: Dict[str, np.ndarray] = field(default_factory=dict)
+    scale: Dict[str, float] = field(default_factory=dict)
+
+    @property
+    def n_mapped(self) -> int:
+        return int(sum(self.counts.get(k, 0) for k in self.counts if "|" in k))
+
+    def sides_present(self) -> set[str]:
+        return {k.split("|")[1] for k in self.counts if "|" in k}
+
+
+def build_handoff_map(connectome: ConnectomeData, n_iter: int = 4) -> HandoffMap:
+    """assignedOlHex + neighbour imputation; centre = median, scale = 15 / p99."""
+    typ = connectome.typ
+    side = connectome.side
+    h = np.asarray(connectome.hex, dtype=float)
+    has = ~np.isnan(h[:, 0])
+    mapped_types = [t for ts in FLYVIS_TO_CONNECTOME.values() for t in ts]
+    target = np.isin(typ, mapped_types)
+    cur, known = impute_hex(h, has, target, abs(connectome.W), n_iter=n_iter)
+
+    out = HandoffMap()
+    for s in "LR":
+        m = has & (side == s)
+        if not np.any(m):
+            continue
+        c = np.median(h[m], axis=0)
+        p99 = float(np.percentile(np.abs(h[m] - c), 99, axis=0).max())
+        sc = 15.0 / (p99 if p99 > 0 else 1.0)
+        out.centre[s] = c.astype(np.float32)
+        out.scale[s] = float(sc)
+        for fvt, mts in FLYVIS_TO_CONNECTOME.items():
+            idx = np.flatnonzero(np.isin(typ, list(mts)) & (side == s) & known)
+            key = f"{fvt}|{s}"
+            out.index[key] = idx.astype(np.int64)
+            out.uv[key] = ((cur[idx] - c) * sc).astype(np.float32)
+            out.counts[key] = int(len(idx))
+    out.counts["total"] = out.n_mapped
+    return out
+
+
+def nearest_flyvis_columns(neuron_uv: np.ndarray, flyvis_uv: np.ndarray) -> np.ndarray:
+    """Map each connectome neuron to the nearest flyvis column in (u, v)."""
+    if neuron_uv.size == 0:
+        return np.zeros(0, dtype=np.int64)
+    d = ((neuron_uv[:, None, :] - flyvis_uv[None, :, :].astype(float)) ** 2).sum(-1)
+    return d.argmin(axis=1).astype(np.int64)
+
+
+@dataclass
+class FlyvisCalibration:
+    V_gray: Dict[str, np.ndarray]
+    p99: Dict[str, float]
+    uv: Dict[str, np.ndarray]
+    rmax: float = RMAX
+
+    def save(self, path: Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {f"V_gray|{t}": v for t, v in self.V_gray.items()}
+        payload.update({f"uv|{t}": v for t, v in self.uv.items()})
+        payload.update({f"p99|{t}": np.array([p], dtype=np.float32) for t, p in self.p99.items()})
+        np.savez_compressed(path, **payload)
+        path.with_suffix(".json").write_text(
+            json.dumps({"types": list(self.V_gray), "rmax": self.rmax, "p99": self.p99}, indent=2)
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> "FlyvisCalibration":
+        z = np.load(path)
+        types = sorted({k.split("|", 1)[1] for k in z.files if k.startswith("V_gray|")})
+        return cls(
+            V_gray={t: z[f"V_gray|{t}"] for t in types},
+            p99={t: float(z[f"p99|{t}"][0]) for t in types},
+            uv={t: z[f"uv|{t}"] for t in types},
+        )
+
+
+class FlyvisEye:
+    """Streaming wrapper around a pretrained flyvis eye (optional dependency)."""
+
+    def __init__(
+        self,
+        checkpoint: str = FLYVIS_CHECKPOINT,
+        dt: float = DT,
+        torch_threads: int = 2,
+        network=None,
+    ):
+        if network is None and not flyvis_available():
+            raise ImportError("flyvis is required for FlyvisEye. pip install 'threedfly[brain]'")
+        configure_threads(torch_threads=torch_threads)
+        self.dt = float(dt)
+        self.checkpoint = checkpoint
+        self._net = network
+        self._state = None
+        self.types: Optional[np.ndarray] = None
+        self.type_index: Dict[str, np.ndarray] = {}
+        self.uv: Dict[str, np.ndarray] = {}
+        if network is None:
+            self._init_network()
+        else:
+            self._bind_network(network)
+
+    def _init_network(self) -> None:
+        import torch
+        from flyvis import NetworkView
+
+        torch.set_num_threads(max(1, int(getattr(torch, "get_num_threads", lambda: 2)())))
+        net = NetworkView(self.checkpoint).init_network()
+        self._bind_network(net)
+
+    def _bind_network(self, net) -> None:
+        self._net = net
+        raw = net.connectome.nodes.type[:]
+        self.types = np.array([t.decode() if isinstance(t, bytes) else str(t) for t in raw])
+        u = np.asarray(net.connectome.nodes.u[:], dtype=np.float32)
+        v = np.asarray(net.connectome.nodes.v[:], dtype=np.float32)
+        for t in HANDOFF_FLYVIS_TYPES:
+            idx = np.flatnonzero(self.types == t)
+            self.type_index[t] = idx
+            self.uv[t] = np.stack([u[idx], v[idx]], axis=1)
+
+    def reset(self) -> None:
+        if self._net is None:
+            self._state = None
+            return
+        self._state = self._net.steady_state(1.0, self.dt, 1)
+
+    def simulate_movie(self, movie: np.ndarray) -> tuple[Dict[str, np.ndarray], float]:
+        """Batch-simulate a (T, 721) hex movie. Returns ({type: (T, n_cols)}, ms/frame)."""
+        import time
+        import torch
+
+        movie = np.asarray(movie, dtype=np.float32)
+        if movie.ndim != 2 or movie.shape[1] != N_HEX:
+            raise ValueError(f"movie must be (T, {N_HEX}), got {movie.shape}")
+        if self._state is None:
+            self.reset()
+        x = torch.as_tensor(movie[None, :, None, :])
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            act = self._net.simulate(x, self.dt, initial_state=self._state, as_states=False)
+        ms = 1000.0 * (time.perf_counter() - t0) / max(movie.shape[0], 1)
+        act = np.asarray(act.detach().cpu().numpy())
+        # (batch, T, n) or (T, n)
+        if act.ndim == 3:
+            act = act[0]
+        out = {t: act[:, idx] for t, idx in self.type_index.items() if idx.size}
+        return out, float(ms)
+
+    def step(self, hex_frame: np.ndarray) -> Dict[str, np.ndarray]:
+        """Advance one frame, keeping network state. ``hex_frame`` is (721,) in [0, 1]."""
+        import torch
+
+        frame = np.asarray(hex_frame, dtype=np.float32).reshape(-1)
+        if frame.size != N_HEX:
+            raise ValueError(f"hex frame must have {N_HEX} cells, got {frame.size}")
+        if self._state is None:
+            self.reset()
+        x = torch.as_tensor(frame.reshape(1, 1, 1, -1))
+        with torch.no_grad():
+            states = self._net.simulate(
+                x, self.dt, initial_state=self._state, as_states=True
+            )
+        if isinstance(states, (list, tuple)):
+            self._state = states[-1]
+            activity = _activity_from_state(states[-1])
+        else:
+            self._state = states
+            activity = _activity_from_state(states)
+        if activity is None:
+            raise RuntimeError("flyvis state has no nodes.activity; cannot stream")
+        activity = np.asarray(activity).reshape(-1)
+        return {t: activity[idx] for t, idx in self.type_index.items() if idx.size}
+
+    def calibrate(
+        self,
+        conditions: Optional[Dict[str, np.ndarray]] = None,
+        pre: float = 1.0,
+    ) -> FlyvisCalibration:
+        """Gray + loom + gratings + expansion → per-type V_gray and p99.9."""
+        if conditions is None:
+            conditions = calibration_conditions(pre=pre)
+        nb = int(round(pre / self.dt))
+        traces: Dict[str, Dict[str, np.ndarray]] = {t: {} for t in HANDOFF_FLYVIS_TYPES}
+        for name, movie in conditions.items():
+            self.reset()
+            acts, _ = self.simulate_movie(movie)
+            for t, arr in acts.items():
+                traces[t][name] = arr
+        V_gray, p99 = {}, {}
+        for t in HANDOFF_FLYVIS_TYPES:
+            if "gray" not in traces[t]:
+                continue
+            base = traces[t]["gray"][nb - 30 : nb].mean(axis=0)
+            pos = [np.maximum(traces[t][k] - base, 0.0).ravel() for k in traces[t]]
+            p = float(np.percentile(np.concatenate(pos), 99.9)) if pos else 1.0
+            V_gray[t] = base.astype(np.float32)
+            p99[t] = p
+        return FlyvisCalibration(V_gray=V_gray, p99=p99, uv=self.uv, rmax=RMAX)
+
+
+def _activity_from_state(state) -> Optional[np.ndarray]:
+    try:
+        act = state.nodes.activity
+        if hasattr(act, "detach"):
+            act = act.detach().cpu().numpy()
+        return np.asarray(act)
+    except Exception:
+        return None
+
+
+def handoff_rates_for_frame(
+    voltages: Dict[str, np.ndarray],
+    calib: FlyvisCalibration,
+    hmap: HandoffMap,
+    side: str,
+    remap: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (core_indices, rates) for one eye / frame.
+
+    ``remap`` maps full-connectome indices → core indices (−1 if dropped).
+    """
+    idx_all, rate_all = [], []
+    for t in HANDOFF_FLYVIS_TYPES:
+        key = f"{t}|{side}"
+        if key not in hmap.index or t not in voltages or t not in calib.uv:
+            continue
+        cidx = hmap.index[key]
+        uv = hmap.uv[key]
+        if cidx.size == 0:
+            continue
+        col = nearest_flyvis_columns(uv, calib.uv[t])
+        V = np.asarray(voltages[t], dtype=np.float32)
+        V_gray = calib.V_gray[t]
+        # V_gray is per flyvis column.
+        vg = V_gray[col] if V_gray.ndim else np.full(col.shape, float(V_gray))
+        rates = voltages_to_rates(V[col], vg, calib.p99[t], calib.rmax)
+        if remap is not None:
+            mapped = remap[cidx]
+            ok = mapped >= 0
+            cidx, rates = mapped[ok], rates[ok]
+        idx_all.append(cidx)
+        rate_all.append(rates)
+    if not idx_all:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
+    return np.concatenate(idx_all), np.concatenate(rate_all)
+
+
+def haltere_indices(connectome: ConnectomeData, remap: Optional[np.ndarray] = None) -> np.ndarray:
+    idx = np.flatnonzero(connectome.subclass == "haltere")
+    if remap is not None:
+        mapped = remap[idx]
+        return mapped[mapped >= 0]
+    return idx
+
+
+def default_hex_uv_for_type(n: int, extent: int = HEX_EXTENT) -> np.ndarray:
+    """Synthetic flyvis (u, v) lattice (tests without flyvis)."""
+    u, v = get_hex_coords(extent)
+    uv = np.stack([u, v], axis=1).astype(np.float32)
+    if n <= len(uv):
+        return uv[:n]
+    reps = int(np.ceil(n / len(uv)))
+    return np.tile(uv, (reps, 1))[:n]

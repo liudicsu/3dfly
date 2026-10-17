@@ -46,6 +46,10 @@ dev = [
     "isort>=5.10.0",
     "mypy>=0.950",
 ]
+brain = [
+    "torch>=2.0.0",
+    "flyvis",
+]
 
 [project.scripts]
 threedfly = "threedfly.cli:main"

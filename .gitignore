@@ -36,7 +36,11 @@ ENV/
 data/*.feather
 data/*.npz
 data/connectome-raw/
+data/cache/
 !data/demo_subgraph.npz
+
+# M1 acceptance artefacts (generated on the verification machine)
+output/m1/
 
 # Optional full flybody menagerie fetch (~140 MB)
 assets/flybody/full/
