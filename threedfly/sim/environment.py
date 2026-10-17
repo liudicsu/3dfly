@@ -6,7 +6,7 @@ from typing import Tuple, Optional, Dict
 import tempfile
 from pathlib import Path
 
-from threedfly.sim.mjcf import get_fly_mjcf
+from threedfly.sim.mjcf import FLY_ZNEAR_M, get_fly_mjcf
 from threedfly.sim.wings import stroke_averaged_forces, visual_wing_angles
 
 # Engineered aero: linear+quadratic drag sized for ~1 m/s cruise, not a CFD model.
@@ -60,10 +60,17 @@ class FlyEnvironment:
         mjcf_xml = get_fly_mjcf()
         self.model = mujoco.MjModel.from_xml_string(mjcf_xml)
         self.data = mujoco.MjData(self.model)
+        # map.znear is a fraction of model.stat.extent (~20 m room). Keep an
+        # absolute near plane well below the 2.5 cm fly so close-ups are not clipped.
+        extent = float(self.model.stat.extent) or 1.0
+        self.model.vis.map.znear = float(FLY_ZNEAR_M) / extent
         
         # Camera IDs
         self.left_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_eye")
         self.right_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_eye")
+        self.fly_closeup_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_CAMERA, "fly_closeup"
+        )
         
         # Renderer for cameras
         if render_mode is not None:

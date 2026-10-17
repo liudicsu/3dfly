@@ -445,7 +445,8 @@ def select_output_neurons_for_motor(
     Select descending neurons for motor readout.
     
     Maps specific DN types to flight behaviors:
-    - DNp01: escape/sharp avoidance
+    - DNp01: escape/sharp avoidance (giant fiber)
+    - DNp03: looming-evoked flight saccades (yaw away from threat)
     - DNg02: thrust/altitude
     - DNa01/DNa02: yaw (left-right difference)
     - DNb: additional motor pathways
@@ -456,8 +457,8 @@ def select_output_neurons_for_motor(
         body_id_to_idx: Body ID to index mapping
     
     Returns:
-        Dict with keys "DNp01", "DNg02", "DNa01", "DNa02", "DNb"
-        plus side splits "DNg02_L/R", "DNa01_L/R", "DNa02_L/R" when sides exist.
+        Dict with keys "DNp01", "DNp03", "DNg02", "DNa01", "DNa02", "DNb"
+        plus side splits "DNg02_L/R", "DNa01_L/R", "DNa02_L/R", "DNp03_L/R" when sides exist.
     """
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
 
@@ -477,6 +478,7 @@ def select_output_neurons_for_motor(
 
     result = {
         "DNp01": _select(r"^DNp01(?:$|[^A-Za-z0-9])"),
+        "DNp03": _select(r"^DNp03(?:$|[^A-Za-z0-9])"),
         "DNg02": _select(r"^DNg02"),
         "DNa01": _select(r"^DNa01(?:$|[^A-Za-z0-9])"),
         "DNa02": _select(r"^DNa02(?:$|[^A-Za-z0-9])"),
@@ -487,6 +489,8 @@ def select_output_neurons_for_motor(
         "DNa01_R": _select_side(r"^DNa01(?:$|[^A-Za-z0-9])", "R"),
         "DNa02_L": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "L"),
         "DNa02_R": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "R"),
+        "DNp03_L": _select_side(r"^DNp03(?:$|[^A-Za-z0-9])", "L"),
+        "DNp03_R": _select_side(r"^DNp03(?:$|[^A-Za-z0-9])", "R"),
     }
     return result
 

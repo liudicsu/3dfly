@@ -13,6 +13,17 @@ from PIL import Image
 from pathlib import Path
 import trimesh
 
+from threedfly.sim.mjcf import (
+    COXA_T1_LEFT,
+    COXA_T1_RIGHT,
+    COXA_T2_LEFT,
+    COXA_T2_RIGHT,
+    COXA_T3_LEFT,
+    COXA_T3_RIGHT,
+    WING_LEFT_HINGE,
+    WING_RIGHT_HINGE,
+)
+
 
 class InteractiveVisualizer:
     """
@@ -45,6 +56,11 @@ class InteractiveVisualizer:
             port: Server port
         """
         self.server = viser.ViserServer(host=host, port=port)
+        # Close-up near plane so the 2.5 cm fly is not clipped; look at hover pose.
+        self.server.initial_camera.near = 0.0005
+        self.server.initial_camera.far = 50.0
+        self.server.initial_camera.position = (0.18, -0.22, 1.62)
+        self.server.initial_camera.look_at = (0.0, 0.0, 1.5)
         print(f"\n🌐 Interactive 3D visualization server started!")
         print(f"   Open your browser to: http://localhost:{port}")
         print(f"   Use mouse to orbit/pan/zoom the 3D scene")
@@ -232,6 +248,12 @@ class InteractiveVisualizer:
             initial_value=1.0,
             hint="Adjust playback speed"
         )
+
+        self.follow_fly = self.server.gui.add_checkbox(
+            "Follow fly (close-up)",
+            initial_value=False,
+            hint="Close-up camera tracking the fly; uncheck for god's-eye orbit",
+        )
         
         # Info text (will be updated each frame)
         self._status_text_handle = self.server.gui.add_text(
@@ -324,6 +346,24 @@ class InteractiveVisualizer:
         self._render_point_cloud()
         self._render_dashboard_panels()
         self._render_status()
+        self._update_follow_camera()
+
+    def _update_follow_camera(self) -> None:
+        """Optional close-up camera that tracks the fly; god-view remains when off."""
+        if not getattr(self, "follow_fly", None) or not self.follow_fly.value:
+            return
+        pos = np.asarray(self.fly_position, dtype=float)
+        body_q = np.asarray(self.fly_orientation, dtype=float)
+        offset = np.array([0.06, -0.05, 0.04], dtype=float)
+        cam_pos = pos + self._rotate_vec(body_q, offset)
+        try:
+            clients = self.server.get_clients()
+        except Exception:
+            return
+        for client in clients.values():
+            client.camera.near = 0.0005
+            client.camera.position = tuple(cam_pos)
+            client.camera.look_at = tuple(pos)
         
     def _load_fly_mesh(self):
         """Load flybody meshes: fused body + separate wings for flapping."""
@@ -345,15 +385,29 @@ class InteractiveVisualizer:
             abdomen.apply_translation([-0.012, 0, -0.002])
 
             parts = [thorax, head, abdomen]
-            for mesh_name, offset in (
-                ("femur_T2_left_body.obj", [0.001, 0.006, -0.003]),
-                ("femur_T2_right_body.obj", [0.001, -0.006, -0.003]),
-            ):
+            t2_left = np.asarray(COXA_T2_LEFT, dtype=float)
+            t2_right = np.asarray(COXA_T2_RIGHT, dtype=float)
+            leg_specs = (
+                ("femur_T2_left_body.obj", np.asarray(COXA_T1_LEFT) - t2_left),
+                ("tibia_T2_left_body.obj", np.asarray(COXA_T1_LEFT) - t2_left),
+                ("femur_T2_left_body.obj", np.zeros(3)),
+                ("tibia_T2_left_body.obj", np.zeros(3)),
+                ("femur_T2_left_body.obj", np.asarray(COXA_T3_LEFT) - t2_left),
+                ("tibia_T2_left_body.obj", np.asarray(COXA_T3_LEFT) - t2_left),
+                ("femur_T2_right_body.obj", np.asarray(COXA_T1_RIGHT) - t2_right),
+                ("tibia_T2_right_body.obj", np.asarray(COXA_T1_RIGHT) - t2_right),
+                ("femur_T2_right_body.obj", np.zeros(3)),
+                ("tibia_T2_right_body.obj", np.zeros(3)),
+                ("femur_T2_right_body.obj", np.asarray(COXA_T3_RIGHT) - t2_right),
+                ("tibia_T2_right_body.obj", np.asarray(COXA_T3_RIGHT) - t2_right),
+            )
+            for mesh_name, offset in leg_specs:
                 path = assets_dir / mesh_name
                 if path.exists():
                     leg = trimesh.load(path, force="mesh")
                     leg.apply_scale(scale)
-                    leg.apply_translation(offset)
+                    if np.linalg.norm(offset) > 0:
+                        leg.apply_translation(offset)
                     parts.append(leg)
             
             body = trimesh.util.concatenate(parts)
@@ -361,10 +415,12 @@ class InteractiveVisualizer:
 
             wing_left = trimesh.load(assets_dir / "wing_left_membrane.obj", force="mesh")
             wing_left.apply_scale(scale)
+            wing_left.apply_translation(-np.asarray(WING_LEFT_HINGE, dtype=float))
             wing_left.visual.vertex_colors = np.array([180, 180, 200, 140], dtype=np.uint8)
 
             wing_right = trimesh.load(assets_dir / "wing_right_membrane.obj", force="mesh")
             wing_right.apply_scale(scale)
+            wing_right.apply_translation(-np.asarray(WING_RIGHT_HINGE, dtype=float))
             wing_right.visual.vertex_colors = np.array([180, 180, 200, 140], dtype=np.uint8)
 
             return {"body": body, "wing_left": wing_left, "wing_right": wing_right}
@@ -431,10 +487,10 @@ class InteractiveVisualizer:
             )
             left_ang = float(self.wing_angles[0]) if len(self.wing_angles) else 0.0
             right_ang = float(self.wing_angles[1]) if len(self.wing_angles) > 1 else 0.0
-            left_root = np.array([-0.002, 0.008, 0.002])
-            right_root = np.array([-0.002, -0.008, 0.002])
+            left_root = np.asarray(WING_LEFT_HINGE, dtype=float)
+            right_root = np.asarray(WING_RIGHT_HINGE, dtype=float)
             left_q = self._quat_multiply(body_q, self._quat_from_axis_angle([1, 0, 0], left_ang))
-            right_q = self._quat_multiply(body_q, self._quat_from_axis_angle([1, 0, 0], right_ang))
+            right_q = self._quat_multiply(body_q, self._quat_from_axis_angle([-1, 0, 0], right_ang))
             self._fly_wing_l_handle = self.server.scene.add_mesh_trimesh(
                 "/world/fly_wing_left",
                 mesh=self._fly_mesh["wing_left"],

@@ -37,6 +37,7 @@ def run_interactive_simulation(
     enable_soft_recovery: bool = True,
     warmup_steps: int = 800,
     apply_ei_signs: bool = True,
+    use_engineered_looming_residual: bool = False,
 ):
     """
     Run interactive 3dfly simulation with unified web interface.
@@ -134,6 +135,7 @@ def run_interactive_simulation(
             body_id_to_idx=body_id_to_idx,
             nt_data=nt_data,
             warmup_steps=warmup_steps,
+            use_engineered_looming_residual=use_engineered_looming_residual,
         )
     else:
         controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
@@ -145,11 +147,14 @@ def run_interactive_simulation(
             controller.input_mapping["looming_right"],
         ])
         dnp_idx = controller.output_mapping.get("DNp01", np.array([], dtype=np.int32))
+        dnp03_idx = controller.output_mapping.get("DNp03", np.array([], dtype=np.int32))
         hops = count_directed_hops(brain.adj, loom_idx, dnp_idx)
         print(
             f"  LPLC2/LC4→DNp01 hops: 1-hop={hops['n_one_hop']}, 2-hop={hops['n_two_hop']}"
         )
-        brain.adj = calibrate_looming_to_dnp01(brain.adj, loom_idx, dnp_idx)
+        brain.adj = calibrate_looming_to_dnp01(
+            brain.adj, loom_idx, dnp_idx, dnp03_indices=dnp03_idx
+        )
     print("  ✓ Control system ready")
     
     print("\n[7/8] Initializing interactive web interface...")
@@ -178,12 +183,17 @@ def run_interactive_simulation(
             return left_img, right_img
         print(f"\n[Warmup] Up to {controller.warmup_steps} grounded brain steps...")
         brain.reset()
+        if hasattr(brain, "threshold"):
+            brain.threshold[:] = 0
+            brain.bias[:] = 0
         controller.warmup_complete = False
         controller._warmup_count = 0
         controller.warmup_history = {}
         controller.escape_timer = 0
         controller.brain_escape_count = 0
         controller.engineered_escape_count = 0
+        controller.dnp03_turn_count = 0
+        controller._dnp03_prev_active = False
         controller.dnp01_prev_z = 0.0
         controller.resting_pair_mean = {}
         controller.resting_pair_scale = {}
@@ -217,6 +227,7 @@ def run_interactive_simulation(
                 print(f"  Warmup converged at step {warmup_step + 1}")
                 break
         controller.finalize_warmup()
+        controller.apply_giant_fiber_calibration(brain)
         return left_img, right_img
     
     # Initial state
@@ -453,6 +464,7 @@ def run_interactive_simulation(
     if use_biological:
         print(f"DNp01 escapes: brain-triggered={controller.brain_escape_count}, "
               f"engineered-residual={controller.engineered_escape_count}")
+        print(f"DNp03 evasive turns: {controller.dnp03_turn_count}")
     print(f"\nPrimary (Brain Depth):")
     print(f"  Point cloud points: {map_stats['total_points']}")
     print(f"  Mean depth: {brain_depth_stats.get('mean_depth_history', 0):.2f}m")

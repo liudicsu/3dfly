@@ -244,34 +244,117 @@ def count_directed_hops(
     }
 
 
+def attenuate_nonpath_incoming(
+    adjacency: sparse.csr_matrix,
+    targets: np.ndarray,
+    keep_sources: np.ndarray,
+    scale: float = 0.25,
+    positive_only: bool = True,
+) -> sparse.csr_matrix:
+    """Scale non-pathway excitatory incoming onto targets (keeps LPLC2/LC4 and inhibition)."""
+    if adjacency.nnz == 0 or len(targets) == 0 or scale == 1.0:
+        return adjacency.tocsr()
+    keep = set(int(i) for i in np.unique(np.asarray(keep_sources, dtype=np.int32)))
+    adj = adjacency.tocsc(copy=True)
+    for t in np.unique(np.asarray(targets, dtype=np.int32)):
+        t = int(t)
+        if t < 0 or t >= adj.shape[1]:
+            continue
+        start, end = int(adj.indptr[t]), int(adj.indptr[t + 1])
+        if start == end:
+            continue
+        rows = adj.indices[start:end]
+        data = adj.data[start:end]
+        for i, pre in enumerate(rows):
+            if int(pre) in keep:
+                continue
+            if positive_only and data[i] <= 0:
+                continue
+            data[i] = data[i] * scale
+        adj.data[start:end] = data
+    return adj.tocsr()
+
+
+def _boost_one_hop_path(
+    adj_lil,
+    csr: sparse.csr_matrix,
+    sources: np.ndarray,
+    targets: np.ndarray,
+    one_hop_gain: float,
+    assist_weight: float,
+) -> None:
+    src = np.unique(np.asarray(sources, dtype=np.int32))
+    tgt = np.unique(np.asarray(targets, dtype=np.int32))
+    hops = count_directed_hops(csr, src, tgt)
+    if hops["n_one_hop"] > 0:
+        for pre in src:
+            for post in tgt:
+                w = float(csr[int(pre), int(post)])
+                if w > 0:
+                    adj_lil[int(pre), int(post)] = w * one_hop_gain
+    elif src.size > 0 and tgt.size > 0:
+        # Assist synapse only when the filtered connectome has no 1-hop edge.
+        for pre in src:
+            for post in tgt:
+                adj_lil[int(pre), int(post)] = max(
+                    float(adj_lil[int(pre), int(post)]), assist_weight
+                )
+
+
 def calibrate_looming_to_dnp01(
     adjacency: sparse.csr_matrix,
     looming_indices: np.ndarray,
     dnp01_indices: np.ndarray,
-    one_hop_gain: float = 8.0,
-    incoming_gain: float = 4.0,
+    one_hop_gain: float = 3.0,
+    incoming_gain: float = 1.0,
     assist_weight: float = 1.0,
+    rest_incoming_scale: float = 0.25,
+    dnp03_indices: Optional[np.ndarray] = None,
 ) -> sparse.csr_matrix:
-    """Strengthen LPLC2/LC4 → DNp01 paths; add a small assist synapse if none exist."""
+    """Boost LPLC2/LC4 → DNp01 (and DNp03); cut other excitatory drive so rest stays low.
+
+    ``incoming_gain`` defaults to 1 (do not amplify all incoming — that pinned DNp01
+    at the rate ceiling). Pass ``incoming_gain>1`` only for ablation.
+    """
+    csr = adjacency.tocsr()
     adj = adjacency.tolil(copy=True)
     src = np.unique(np.asarray(looming_indices, dtype=np.int32))
     tgt = np.unique(np.asarray(dnp01_indices, dtype=np.int32))
-    hops = count_directed_hops(adjacency, src, tgt)
-    if hops["n_one_hop"] > 0:
-        csr = adjacency.tocsr()
-        for pre in src:
-            row = csr.getrow(int(pre))
-            for post in tgt:
-                w = float(csr[int(pre), int(post)])
-                if w > 0:
-                    adj[int(pre), int(post)] = w * one_hop_gain
-    elif src.size > 0 and tgt.size > 0:
-        # Engineered 1-hop assist when the filtered connectome has no LPLC2/LC4 → DNp01 edge.
-        for pre in src:
-            for post in tgt:
-                adj[int(pre), int(post)] = max(float(adj[int(pre), int(post)]), assist_weight)
-    scaled = amplify_incoming_to_targets(adj.tocsr(), tgt, gain=incoming_gain)
+    _boost_one_hop_path(adj, csr, src, tgt, one_hop_gain, assist_weight)
+    extra = []
+    if dnp03_indices is not None and len(dnp03_indices) > 0:
+        dnp03 = np.unique(np.asarray(dnp03_indices, dtype=np.int32))
+        _boost_one_hop_path(adj, csr, src, dnp03, one_hop_gain, assist_weight)
+        extra.append(dnp03)
+    scaled = adj.tocsr()
+    all_tgt = tgt if not extra else np.unique(np.concatenate([tgt] + extra))
+    scaled = attenuate_nonpath_incoming(
+        scaled, all_tgt, keep_sources=src, scale=rest_incoming_scale
+    )
+    if incoming_gain != 1.0 and tgt.size > 0:
+        scaled = amplify_incoming_to_targets(scaled, tgt, gain=incoming_gain)
     return scaled
+
+
+def _mean_rate(rates: np.ndarray, indices: np.ndarray) -> float:
+    idx = np.asarray(indices, dtype=np.int32)
+    if idx.size == 0:
+        return 0.0
+    return float(rates[idx].mean())
+
+
+def _latency_steps(hist, rest: float, margin: float = 0.05) -> float:
+    for i, v in enumerate(hist):
+        if float(v) > rest + margin:
+            return float(i)
+    return float("nan")
+
+
+def _selectivity(left: float, right: float) -> float:
+    denom = abs(left) + abs(right)
+    if denom < 1e-9:
+        return 0.0
+    return float((left - right) / denom)
 
 
 def diagnose_looming_to_dnp01(
@@ -284,44 +367,82 @@ def diagnose_looming_to_dnp01(
     syn_weight_scale: float = 0.1,
     max_rate: float = 50.0,
     calibrate: bool = True,
+    dnp03_indices: Optional[np.ndarray] = None,
+    looming_left: Optional[np.ndarray] = None,
+    looming_right: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
-    """Inject current into LPLC2/LC4 and report DNp01 rate vs rest (synthetic or full brain)."""
+    """Inject current into LPLC2/LC4 and report DNp01/DNp03 rest, drive, latency, L/R selectivity."""
     hops = count_directed_hops(adjacency, looming_indices, dnp01_indices)
+    dnp03 = np.asarray(
+        dnp03_indices if dnp03_indices is not None else [], dtype=np.int32
+    )
     adj = adjacency
     if calibrate:
-        adj = calibrate_looming_to_dnp01(adjacency, looming_indices, dnp01_indices)
+        adj = calibrate_looming_to_dnp01(
+            adjacency, looming_indices, dnp01_indices, dnp03_indices=dnp03
+        )
     sim = RateSimulator(adj, dt=0.010, syn_weight_scale=syn_weight_scale, max_rate=max_rate)
     loom = np.asarray(looming_indices, dtype=np.int32)
     dnp = np.asarray(dnp01_indices, dtype=np.int32)
 
-    def _dnp_rate(rates: np.ndarray) -> float:
-        if dnp.size == 0:
-            return 0.0
-        return float(rates[dnp].mean())
-
-    rest_hist = []
+    rest_dnp, rest_dnp03 = [], []
     for _ in range(n_rest):
         if loom.size:
             sim.set_input(np.zeros(loom.size, dtype=np.float32), neuron_indices=loom)
-        rest_hist.append(_dnp_rate(sim.step()))
-    rest = float(np.median(rest_hist[-max(3, n_rest // 3) :])) if rest_hist else 0.0
-
-    driven_hist = []
-    loom_hist = []
-    for _ in range(n_drive):
-        if loom.size:
-            sim.set_input(
-                np.full(loom.size, looming_current, dtype=np.float32), neuron_indices=loom
-            )
         rates = sim.step()
-        driven_hist.append(_dnp_rate(rates))
-        if loom.size:
-            loom_hist.append(float(rates[loom].mean()))
+        rest_dnp.append(_mean_rate(rates, dnp))
+        rest_dnp03.append(_mean_rate(rates, dnp03))
+    tail = max(3, n_rest // 3)
+    rest = float(np.median(rest_dnp[-tail:])) if rest_dnp else 0.0
+    rest03 = float(np.median(rest_dnp03[-tail:])) if rest_dnp03 else 0.0
+
+    def _drive(indices, current) -> tuple:
+        sim.reset()
+        for _ in range(n_rest):
+            if loom.size:
+                sim.set_input(np.zeros(loom.size, dtype=np.float32), neuron_indices=loom)
+            sim.step()
+        dnp_hist, dnp03_hist, loom_hist = [], [], []
+        idx = np.asarray(indices, dtype=np.int32)
+        for _ in range(n_drive):
+            if idx.size:
+                sim.set_input(
+                    np.full(idx.size, current, dtype=np.float32), neuron_indices=idx
+                )
+            rates = sim.step()
+            dnp_hist.append(_mean_rate(rates, dnp))
+            dnp03_hist.append(_mean_rate(rates, dnp03))
+            if idx.size:
+                loom_hist.append(float(rates[idx].mean()))
+        return dnp_hist, dnp03_hist, loom_hist
+
+    driven_hist, driven03_hist, loom_hist = _drive(loom, looming_current)
     driven = float(np.max(driven_hist)) if driven_hist else 0.0
+    driven03 = float(np.max(driven03_hist)) if driven03_hist else 0.0
+
+    left_idx = looming_left if looming_left is not None else loom
+    right_idx = looming_right if looming_right is not None else loom
+    left_dnp, left_dnp03, _ = _drive(left_idx, looming_current)
+    right_dnp, right_dnp03, _ = _drive(right_idx, looming_current)
+    left_peak = float(np.max(left_dnp)) if left_dnp else 0.0
+    right_peak = float(np.max(right_dnp)) if right_dnp else 0.0
+    left_peak03 = float(np.max(left_dnp03)) if left_dnp03 else 0.0
+    right_peak03 = float(np.max(right_dnp03)) if right_dnp03 else 0.0
+
     report = {
         **hops,
         "dnp01_rest": rest,
         "dnp01_driven": driven,
+        "dnp01_latency_steps": _latency_steps(driven_hist, rest),
+        "dnp01_left_driven": left_peak,
+        "dnp01_right_driven": right_peak,
+        "dnp01_lr_selectivity": _selectivity(left_peak, right_peak),
+        "dnp03_rest": rest03,
+        "dnp03_driven": driven03,
+        "dnp03_latency_steps": _latency_steps(driven03_hist, rest03),
+        "dnp03_left_driven": left_peak03,
+        "dnp03_right_driven": right_peak03,
+        "dnp03_lr_selectivity": _selectivity(left_peak03, right_peak03),
         "looming_driven": float(np.max(loom_hist)) if loom_hist else 0.0,
         "rose": float(driven > rest + 0.05),
     }
@@ -375,6 +496,31 @@ class RateSimulator:
         # State
         self.rates = np.zeros(self.n_neurons)  # Firing rates
         self.external_input = np.zeros(self.n_neurons)
+        # Per-neuron subtractive threshold / bias (warmup calibration for giant fiber).
+        self.bias = np.zeros(self.n_neurons, dtype=np.float64)
+        self.threshold = np.zeros(self.n_neurons, dtype=np.float64)
+
+    def apply_rest_thresholds(
+        self,
+        indices: np.ndarray,
+        observed_rates,
+        target_rest: float = 2.0,
+    ) -> None:
+        """Raise ReLU threshold so a high-rest cell sits near ``target_rest`` Hz."""
+        idx = np.asarray(indices, dtype=np.int32)
+        if idx.size == 0:
+            return
+        if np.isscalar(observed_rates):
+            obs = np.full(idx.size, float(observed_rates))
+        else:
+            obs = np.asarray(observed_rates, dtype=float).ravel()
+            if obs.size == 1:
+                obs = np.full(idx.size, float(obs[0]))
+            elif obs.size == self.n_neurons:
+                obs = obs[idx]
+            elif obs.size != idx.size:
+                obs = np.full(idx.size, float(np.mean(obs)))
+        self.threshold[idx] = np.maximum(0.0, obs - float(target_rest))
     
     def _activation_fn(self, x: np.ndarray) -> np.ndarray:
         """Apply activation function."""
@@ -406,11 +552,11 @@ class RateSimulator:
         # Synaptic input
         syn_input = self.adj.T @ self.rates
         
-        # Total input
-        total_input = syn_input + self.external_input
+        # Total input (bias / threshold from warmup keep giant-fiber rest low)
+        total_input = syn_input + self.external_input + self.bias
         
         # Activation
-        activated = self._activation_fn(total_input)
+        activated = self._activation_fn(total_input - self.threshold)
         
         # Temporal dynamics (exponential moving average)
         self.rates = self.rates * self.decay + activated * (1 - self.decay)

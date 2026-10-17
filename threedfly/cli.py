@@ -216,7 +216,7 @@ def inspect_types(subgraph_path):
 @click.option("--no-ei", is_flag=True, help="Skip neurotransmitter E/I signs")
 @click.option("--looming", type=float, default=1.0, help="Injected looming current")
 def diagnose_looming(subgraph_path, no_ei, looming):
-    """Inject strong synthetic looming into LPLC2/LC4 and print DNp01 vs rest."""
+    """Inject strong synthetic looming into LPLC2/LC4 and print DNp01/DNp03 vs rest."""
     import numpy as np
     from threedfly.connectome import ConnectomeLoader
     from threedfly.connectome.neuron_selection import (
@@ -263,20 +263,36 @@ def diagnose_looming(subgraph_path, no_ei, looming):
         controller.input_mapping["looming_right"],
     ])
     dnp = controller.output_mapping.get("DNp01")
+    dnp03 = controller.output_mapping.get("DNp03", np.array([], dtype=int))
     hops = count_directed_hops(adj, loom, dnp)
     click.echo(
         f"LPLC2/LC4 n={hops['n_sources']}  DNp01 n={hops['n_targets']}  "
-        f"1-hop={hops['n_one_hop']}  2-hop={hops['n_two_hop']}"
+        f"DNp03 n={len(dnp03)}  1-hop={hops['n_one_hop']}  2-hop={hops['n_two_hop']}"
     )
     report = diagnose_looming_to_dnp01(
         adjacency=adj,
         looming_indices=loom,
         dnp01_indices=dnp,
+        dnp03_indices=dnp03,
+        looming_left=controller.input_mapping["looming_left"],
+        looming_right=controller.input_mapping["looming_right"],
         looming_current=float(looming),
     )
     click.echo(f"Looming cells driven rate: {report['looming_driven']:.4g}")
-    click.echo(f"DNp01 rest:   {report['dnp01_rest']:.4g}")
-    click.echo(f"DNp01 driven: {report['dnp01_driven']:.4g}")
+    click.echo(
+        f"DNp01 rest: {report['dnp01_rest']:.4g}  driven: {report['dnp01_driven']:.4g}  "
+        f"latency: {report['dnp01_latency_steps']} steps  "
+        f"L/R sel: {report['dnp01_lr_selectivity']:.3f}"
+    )
+    click.echo(
+        f"DNp03 rest: {report['dnp03_rest']:.4g}  driven: {report['dnp03_driven']:.4g}  "
+        f"latency: {report['dnp03_latency_steps']} steps  "
+        f"L/R sel: {report['dnp03_lr_selectivity']:.3f}"
+    )
+    click.echo(
+        f"DNp01 left-loom driven: {report['dnp01_left_driven']:.4g}  "
+        f"right-loom driven: {report['dnp01_right_driven']:.4g}"
+    )
     click.echo("DNp01 rose above rest." if report["rose"] else "DNp01 did NOT rise above rest.")
 
 
@@ -333,7 +349,13 @@ def diagnose_looming(subgraph_path, no_ei, looming):
     is_flag=True,
     help="Disable soft collision recovery (stop on first collision)"
 )
-def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery):
+@click.option(
+    "--engineered-looming-residual",
+    is_flag=True,
+    default=False,
+    help="Ablation only: enable the engineered looming-residual escape trigger (default OFF).",
+)
+def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, engineered_looming_residual):
     """Run 3dfly exploration simulation (static visualization)."""
     from threedfly.runner import run_simulation
     
@@ -360,6 +382,7 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
             seed=seed,
             max_collisions=max_collisions,
             enable_soft_recovery=not no_soft_recovery,
+            use_engineered_looming_residual=engineered_looming_residual,
         )
         click.echo("\n✓ Simulation complete!")
     except Exception as e:
@@ -423,7 +446,13 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
     is_flag=True,
     help="Disable soft collision recovery (pause on collision)"
 )
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery):
+@click.option(
+    "--engineered-looming-residual",
+    is_flag=True,
+    default=False,
+    help="Ablation only: enable the engineered looming-residual escape trigger (default OFF).",
+)
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, engineered_looming_residual):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -447,6 +476,7 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
             port=port,
             max_collisions=max_collisions,
             enable_soft_recovery=not no_soft_recovery,
+            use_engineered_looming_residual=engineered_looming_residual,
         )
     except Exception as e:
         click.echo(f"\nError running interactive simulation: {e}", err=True)

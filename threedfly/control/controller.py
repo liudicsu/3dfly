@@ -139,6 +139,7 @@ class BiologicalFlightController:
         nt_data: Optional[pd.DataFrame] = None,
         warmup_steps: int = 800,
         min_warmup_steps: int = 200,
+        use_engineered_looming_residual: bool = False,
     ):
         """
         Initialize biological controller.
@@ -151,6 +152,8 @@ class BiologicalFlightController:
             nt_data: Neurotransmitter data (optional)
             warmup_steps: Maximum grounded brain steps for rest calibration
             min_warmup_steps: Minimum steps before convergence may stop warmup
+            use_engineered_looming_residual: Ablation-only engineered looming
+                threshold that bypasses DNp01. Default OFF; escape is brain-driven.
         """
         from threedfly.connectome.neuron_selection import (
             select_input_neurons_for_luminance,
@@ -171,9 +174,17 @@ class BiologicalFlightController:
         self.hover_action = 0.32
         self.input_drive = 0.8
         self.input_drive_clip = 1.5
+        self.looming_input_gain = 2.0
         self._last_looming = 0.0
         self.brain_escape_count = 0
         self.engineered_escape_count = 0
+        self.dnp03_turn_count = 0
+        self.use_engineered_looming_residual = bool(use_engineered_looming_residual)
+        self.dnp01_target_rest = 2.0
+        self.escape_rate_margin = 3.0
+        self._last_warmup_activity = None
+        self._escape_yaw_sign = 0.0
+        self._dnp03_prev_active = False
         
         # Input mapping: visual features → neuron populations
         print("\n[Biological I/O Mapping]")
@@ -238,7 +249,7 @@ class BiologicalFlightController:
         )
         
         print(f"\nMotor readout from descending neurons:")
-        for dn_type in ("DNp01", "DNg02", "DNa01", "DNa02", "DNb"):
+        for dn_type in ("DNp01", "DNp03", "DNg02", "DNa01", "DNa02", "DNb"):
             indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
             if len(indices) > 0:
                 print(f"  {dn_type}: {len(indices)} neurons")
@@ -285,7 +296,7 @@ class BiologicalFlightController:
         pending_idx: list = []
         pending_val: list = []
 
-        def _extend(indices, raw_values):
+        def _extend(indices, raw_values, extra_gain: float = 1.0):
             indices = np.asarray(indices, dtype=np.int32)
             if indices.size == 0:
                 return
@@ -298,7 +309,7 @@ class BiologicalFlightController:
                 )
                 values = values[assignment].astype(np.float32)
             mean_abs = float(np.mean(np.abs(values))) + 1e-6
-            values = values * (self.input_drive / mean_abs)
+            values = values * (self.input_drive / mean_abs) * float(extra_gain)
             values = np.clip(values, -self.input_drive_clip, self.input_drive_clip)
             pending_idx.extend(indices.tolist())
             pending_val.extend(values.tolist())
@@ -323,16 +334,17 @@ class BiologicalFlightController:
             _extend(neurons, feature_val)
 
         self._last_looming = 0.0
+        loom_gain = float(self.looming_input_gain)
         if "left" in looming_features and self.input_mapping["looming_left"].size > 0:
             raw = np.atleast_1d(looming_features["left"])[0] if np.isscalar(looming_features["left"]) else looming_features["left"].mean()
             raw = float(raw)
             self._last_looming = max(self._last_looming, abs(raw))
-            _extend(self.input_mapping["looming_left"], raw)
+            _extend(self.input_mapping["looming_left"], raw, extra_gain=loom_gain)
         if "right" in looming_features and self.input_mapping["looming_right"].size > 0:
             raw = np.atleast_1d(looming_features["right"])[0] if np.isscalar(looming_features["right"]) else looming_features["right"].mean()
             raw = float(raw)
             self._last_looming = max(self._last_looming, abs(raw))
-            _extend(self.input_mapping["looming_right"], raw)
+            _extend(self.input_mapping["looming_right"], raw, extra_gain=loom_gain)
 
         if angular_velocity is not None:
             self._extend_haltere(pending_idx, pending_val, angular_velocity, _extend)
@@ -391,6 +403,7 @@ class BiologicalFlightController:
         if self.warmup_complete:
             return
         self._warmup_count += 1
+        self._last_warmup_activity = np.asarray(brain_activity, dtype=float).copy()
         for dn_type, indices in self.output_mapping.items():
             if len(indices) > 0:
                 self.warmup_history.setdefault(dn_type, []).append(
@@ -449,6 +462,7 @@ class BiologicalFlightController:
             ("DNa02_L", "DNa02_R"),
             ("DNg02_L", "DNg02_R"),
             ("DNa01_L", "DNa01_R"),
+            ("DNp03_L", "DNp03_R"),
         ):
             if left_key in self.warmup_history and right_key in self.warmup_history:
                 diffs = (
@@ -465,6 +479,45 @@ class BiologicalFlightController:
         print("Resting rates (median ± MAD-scale):")
         for dn_type, rate in self.resting_rates.items():
             print(f"  {dn_type}: {rate:.4f} ± {self.resting_std.get(dn_type, 0):.4f}")
+
+    def apply_giant_fiber_calibration(self, brain, target_rest: Optional[float] = None) -> None:
+        """Lower DNp01/DNp03 rest via per-neuron thresholds so looming can spike above rest."""
+        target = self.dnp01_target_rest if target_rest is None else float(target_rest)
+        if not hasattr(brain, "apply_rest_thresholds"):
+            return
+        activity = self._last_warmup_activity
+        for key in ("DNp01", "DNp03", "DNp03_L", "DNp03_R"):
+            idx = self.output_mapping.get(key, np.array([], dtype=np.int32))
+            if idx is None or len(idx) == 0:
+                continue
+            if activity is not None and len(activity) > int(np.max(idx)):
+                observed = activity[idx]
+            else:
+                observed = self.resting_rates.get(key, 0.0)
+            brain.apply_rest_thresholds(idx, observed, target_rest=target)
+            if key in self.resting_rates:
+                self.resting_rates[key] = min(float(self.resting_rates[key]), target)
+
+    def _threat_yaw_sign(self, brain_activity: np.ndarray) -> float:
+        """+1 turn left (away from right threat), -1 turn right (away from left threat)."""
+        if self._pair_usable("DNp03_L", "DNp03_R", brain_activity):
+            diff = self._raw_rate("DNp03_L", brain_activity) - self._raw_rate(
+                "DNp03_R", brain_activity
+            )
+            if abs(diff) > 1e-6:
+                return -1.0 if diff > 0 else 1.0
+        left_idx = self.input_mapping.get("looming_left", np.array([], dtype=np.int32))
+        right_idx = self.input_mapping.get("looming_right", np.array([], dtype=np.int32))
+        left_r = float(brain_activity[left_idx].mean()) if len(left_idx) else 0.0
+        right_r = float(brain_activity[right_idx].mean()) if len(right_idx) else 0.0
+        if left_r == right_r:
+            return 0.0
+        return -1.0 if left_r > right_r else 1.0
+
+    def _dnp01_escape_threshold(self) -> float:
+        rest = float(self.resting_rates.get("DNp01", 0.0))
+        scale = max(float(self.resting_std.get("DNp01", 0.0)), 0.5)
+        return rest + max(float(self.escape_rate_margin), 1.5 * scale)
 
     def _raw_rate(self, dn_type: str, brain_activity: np.ndarray) -> float:
         indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
@@ -514,7 +567,8 @@ class BiologicalFlightController:
         Compute flight action from DN activity.
         
         Maps specific DN types to motor commands:
-        - DNp01: escape → emergency pitch (plus engineered looming residual)
+        - DNp01: escape → short brake + turn away from the looming side
+        - DNp03 L−R: looming-evoked evasive yaw (and escape-turn side)
         - DNg02: thrust/altitude deviations around hover = weight
         - DNa02 L−R and DNg02 L−R → yaw (bilateral, left/right symmetric)
         - DNb: baseline motor activity
@@ -531,7 +585,7 @@ class BiologicalFlightController:
         dng_l = self._normalized_readout("DNg02_L", brain_activity)
         dng_r = self._normalized_readout("DNg02_R", brain_activity)
         dnb = self._normalized_readout("DNb", brain_activity)
-        dnp = self._normalized_readout("DNp01", brain_activity)
+        dnp_rate = self._raw_rate("DNp01", brain_activity)
         # DNg02 left/right set wing stroke amplitudes around hover (lift = weight at rest).
         hover = float(self.hover_action)
         self.last_wing_strokes = np.array([
@@ -544,25 +598,40 @@ class BiologicalFlightController:
                 [float(np.clip(hover + mean_dev, 0.0, 1.0))] * 2,
                 dtype=np.float64,
             )
-        # Engineered residual: strong looming can still trigger escape if DNp01 is silent.
-        loom_assist = float(np.tanh(3.0 * (self._last_looming - 0.35)))
-        dnp_eff = max(dnp, loom_assist)
-        brain_fire = dnp > 0.55
+        # Engineered residual: ablation-only (default OFF). Documented as engineered.
+        loom_assist = 0.0
+        if self.use_engineered_looming_residual:
+            loom_assist = float(np.tanh(3.0 * (self._last_looming - 0.35)))
+        thresh = self._dnp01_escape_threshold()
+        brain_fire = dnp_rate > thresh
+        engineered_fire = (not brain_fire) and (loom_assist > 0.55)
+        fire_level = 1.0 if (brain_fire or engineered_fire) else 0.0
 
-        # Rest lift = weight; DNg02 is a bounded deviation around hover.
-        thrust_forward = 0.35 + 0.25 * dng
-        thrust_up = self.hover_action + 0.15 * dng
-        roll = 0.12 * dnb
+        # DNp03 looming-evoked saccade count (L/R activity, not the raw looming vector).
+        dnp03_diff = self._raw_rate("DNp03_L", brain_activity) - self._raw_rate(
+            "DNp03_R", brain_activity
+        )
+        dnp03_active = abs(dnp03_diff) > max(self.escape_rate_margin, 1.0)
+        if dnp03_active and not self._dnp03_prev_active:
+            self.dnp03_turn_count += 1
+        self._dnp03_prev_active = dnp03_active
 
-        # DNp01: event trigger on threshold crossing, not a continuous pitch command
-        if dnp_eff > 0.55 and self.dnp01_prev_z <= 0.55:
+        # DNp01: event trigger on threshold crossing over rest, not a continuous pitch command
+        if fire_level > 0.5 and self.dnp01_prev_z <= 0.5:
             self.escape_timer = self.escape_duration
+            self._escape_yaw_sign = self._threat_yaw_sign(brain_activity)
             if brain_fire:
                 self.brain_escape_count += 1
             else:
                 self.engineered_escape_count += 1
-        self.dnp01_prev_z = dnp_eff
-        pitch = 0.35 if self.escape_timer > 0 else 0.0
+        self.dnp01_prev_z = fire_level
+
+        escaping = self.escape_timer > 0
+        # Rest lift = weight; DNg02 is a bounded deviation around hover.
+        thrust_forward = 0.05 if escaping else (0.35 + 0.25 * dng)
+        thrust_up = self.hover_action + 0.15 * dng
+        roll = 0.12 * dnb
+        pitch = 0.35 if escaping else 0.0
         if self.escape_timer > 0:
             self.escape_timer -= 1
 
@@ -576,6 +645,10 @@ class BiologicalFlightController:
             n_pairs += 1
         if n_pairs == 0 and self._pair_usable("DNa01_L", "DNa01_R", brain_activity):
             yaw = 0.5 * self._pair_yaw("DNa01_L", "DNa01_R", brain_activity)
+        if escaping:
+            yaw = 0.8 * self._escape_yaw_sign + 0.2 * yaw
+        elif self._pair_usable("DNp03_L", "DNp03_R", brain_activity):
+            yaw += 0.35 * self._pair_yaw("DNp03_L", "DNp03_R", brain_activity)
         
         # Assemble action. exploration_signal is intentionally unused here.
         action = np.array([thrust_forward, thrust_up, roll, pitch, yaw])
@@ -598,6 +671,7 @@ class BiologicalFlightController:
             "warmup_complete": float(self.warmup_complete),
             "brain_escapes": float(self.brain_escape_count),
             "engineered_escapes": float(self.engineered_escape_count),
+            "dnp03_turns": float(self.dnp03_turn_count),
             "wing_stroke_left": float(self.last_wing_strokes[0]),
             "wing_stroke_right": float(self.last_wing_strokes[1]),
         }

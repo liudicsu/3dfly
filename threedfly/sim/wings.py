@@ -64,9 +64,9 @@ def visual_wing_angles(
     stroke_right: float,
     max_angle: float = 0.7,
 ) -> Tuple[float, float]:
-    """Visual-only flapping:  opposite-phase sinusoid scaled by stroke amplitude."""
+    """Visual-only flapping: in-phase sinusoid; L/R hinges are mirrored in MJCF."""
     s_l = float(np.clip(stroke_left, 0.0, 1.0))
     s_r = float(np.clip(stroke_right, 0.0, 1.0))
     left = float(max_angle) * s_l * np.sin(phase)
-    right = float(max_angle) * s_r * np.sin(phase + np.pi)
+    right = float(max_angle) * s_r * np.sin(phase)
     return left, right

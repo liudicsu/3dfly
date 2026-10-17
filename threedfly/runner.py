@@ -35,6 +35,7 @@ def run_simulation(
     enable_soft_recovery: bool = True,
     warmup_steps: int = 800,
     apply_ei_signs: bool = True,
+    use_engineered_looming_residual: bool = False,
 ):
     """
     Run complete 3dfly simulation.
@@ -50,6 +51,8 @@ def run_simulation(
         enable_soft_recovery: Enable soft collision recovery (back off and continue)
         warmup_steps: Max grounded brain steps before flight (biological mode)
         apply_ei_signs: Apply neurotransmitter E/I signs when NT data is available
+        use_engineered_looming_residual: Ablation-only engineered looming escape
+            (default OFF; documented as engineered, not the connectome path)
     """
     np.random.seed(seed)
     
@@ -122,6 +125,7 @@ def run_simulation(
             body_id_to_idx=body_id_to_idx,
             nt_data=nt_data,
             warmup_steps=warmup_steps,
+            use_engineered_looming_residual=use_engineered_looming_residual,
         )
     else:
         print("  No annotations found, using legacy controller")
@@ -135,13 +139,20 @@ def run_simulation(
             controller.input_mapping["looming_right"],
         ])
         dnp_idx = controller.output_mapping.get("DNp01", np.array([], dtype=np.int32))
+        dnp03_idx = controller.output_mapping.get("DNp03", np.array([], dtype=np.int32))
         hops = count_directed_hops(brain.adj, loom_idx, dnp_idx)
         print(
             f"  LPLC2/LC4→DNp01 hops: 1-hop={hops['n_one_hop']}, "
             f"2-hop={hops['n_two_hop']} (src={hops['n_sources']}, tgt={hops['n_targets']})"
         )
-        brain.adj = calibrate_looming_to_dnp01(brain.adj, loom_idx, dnp_idx)
-        print("  Calibrated looming→DNp01 incoming gain (engineered path assist if 1-hop missing)")
+        brain.adj = calibrate_looming_to_dnp01(
+            brain.adj, loom_idx, dnp_idx, dnp03_indices=dnp03_idx
+        )
+        print("  Calibrated LPLC2/LC4→DNp01/DNp03 (boost path, attenuate other excitatory rest drive)")
+        if controller.use_engineered_looming_residual:
+            print("  Engineered looming-residual escape is ON (ablation)")
+        else:
+            print("  Engineered looming-residual escape is OFF (brain-driven DNp01 only)")
     
     print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":
@@ -194,6 +205,7 @@ def run_simulation(
                 print(f"  Warmup converged at step {warmup_step + 1}")
                 break
         controller.finalize_warmup()
+        controller.apply_giant_fiber_calibration(brain)
     
     # Simulation loop
     
@@ -391,6 +403,7 @@ def run_simulation(
     if use_biological:
         print(f"DNp01 escapes: brain-triggered={controller.brain_escape_count}, "
               f"engineered-residual={controller.engineered_escape_count}")
+        print(f"DNp03 evasive turns: {controller.dnp03_turn_count}")
     print(f"\nPrimary (Brain Depth):")
     print(f"  Point cloud points: {map_stats['total_points']}")
     print(f"  Mean depth: {brain_depth_stats.get('mean_depth_history', 0):.2f}m")
