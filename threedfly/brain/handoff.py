@@ -161,7 +161,7 @@ class FlyvisEye:
         self,
         checkpoint: str = FLYVIS_CHECKPOINT,
         dt: float = DT,
-        torch_threads: int = 2,
+        torch_threads: int = 1,
         network=None,
     ):
         if network is None and not flyvis_available():
@@ -183,7 +183,12 @@ class FlyvisEye:
         import torch
         from flyvis import NetworkView
 
-        torch.set_num_threads(max(1, int(getattr(torch, "get_num_threads", lambda: 2)())))
+        torch.set_num_threads(1)
+        if hasattr(torch, "set_num_interop_threads"):
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass
         net = NetworkView(self.checkpoint).init_network()
         self._bind_network(net)
 
@@ -298,6 +303,8 @@ class HandoffPlan:
     v_gray: np.ndarray
     p99: np.ndarray
     rmax: float = RMAX
+    # Contiguous [start, end) per flyvis type — avoids np.unique + object masks.
+    type_ranges: Dict[str, tuple] = field(default_factory=dict)
 
 
 def compile_handoff_plan(
@@ -307,6 +314,8 @@ def compile_handoff_plan(
     remap: Optional[np.ndarray] = None,
 ) -> HandoffPlan:
     idx_all, typ_all, col_all, vg_all, p_all = [], [], [], [], []
+    type_ranges: Dict[str, tuple] = {}
+    off = 0
     for t in HANDOFF_FLYVIS_TYPES:
         key = f"{t}|{side}"
         if key not in hmap.index or t not in calib.uv or t not in calib.V_gray:
@@ -322,11 +331,16 @@ def compile_handoff_plan(
             mapped = remap[cidx]
             ok = mapped >= 0
             cidx, col, vg = mapped[ok], col[ok], vg[ok]
+        n = int(len(cidx))
+        if n == 0:
+            continue
+        type_ranges[t] = (off, off + n)
+        off += n
         idx_all.append(cidx)
-        typ_all.append(np.full(len(cidx), t, dtype=object))
+        typ_all.append(np.full(n, t, dtype=object))
         col_all.append(col)
         vg_all.append(np.asarray(vg, dtype=np.float32))
-        p_all.append(np.full(len(cidx), float(calib.p99[t]), dtype=np.float32))
+        p_all.append(np.full(n, float(calib.p99[t]), dtype=np.float32))
     if not idx_all:
         return HandoffPlan(
             idx=np.zeros(0, dtype=np.int64),
@@ -335,6 +349,7 @@ def compile_handoff_plan(
             v_gray=np.zeros(0, dtype=np.float32),
             p99=np.zeros(0, dtype=np.float32),
             rmax=calib.rmax,
+            type_ranges={},
         )
     return HandoffPlan(
         idx=np.concatenate(idx_all).astype(np.int64),
@@ -343,6 +358,7 @@ def compile_handoff_plan(
         v_gray=np.concatenate(vg_all),
         p99=np.concatenate(p_all),
         rmax=float(calib.rmax),
+        type_ranges=type_ranges,
     )
 
 
@@ -353,12 +369,21 @@ def apply_handoff_plan(
     if plan.idx.size == 0:
         return plan.idx, np.zeros(0, dtype=np.float32)
     V = np.zeros(plan.idx.size, dtype=np.float32)
-    for t in np.unique(plan.types):
+    ranges = plan.type_ranges
+    if ranges:
+        items = ranges.items()
+    else:
+        items = ((t, None) for t in np.unique(plan.types))
+    for t, sl in items:
         if t not in voltages:
             continue
-        m = plan.types == t
         src = np.asarray(voltages[t], dtype=np.float32)
-        V[m] = src[plan.cols[m]]
+        if sl is None:
+            m = plan.types == t
+            V[m] = src[plan.cols[m]]
+        else:
+            a, b = sl
+            V[a:b] = src[plan.cols[a:b]]
     rates = (plan.rmax * np.clip(np.maximum(V - plan.v_gray, 0.0) / (plan.p99 + 1e-6), 0.0, 1.0)).astype(
         np.float32
     )
@@ -380,8 +405,22 @@ def handoff_rates_for_frame(
     return apply_handoff_plan(compile_handoff_plan(hmap, calib, side, remap=remap), voltages)
 
 
+def halt_name_mask(values) -> np.ndarray:
+    """True where a type / subclass / extra annotation mentions a haltere."""
+    arr = np.asarray(values, dtype=object).reshape(-1)
+    return np.fromiter(("halt" in str(v).lower() for v in arr), dtype=bool, count=arr.size)
+
+
 def haltere_indices(connectome: ConnectomeData, remap: Optional[np.ndarray] = None) -> np.ndarray:
-    idx = np.flatnonzero(connectome.subclass == "haltere")
+    """Search type, subclass, superclass, and extras for ``halt`` (not exact 'haltere')."""
+    mask = halt_name_mask(connectome.subclass)
+    mask |= halt_name_mask(connectome.typ)
+    extras = getattr(connectome, "extras", None) or {}
+    for key in extras:
+        extra = np.asarray(extras[key], dtype=object)
+        if extra.shape == mask.shape:
+            mask |= halt_name_mask(extra)
+    idx = np.flatnonzero(mask)
     if remap is not None:
         mapped = remap[idx]
         return mapped[mapped >= 0]

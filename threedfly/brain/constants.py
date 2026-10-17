@@ -252,7 +252,7 @@ def nt_sign(name: str) -> float:
     return -1.0 if is_inhibitory_nt(name) else 1.0
 
 
-def configure_threads(scipy_threads: int = 1, torch_threads: int = 2) -> None:
+def configure_threads(scipy_threads: int = 1, torch_threads: int = 1) -> None:
     """Pin BLAS / torch thread counts (CPU-only M1 runtime)."""
     for key in (
         "OMP_NUM_THREADS",
@@ -265,6 +265,11 @@ def configure_threads(scipy_threads: int = 1, torch_threads: int = 2) -> None:
         import torch
 
         torch.set_num_threads(int(torch_threads))
+        if hasattr(torch, "set_num_interop_threads"):
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass
     except ImportError:
         pass
 

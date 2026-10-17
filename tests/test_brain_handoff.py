@@ -13,6 +13,8 @@ from threedfly.brain.handoff import (
     apply_handoff_plan,
     build_handoff_map,
     compile_handoff_plan,
+    halt_name_mask,
+    haltere_indices,
     handoff_rates_for_frame,
     impute_hex,
     voltages_to_rates,
@@ -62,6 +64,25 @@ def test_handoff_map_covers_both_eyes_and_tmy9_split():
     assert hmap.n_mapped >= 3
 
 
+def test_haltere_indices_match_type_or_subclass_substring():
+    conn = tiny_signed_connectome()
+    # Box log halt=0 came from subclass == "haltere" only. Type "haltere_aff" must hit.
+    conn.subclass[:] = ""
+    idx = haltere_indices(conn)
+    assert idx.size >= 1
+    assert 19 in set(idx.tolist())
+    # Superclass / extras also count (MaleCNS annotations are not always in subclass).
+    conn.typ[19] = "campaniform"
+    conn.extras["superclass"] = np.array([""] * conn.n, dtype=object)
+    conn.extras["superclass"][19] = "haltere_sensory"
+    idx2 = haltere_indices(conn)
+    assert 19 in set(idx2.tolist())
+    assert halt_name_mask(np.array(["HalteresCampaniform", "T4a"], dtype=object)).tolist() == [
+        True,
+        False,
+    ]
+
+
 def test_compile_handoff_plan_matches_per_frame():
     conn = tiny_signed_connectome()
     hmap = build_handoff_map(conn)
@@ -78,6 +99,8 @@ def test_compile_handoff_plan_matches_per_frame():
     idx_b, rate_b = apply_handoff_plan(plan, voltages)
     np.testing.assert_array_equal(idx_a, idx_b)
     np.testing.assert_allclose(rate_a, rate_b, atol=1e-5)
+    assert plan.type_ranges
+    assert "T4a" in plan.type_ranges
 
 
 def test_flyvis_eye_skips_cleanly_when_missing():

@@ -5,7 +5,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from threedfly.brain.closed_loop import ClosedLoopBrain, FakeDualEyes, core_stack_available
+from threedfly.brain.closed_loop import (
+    ClosedLoopBrain,
+    DualFlyvisEyes,
+    FakeDualEyes,
+    core_stack_available,
+)
 from threedfly.brain.constants import connectome_available, flyvis_available
 from threedfly.brain.handoff import HandoffPlan
 from threedfly.brain.rate_core import RateCore
@@ -70,6 +75,39 @@ def test_closed_loop_reset_clears_core_not_called_per_step():
     assert brain.n_steps == 0
     assert float(brain.core.r.max()) == pytest.approx(0.0)
     assert brain.eyes.n_steps == 0
+
+
+def test_dual_eyes_share_one_network_with_independent_state():
+    class _Eye:
+        def __init__(self):
+            self._state = {"n": 0}
+            self.resets = 0
+
+        def reset(self):
+            self.resets += 1
+            self._state = {"n": 0}
+
+        def step(self, hex_frame):
+            self._state = {"n": int(self._state["n"]) + 1 + int(np.mean(hex_frame))}
+            return {"T4a": np.array([float(self._state["n"])], dtype=np.float32)}
+
+    eye = _Eye()
+    pair = DualFlyvisEyes.share(eye)
+    pair.reset()
+    hL = np.zeros(4, dtype=np.float32)
+    hR = np.ones(4, dtype=np.float32)
+    vL1, vR1 = pair.step_pair(hL, hR)
+    vL2, vR2 = pair.step_pair(hL, hR)
+    assert vL1["T4a"][0] != vR1["T4a"][0]
+    assert vL2["T4a"][0] > vL1["T4a"][0]
+    assert vR2["T4a"][0] > vR1["T4a"][0]
+
+
+def test_closed_loop_build_defaults_to_one_torch_thread():
+    import inspect
+
+    sig = inspect.signature(ClosedLoopBrain.build)
+    assert sig.parameters["torch_threads"].default == 1
 
 
 def test_core_stack_available_is_false_without_data_or_flyvis():

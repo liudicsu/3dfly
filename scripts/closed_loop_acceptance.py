@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Closed-loop M2–M4 acceptance: room flight + side loom + open-space.
+"""Closed-loop M2–M4 acceptance: room flight + lateral loom L/R + open-space.
 
 Single command on the verification box (connectome + flyvis + 3.12):
 
     python scripts/closed_loop_acceptance.py
     python scripts/closed_loop_acceptance.py --quick
-    python scripts/closed_loop_acceptance.py --steps 800 --output output/m2
+    python scripts/closed_loop_acceptance.py --steps 2000 --output output/m2
 
 Writes ``output/<dir>/metrics.json``, ``trajectory.png``, ``escapes.png``.
 Missing data/flyvis is an error (unit tests skip instead).
+
+Metrics live in ``threedfly.control.closed_loop_metrics`` so they can be
+imported without MuJoCo (NumPy 2: use ``np.ptp``, never ``ndarray.ptp``).
+Wall contacts are scored per 100 steps against PR #16's 81/2000 = 4.05.
 """
 
 from __future__ import annotations
@@ -25,45 +29,60 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from threedfly.brain.closed_loop import ClosedLoopBrain, core_stack_available
-from threedfly.brain.constants import connectome_available, flyvis_available
+from threedfly.control.closed_loop_metrics import (
+    PR16_STEPS,
+    PR16_WALLS,
+    PR16_WALLS_PER_100,
+    ROOM_XY,
+    coverage,
+    direction_correct_frac,
+    walls_per_100,
+    xy_extent,
+)
 from threedfly.control.dn_controller import DNFlightController
 from threedfly.control.exploration import heading_from_quaternion
 from threedfly.control.flight_params import FlightParams
-from threedfly.sim import FlyEnvironment
 
 
-ROOM_XY = 5.0
-BIN_M = 0.5
+def beats_pr16_walls(n_contacts: int, n_steps: int) -> bool:
+    """True if wall contacts per 100 steps beat PR #16 v5 (81 / 2000)."""
+    return walls_per_100(n_contacts, n_steps) < PR16_WALLS_PER_100
 
 
-def _coverage(traj: np.ndarray) -> float:
-    if traj.size == 0:
-        return 0.0
-    gx = np.clip(((traj[:, 0] + ROOM_XY) / BIN_M).astype(int), 0, int(2 * ROOM_XY / BIN_M) - 1)
-    gy = np.clip(((traj[:, 1] + ROOM_XY) / BIN_M).astype(int), 0, int(2 * ROOM_XY / BIN_M) - 1)
-    visited = len(set(zip(gx.tolist(), gy.tolist())))
-    total = int((2 * ROOM_XY / BIN_M) ** 2)
-    return float(visited) / float(total)
+def lateral_loom_pose(side: str) -> dict:
+    """True lateral loom: mostly +X heading, closing on the left or right wall.
 
-
-def _direction_correct(events, expected_threat: str) -> float:
-    if not events:
-        return float("nan")
-    ok = sum(1 for e in events if e.threat_side == expected_threat and not e.engineered)
-    return float(ok) / float(len(events))
+    Body frame: left = +Y when heading +X. A small yaw toward that wall makes
+    the distance decrease (classic loom) so DNp01 can rise over the EMA rest.
+    The previous scenario faced +Y (yaw=π/2) and drove into the frontal wall.
+    """
+    speed = 0.55
+    if side == "L":
+        yaw = 0.55  # ~31° toward +Y (left)
+        return {
+            "pose": (-1.2, 3.1, 1.5),
+            "yaw": yaw,
+            "vel": (speed * float(np.cos(yaw)), speed * float(np.sin(yaw)), 0.0),
+        }
+    if side == "R":
+        yaw = -0.55
+        return {
+            "pose": (-1.2, -3.1, 1.5),
+            "yaw": yaw,
+            "vel": (speed * float(np.cos(yaw)), speed * float(np.sin(yaw)), 0.0),
+        }
+    raise ValueError(f"side must be L or R, got {side!r}")
 
 
 def _run_scenario(
     name: str,
-    env: FlyEnvironment,
-    brain: ClosedLoopBrain,
+    env,
+    brain,
     ctl: DNFlightController,
     n_steps: int,
     pose=None,
     yaw: float = 0.0,
     vel=None,
-    expected_threat=None,
 ) -> dict:
     env.reset(seed=0)
     if pose is not None:
@@ -104,11 +123,14 @@ def _run_scenario(
             )
     wall_s = time.perf_counter() - t_wall
     traj = np.asarray(traj, dtype=float) if traj else np.zeros((0, 3))
-    dir_ok = _direction_correct(ctl.escape_events, expected_threat) if expected_threat else float("nan")
+    headings_arr = np.asarray(headings, dtype=float)
+    dir_ok = direction_correct_frac(headings_arr, ctl.escape_events)
+    dx, dy = xy_extent(traj)
     return {
         "name": name,
         "steps": int(n_steps),
         "wall_contacts": int(wall),
+        "walls_per_100": walls_per_100(wall, n_steps),
         "brain_escapes": int(ctl.brain_escape_count),
         "engineered_escapes": int(ctl.engineered_escape_count),
         "dnp01_latch_frac": float(ctl.dnp01_latch_frac),
@@ -117,15 +139,21 @@ def _run_scenario(
         "ms_per_step_brain": float(np.median(ms_brain)) if ms_brain else 0.0,
         "ms_per_step_flyvis": float(np.median(ms_flyvis)) if ms_flyvis else 0.0,
         "ms_per_step_brain_flyvis": float(np.median(ms_total)) if ms_total else 0.0,
-        "room_coverage": _coverage(traj),
-        "dx": float(traj[:, 0].ptp()) if traj.size else 0.0,
-        "dy": float(traj[:, 1].ptp()) if traj.size else 0.0,
+        "room_coverage": coverage(traj),
+        "dx": dx,
+        "dy": dy,
         "wall_seconds": float(wall_s),
         "trajectory": traj,
-        "headings": np.asarray(headings, dtype=float),
+        "headings": headings_arr,
         "dnp01": np.asarray(dnp01, dtype=float),
         "escape_events": [
-            {"step": e.step, "dnp01": e.dnp01, "threat_side": e.threat_side, "yaw": e.yaw, "engineered": e.engineered}
+            {
+                "step": e.step,
+                "dnp01": e.dnp01,
+                "threat_side": e.threat_side,
+                "yaw": e.yaw,
+                "engineered": e.engineered,
+            }
             for e in ctl.escape_events
         ],
     }
@@ -156,7 +184,7 @@ def _plot_trajectory(scenarios: dict, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_escapes(scenarios: dict, path: Path) -> None:
+def _plot_escapes(scenarios: dict, path: Path, delta_hz: float) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -169,7 +197,7 @@ def _plot_escapes(scenarios: dict, path: Path) -> None:
     for ax, name in zip(axes, names):
         sc = scenarios[name]
         ax.plot(sc["dnp01"], color="tab:red", lw=1.0, label="DNp01")
-        ax.axhline(12.0, color="gray", ls="--", lw=0.8, label="escape thr")
+        ax.axhline(delta_hz, color="gray", ls="--", lw=0.8, label=f"EMA Δ thr {delta_hz:.2f}")
         for ev in sc["escape_events"]:
             ax.axvline(ev["step"], color="tab:orange", alpha=0.5)
         ax.set_ylabel("Hz")
@@ -182,9 +210,13 @@ def _plot_escapes(scenarios: dict, path: Path) -> None:
 
 
 def main(argv=None) -> int:
+    from threedfly.brain.closed_loop import ClosedLoopBrain, core_stack_available
+    from threedfly.brain.constants import connectome_available, flyvis_available
+    from threedfly.sim import FlyEnvironment
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output", default=str(ROOT / "output" / "m2"))
-    p.add_argument("--steps", type=int, default=400)
+    p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--quick", action="store_true", help="Short unofficial run")
     p.add_argument("--engineered-looming-residual", action="store_true")
     args = p.parse_args(argv)
@@ -199,33 +231,44 @@ def main(argv=None) -> int:
         return 2
 
     room_steps = 80 if args.quick else int(args.steps)
-    side_steps = 40 if args.quick else max(120, args.steps // 3)
-    open_steps = 40 if args.quick else max(80, args.steps // 4)
+    side_steps = 40 if args.quick else max(160, min(400, args.steps // 5))
+    open_steps = 40 if args.quick else max(80, min(400, args.steps // 5))
     if args.quick:
         print("--quick: unofficial short movies", flush=True)
 
     params = FlightParams(use_engineered_looming_residual=args.engineered_looming_residual)
     print("Building closed-loop brain…", flush=True)
-    brain = ClosedLoopBrain.build(params=params, quick=args.quick)
+    brain = ClosedLoopBrain.build(params=params, quick=args.quick, torch_threads=1)
     env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
     ctl = DNFlightController(params)
     ctl.bind_hover(env.hover_action)
 
     print("Scenario room…", flush=True)
-    room = _run_scenario("room", env, brain, ctl, room_steps, pose=(0.0, 0.0, 1.5), yaw=0.0)
-    print("Scenario side_loom_left (approach +y wall from the left)…", flush=True)
-    # Face +Y (left of +X). Wall at y=+5 is ahead-left of a slight +X offset.
-    side = _run_scenario(
-        "side_loom_left",
+    room = _run_scenario(
+        "room",
         env,
         brain,
         ctl,
-        side_steps,
-        pose=(1.2, 3.6, 1.5),
-        yaw=np.pi / 2,
-        vel=(0.0, 0.6, 0.0),
-        expected_threat="L",
+        room_steps,
+        pose=(0.0, 0.0, 1.5),
+        yaw=0.18,
+        vel=(0.35, 0.06, 0.0),
     )
+    scenarios = {"room": room}
+    for side in ("L", "R"):
+        pose = lateral_loom_pose(side)
+        name = f"side_loom_{'left' if side == 'L' else 'right'}"
+        print(f"Scenario {name} (heading +X, {side} wall)…", flush=True)
+        scenarios[name] = _run_scenario(
+            name,
+            env,
+            brain,
+            ctl,
+            side_steps,
+            pose=pose["pose"],
+            yaw=pose["yaw"],
+            vel=pose["vel"],
+        )
     print("Scenario open_space (no false escape)…", flush=True)
     open_sc = _run_scenario(
         "open_space",
@@ -237,32 +280,43 @@ def main(argv=None) -> int:
         yaw=0.0,
         vel=(0.4, 0.0, 0.0),
     )
+    scenarios["open_space"] = open_sc
     env.close()
 
-    scenarios = {"room": room, "side_loom_left": side, "open_space": open_sc}
+    side_l = scenarios["side_loom_left"]
+    side_r = scenarios["side_loom_right"]
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     _plot_trajectory(scenarios, out / "trajectory.png")
-    _plot_escapes(scenarios, out / "escapes.png")
+    _plot_escapes(scenarios, out / "escapes.png", params.dnp01_escape_delta_hz)
 
     def _pub(sc):
-        d = {k: v for k, v in sc.items() if k not in ("trajectory", "headings", "dnp01")}
-        return d
+        return {k: v for k, v in sc.items() if k not in ("trajectory", "headings", "dnp01")}
 
+    room_w100 = walls_per_100(room["wall_contacts"], room["steps"])
     metrics = {
         "params": params.as_dict(),
         "quick": bool(args.quick),
-        "baseline_pr16_v5": {"escapes_then_latched": 1, "wall_contacts": 81},
+        "baseline_pr16_v5": {
+            "escapes_then_latched": 1,
+            "wall_contacts": PR16_WALLS,
+            "steps": PR16_STEPS,
+            "walls_per_100": PR16_WALLS_PER_100,
+        },
         "scenarios": {k: _pub(v) for k, v in scenarios.items()},
         "summary": {
             "room_wall_contacts": room["wall_contacts"],
+            "room_walls_per_100": room_w100,
             "room_brain_escapes": room["brain_escapes"],
             "room_dnp01_latch_frac": room["dnp01_latch_frac"],
-            "side_escapes": side["brain_escapes"],
-            "side_direction_correct": side["escape_direction_correct"],
+            "room_coverage": room["room_coverage"],
+            "side_L_escapes": side_l["brain_escapes"],
+            "side_R_escapes": side_r["brain_escapes"],
+            "side_L_direction_correct": side_l["escape_direction_correct"],
+            "side_R_direction_correct": side_r["escape_direction_correct"],
             "open_false_escapes": open_sc["brain_escapes"],
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
-            "beats_pr16_walls": room["wall_contacts"] < 81,
+            "beats_pr16_walls": beats_pr16_walls(room["wall_contacts"], room["steps"]),
             "no_latch": room["dnp01_latch_frac"] < 0.05,
         },
     }

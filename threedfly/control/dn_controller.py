@@ -1,13 +1,17 @@
 """Map coreTplus DN readouts to the 5-vector flight action.
 
-Escape is a DNp01 threshold event. Direction during the burst comes from
-DNp03 (contralateral turn). Steering is DNa02 + DNp15 L−R. Thrust and
-wing stroke amplitude are DNg02 mean(L, R) only — no DNg02 yaw.
+Escape is a DNp01 *rise* over an EMA rest, calibrated from M1 loom vs
+rotation statistics — not an absolute 12 Hz gate. Direction during the
+burst comes from DNp03 (contralateral turn). Steering is DNa02 + DNp15
+L−R plus continuous DNp03, each tanh-normalised to its M1 peak-delta
+scale. Thrust and wing stroke amplitude are DNg02 mean(L, R) only —
+no DNg02 yaw. Stereo looming features never overwrite the DNp03 threat
+side unless the engineered residual actually fired.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -24,7 +28,7 @@ def _tanh(x: float) -> float:
 class EscapeEvent:
     step: int
     dnp01: float
-    threat_side: str  # "L" or "R" — looming / DNp03 side
+    threat_side: str  # "L" or "R" — DNp03 side (looming residual only if it fired)
     yaw: float
     engineered: bool = False
 
@@ -39,13 +43,15 @@ class DNFlightController:
             [self.params.hover_up, self.params.hover_up], dtype=np.float64
         )
         self.escape_timer = 0
+        self.escape_cooldown = 0
         self.brain_escape_count = 0
         self.engineered_escape_count = 0
         self.dnp01_prev = 0.0
+        self.dnp01_rest: Optional[float] = None
         self.steps = 0
         self.dnp01_latch_steps = 0
         self.escape_events: List[EscapeEvent] = []
-        self._last_threat = "L"
+        self._last_threat = ""
         self._last_readout = DNReadout()
 
     def bind_hover(self, hover_action: float) -> None:
@@ -56,35 +62,55 @@ class DNFlightController:
         self.prev_action[:] = 0.0
         self.last_wing_strokes[:] = self.params.hover_up
         self.escape_timer = 0
+        self.escape_cooldown = 0
         self.brain_escape_count = 0
         self.engineered_escape_count = 0
         self.dnp01_prev = 0.0
+        self.dnp01_rest = None
         self.steps = 0
         self.dnp01_latch_steps = 0
         self.escape_events.clear()
-        self._last_threat = "L"
+        self._last_threat = ""
 
     def _dng_dev(self, ro: DNReadout) -> float:
         p = self.params
         return _tanh((float(ro.dng02_amp) - p.dng02_rest_hz) / max(p.dng02_scale_hz, 1e-6))
 
+    def _norm_lr(self, left: float, right: float, scale: float, gain: float) -> float:
+        return gain * _tanh((float(left) - float(right)) / max(float(scale), 1e-6))
+
     def _steer_yaw(self, ro: DNReadout) -> float:
         p = self.params
-        yaw = p.dna02_yaw_gain * (ro.dna02_L - ro.dna02_R)
-        yaw += p.dnp15_yaw_gain * (ro.dnp15_L - ro.dnp15_R)
-        yaw -= p.hse_yaw_damp * (ro.hse_L - ro.hse_R)
+        yaw = self._norm_lr(ro.dna02_L, ro.dna02_R, p.dna02_scale_hz, p.dna02_yaw_gain)
+        yaw += self._norm_lr(ro.dnp15_L, ro.dnp15_R, p.dnp15_scale_hz, p.dnp15_yaw_gain)
+        yaw -= self._norm_lr(ro.hse_L, ro.hse_R, p.hse_scale_hz, p.hse_yaw_damp)
+        yaw += self._dnp03_yaw(ro)
         return float(yaw)
 
     def _dnp03_yaw(self, ro: DNReadout) -> float:
         """Left DNp03 → right turn (negative yaw); right DNp03 → left turn."""
         p = self.params
-        delta = float(ro.dnp03_R - ro.dnp03_L)
-        if abs(ro.dnp03_L) < p.dnp03_active_hz and abs(ro.dnp03_R) < p.dnp03_active_hz:
-            return 0.0
-        return float(p.dnp03_yaw_gain * np.tanh(delta / 8.0))
+        left = max(0.0, float(ro.dnp03_L) - p.dnp03_deadzone_hz)
+        right = max(0.0, float(ro.dnp03_R) - p.dnp03_deadzone_hz)
+        return float(p.dnp03_yaw_gain * _tanh((right - left) / max(p.dnp03_scale_hz, 1e-6)))
 
     def _threat_side(self, ro: DNReadout) -> str:
-        return "L" if ro.dnp03_L >= ro.dnp03_R else "R"
+        if ro.dnp03_L > ro.dnp03_R + 1e-6:
+            return "L"
+        if ro.dnp03_R > ro.dnp03_L + 1e-6:
+            return "R"
+        return ""
+
+    def _update_rest(self, dnp01: float) -> float:
+        p = self.params
+        if self.dnp01_rest is None:
+            self.dnp01_rest = float(dnp01)
+            return 0.0
+        rise = float(dnp01) - float(self.dnp01_rest)
+        if self.escape_timer <= 0:
+            tau = max(float(p.dnp01_rest_tau_steps), 1.0)
+            self.dnp01_rest += (float(dnp01) - float(self.dnp01_rest)) / tau
+        return rise
 
     def compute(
         self,
@@ -99,20 +125,29 @@ class DNFlightController:
         if dnp01 >= p.rate_cap_hz - p.latch_eps_hz:
             self.dnp01_latch_steps += 1
 
-        brain_fire = dnp01 >= p.dnp01_escape_hz and self.dnp01_prev < p.dnp01_escape_hz
+        rise = self._update_rest(dnp01)
+        warmed = self.steps >= int(p.dnp01_warmup_steps)
+        brain_fire = (
+            warmed
+            and self.escape_timer <= 0
+            and self.escape_cooldown <= 0
+            and rise >= p.dnp01_escape_delta_hz
+        )
         engineered_fire = False
         if p.use_engineered_looming_residual and not brain_fire:
             loom = max(float(looming_left), float(looming_right))
             loom_z = _tanh(p.engineered_loom_gain * (loom - p.engineered_loom_threshold))
-            engineered_fire = loom_z > 0.55 and dnp01 < p.dnp01_escape_hz
+            engineered_fire = loom_z > 0.55 and warmed
 
         if brain_fire or engineered_fire:
             self.escape_timer = int(p.escape_duration_steps)
+            self.escape_cooldown = int(p.escape_duration_steps) + 4
             self._last_threat = self._threat_side(readout)
-            if float(looming_left) > float(looming_right) + 1e-6:
-                self._last_threat = "L"
-            elif float(looming_right) > float(looming_left) + 1e-6:
-                self._last_threat = "R"
+            if engineered_fire and not brain_fire:
+                if float(looming_left) > float(looming_right) + 1e-6:
+                    self._last_threat = "L"
+                elif float(looming_right) > float(looming_left) + 1e-6:
+                    self._last_threat = "R"
             ev = EscapeEvent(
                 step=self.steps,
                 dnp01=dnp01,
@@ -132,7 +167,6 @@ class DNFlightController:
         hover = float(p.hover_up)
         thrust_forward = p.forward_bias + p.dng02_forward_gain * dng
         thrust_up = hover + p.dng02_up_gain * dng
-        # Equal L/R strokes — DNg02 is amplitude, not a yaw pair.
         stroke = float(np.clip(hover + p.dng02_stroke_gain * dng, 0.0, 1.0))
         self.last_wing_strokes = np.array([stroke, stroke], dtype=np.float64)
 
@@ -143,10 +177,12 @@ class DNFlightController:
             thrust_forward = float(np.clip(thrust_forward + p.escape_forward, -1.0, 1.0))
             thrust_up = float(np.clip(thrust_up + p.escape_up, -1.0, 1.0))
             dodge = self._dnp03_yaw(readout)
-            yaw = dodge
+            yaw = yaw + p.escape_yaw_boost * dodge
             if self.escape_events:
-                self.escape_events[-1].yaw = dodge
+                self.escape_events[-1].yaw = float(yaw)
             self.escape_timer -= 1
+        if self.escape_cooldown > 0:
+            self.escape_cooldown -= 1
 
         action = np.array([thrust_forward, thrust_up, 0.0, pitch, yaw], dtype=np.float64)
         action = p.action_alpha * action + (1.0 - p.action_alpha) * self.prev_action
@@ -170,10 +206,11 @@ class DNFlightController:
             "last_forward": float(self.prev_action[0]),
             "last_up": float(self.prev_action[1]),
             "last_yaw": float(self.prev_action[4]),
-            "warmup_complete": 1.0,
+            "warmup_complete": 1.0 if self.steps >= int(self.params.dnp01_warmup_steps) else 0.0,
             "brain_escapes": float(self.brain_escape_count),
             "engineered_escapes": float(self.engineered_escape_count),
             "dnp01": float(max(ro.dnp01_L, ro.dnp01_R)),
+            "dnp01_rest": float(self.dnp01_rest or 0.0),
             "dnp03_L": float(ro.dnp03_L),
             "dnp03_R": float(ro.dnp03_R),
             "dng02_amp": float(ro.dng02_amp),

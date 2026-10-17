@@ -265,11 +265,14 @@ def run_simulation(
                 left_img, right_img, env.get_fly_angular_velocity()
             )
             brain_activity = core_step.rates
-            loom_l = float(visual_features["looming_features"][:4].mean())
-            loom_r = float(visual_features["looming_features"][4:].mean())
-            action = dn_controller.compute(
-                core_step.readout, looming_left=loom_l, looming_right=loom_r
-            )
+            if flight_params.use_engineered_looming_residual:
+                loom_l = float(visual_features["looming_features"][:4].mean())
+                loom_r = float(visual_features["looming_features"][4:].mean())
+                action = dn_controller.compute(
+                    core_step.readout, looming_left=loom_l, looming_right=loom_r
+                )
+            else:
+                action = dn_controller.compute(core_step.readout)
             brain_depth_map_upsampled = visual_features["depth_map"]
             brain_confidence_upsampled = visual_features["confidence"]
         else:

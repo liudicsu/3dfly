@@ -119,11 +119,16 @@ def annotations_aligned(body_ids: np.ndarray, ann_path: Path) -> dict[str, np.nd
         if "assignedOlHex2" in a.columns
         else np.full(len(body_ids), np.nan)
     )
+    extras: Dict[str, np.ndarray] = {}
+    for extra_col in ("superclass", "celltype", "instance", "class"):
+        if extra_col in a.columns:
+            extras[extra_col] = as_str_array(a[extra_col].astype(object).fillna("").to_numpy())
     return {
         "typ": as_str_array(a["type"].to_numpy()),
         "side": as_str_array(side),
         "subclass": as_str_array(a["subclass"].to_numpy()),
         "hex": np.stack([hex1, hex2], axis=1).astype(np.float32),
+        "extras": extras,
     }
 
 
@@ -237,6 +242,7 @@ def _save_cache(data: ConnectomeData, cdir: Path) -> None:
         subclass=data.subclass.astype(str),
         hex=data.hex,
         nt=data.nt.astype(str),
+        **{f"extra_{k}": np.asarray(v).astype(str) for k, v in (data.extras or {}).items()},
     )
     paths["info"].write_text(
         json.dumps(
@@ -269,6 +275,11 @@ def _load_cache(cdir: Path) -> Optional[ConnectomeData]:
         hex=meta["hex"].astype(np.float32),
         nt=as_str_array(meta["nt"]),
         rho_full_reference=float(info.get("rho_full_reference", RHO_FULL_SIGNED_REFERENCE)),
+        extras={
+            k[6:]: as_str_array(meta[k])
+            for k in meta.files
+            if k.startswith("extra_")
+        },
     )
 
 
@@ -286,6 +297,14 @@ def build_signed_matrix(
     if cache and not rebuild:
         cached = _load_cache(cdir)
         if cached is not None:
+            if not cached.extras:
+                ann_path = ann_feather_path(data_dir)
+                if ann_path.is_file():
+                    try:
+                        ann = annotations_aligned(cached.body_ids, ann_path)
+                        cached.extras = ann.get("extras") or {}
+                    except Exception:
+                        logger.debug("Could not attach annotation extras to cache", exc_info=True)
             logger.info("Loaded signed connectome cache (%d neurons)", cached.n)
             return cached
 
@@ -313,6 +332,7 @@ def build_signed_matrix(
         subclass=ann["subclass"],
         hex=ann["hex"],
         nt=nt_names,
+        extras=ann.get("extras") or {},
     )
     if cache:
         _save_cache(data, cdir)
