@@ -46,6 +46,10 @@ dev = [
     "isort>=5.10.0",
     "mypy>=0.950",
 ]
+brain = [
+    "torch>=2.0.0",
+    "flyvis>=1.1.0; python_version < '3.13'",
+]
 
 [project.scripts]
 threedfly = "threedfly.cli:main"
@@ -53,6 +57,9 @@ threedfly = "threedfly.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["threedfly*"]
+
+[tool.setuptools.package-data]
+"threedfly.brain.data" = ["*.txt.gz"]
 
 [tool.black]
 line-length = 100

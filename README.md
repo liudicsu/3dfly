@@ -147,6 +147,36 @@ cd 3dfly
 pip install -e ".[dev]"
 ```
 
+### Optional flyvis extra (`[brain]`, M1)
+
+`pip install -e ".[brain]"` always installs PyTorch. **flyvis** (TuragaLab) declares
+`Requires-Python: >=3.9,<3.13` on PyPI and on git `main`, so it is only pulled
+on Python 3.12 and earlier. A git URL does not lift that pin.
+
+If a **local editable flyvis** install with pretrained data is already present,
+install flyvis with `--no-deps` so pip does not replace the checkout or pull
+conflicting dependencies over the checkpoints:
+
+```bash
+pip install -e /path/to/flyvis --no-deps
+```
+
+The default box venv is Python 3.13 — the extra is installable there (torch only;
+flyvis is skipped via an environment marker). For the M1 acceptance run and any
+test that needs flyvis, use a 3.12 environment:
+
+```bash
+python3.12 -m venv .venv312
+source .venv312/bin/activate
+pip install -e ".[brain]"
+python scripts/brain_acceptance.py          # full T1–T7 (needs connectome + flyvis)
+python scripts/brain_acceptance.py --quick  # short movies, no shuffle, a few minutes
+```
+
+S2 scaling defaults to the research full-matrix radius (`0.9 / 4085.83`), the
+same denominator r3sim uses on subgraphs. `--rho-mode subgraph` rescales the
+coreTplus slice itself to ρ=0.9 (~3× stronger recurrence; HS saturates).
+
 ---
 
 ## Quick Start
