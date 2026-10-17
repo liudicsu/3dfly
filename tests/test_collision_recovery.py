@@ -35,30 +35,27 @@ def test_collision_recovery_dampens_velocity():
     # Trigger recovery
     env.recover_from_collision()
     
-    # Check that velocity was dampened
+    # Check that velocity was dampened (now gentler: 0.3 factor instead of 0.05)
     final_vel = np.linalg.norm(env.data.qvel[:3])
-    assert final_vel < initial_vel * 0.2, "Velocity should be significantly dampened"
+    assert final_vel < initial_vel * 0.4, "Velocity should be dampened"
     
     env.close()
 
 
-def test_collision_recovery_randomizes_orientation():
-    """Test that collision recovery randomizes orientation for exploration."""
+def test_collision_recovery_keeps_orientation():
+    """Test that minimal collision recovery keeps orientation (no randomization)."""
     env = FlyEnvironment(render_mode=None)
     env.reset(seed=42)
     
     initial_quat = env.data.qpos[3:7].copy()
     
-    # Trigger recovery multiple times and check orientations differ
-    orientations = [initial_quat]
-    for _ in range(5):
-        env.recover_from_collision()
-        orientations.append(env.data.qpos[3:7].copy())
+    # Trigger recovery - orientation should NOT change (minimal recovery)
+    env.recover_from_collision()
+    final_quat = env.data.qpos[3:7]
     
-    # Check that at least some orientations are different
-    diffs = [np.linalg.norm(orientations[i] - orientations[i+1]) 
-             for i in range(len(orientations)-1)]
-    assert any(d > 0.1 for d in diffs), "Orientations should vary across recoveries"
+    # Check that orientation stayed the same
+    diff = np.linalg.norm(initial_quat - final_quat)
+    assert diff < 0.01, "Minimal recovery should not randomize orientation"
     
     env.close()
 
@@ -168,8 +165,8 @@ if __name__ == "__main__":
     test_collision_recovery_dampens_velocity()
     print("✓ test_collision_recovery_dampens_velocity")
     
-    test_collision_recovery_randomizes_orientation()
-    print("✓ test_collision_recovery_randomizes_orientation")
+    test_collision_recovery_keeps_orientation()
+    print("✓ test_collision_recovery_keeps_orientation")
     
     test_collision_recovery_stays_in_bounds()
     print("✓ test_collision_recovery_stays_in_bounds")
