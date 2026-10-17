@@ -294,6 +294,16 @@ def diagnose_looming(subgraph_path, no_ei, looming):
         f"right-loom driven: {report['dnp01_right_driven']:.4g}"
     )
     click.echo("DNp01 rose above rest." if report["rose"] else "DNp01 did NOT rise above rest.")
+    click.echo(
+        f"Closed-loop tonic-then-ramp: rest={report['dnp01_closed_loop_rest']:.4g}  "
+        f"driven={report['dnp01_closed_loop_driven']:.4g}  "
+        f"late={report['dnp01_closed_loop_late_driven']:.4g}  "
+        f"crossed={int(report['dnp01_closed_loop_crossed'])}"
+    )
+    if report["dnp01_closed_loop_crossed"]:
+        click.echo("DNp01 crossed rest+margin after tonic warm-up.")
+    else:
+        click.echo("DNp01 did NOT cross rest+margin after tonic warm-up.")
 
 
 @main.command()
@@ -355,7 +365,19 @@ def diagnose_looming(subgraph_path, no_ei, looming):
     default=False,
     help="Ablation only: enable the engineered looming-residual escape trigger (default OFF).",
 )
-def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, engineered_looming_residual):
+@click.option(
+    "--looming-path-gain",
+    type=float,
+    default=None,
+    help="Engineered LPLC2/LC4→DNp01/DNp03 one-hop gain (default 2.0).",
+)
+@click.option(
+    "--looming-rest-incoming-scale",
+    type=float,
+    default=None,
+    help="Scale other excitatory incoming onto DNp01/DNp03 (default 1.0 = no attenuation).",
+)
+def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale):
     """Run 3dfly exploration simulation (static visualization)."""
     from threedfly.runner import run_simulation
     
@@ -383,6 +405,8 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
             max_collisions=max_collisions,
             enable_soft_recovery=not no_soft_recovery,
             use_engineered_looming_residual=engineered_looming_residual,
+            looming_path_gain=looming_path_gain,
+            looming_rest_incoming_scale=looming_rest_incoming_scale,
         )
         click.echo("\n✓ Simulation complete!")
     except Exception as e:
@@ -452,7 +476,19 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
     default=False,
     help="Ablation only: enable the engineered looming-residual escape trigger (default OFF).",
 )
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, engineered_looming_residual):
+@click.option(
+    "--looming-path-gain",
+    type=float,
+    default=None,
+    help="Engineered LPLC2/LC4→DNp01/DNp03 one-hop gain (default 2.0).",
+)
+@click.option(
+    "--looming-rest-incoming-scale",
+    type=float,
+    default=None,
+    help="Scale other excitatory incoming onto DNp01/DNp03 (default 1.0 = no attenuation).",
+)
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -477,6 +513,8 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
             max_collisions=max_collisions,
             enable_soft_recovery=not no_soft_recovery,
             use_engineered_looming_residual=engineered_looming_residual,
+            looming_path_gain=looming_path_gain,
+            looming_rest_incoming_scale=looming_rest_incoming_scale,
         )
     except Exception as e:
         click.echo(f"\nError running interactive simulation: {e}", err=True)

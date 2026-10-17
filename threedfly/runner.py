@@ -4,6 +4,7 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import time
+from typing import Optional
 
 from threedfly.connectome import ConnectomeLoader, BrainSimulator
 from threedfly.connectome.simulator import RateSimulator
@@ -12,6 +13,8 @@ from threedfly.connectome.neuron_selection import (
     build_transmitter_sign_vector,
 )
 from threedfly.connectome.simulator import (
+    DEFAULT_LOOMING_PATH_GAIN,
+    DEFAULT_LOOMING_REST_INCOMING_SCALE,
     calibrate_looming_to_dnp01,
     count_directed_hops,
 )
@@ -19,7 +22,7 @@ from threedfly.sim import FlyEnvironment
 from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
 from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
-from threedfly.control.controller import BiologicalFlightController
+from threedfly.control.controller import BiologicalFlightController, pack_looming_features
 from threedfly.control.exploration import heading_from_quaternion
 from threedfly.viz import Visualizer
 
@@ -36,6 +39,8 @@ def run_simulation(
     warmup_steps: int = 800,
     apply_ei_signs: bool = True,
     use_engineered_looming_residual: bool = False,
+    looming_path_gain: Optional[float] = None,
+    looming_rest_incoming_scale: Optional[float] = None,
 ):
     """
     Run complete 3dfly simulation.
@@ -145,10 +150,28 @@ def run_simulation(
             f"  LPLC2/LC4→DNp01 hops: 1-hop={hops['n_one_hop']}, "
             f"2-hop={hops['n_two_hop']} (src={hops['n_sources']}, tgt={hops['n_targets']})"
         )
-        brain.adj = calibrate_looming_to_dnp01(
-            brain.adj, loom_idx, dnp_idx, dnp03_indices=dnp03_idx
+        path_gain = (
+            DEFAULT_LOOMING_PATH_GAIN
+            if looming_path_gain is None
+            else float(looming_path_gain)
         )
-        print("  Calibrated LPLC2/LC4→DNp01/DNp03 (boost path, attenuate other excitatory rest drive)")
+        rest_scale = (
+            DEFAULT_LOOMING_REST_INCOMING_SCALE
+            if looming_rest_incoming_scale is None
+            else float(looming_rest_incoming_scale)
+        )
+        brain.adj = calibrate_looming_to_dnp01(
+            brain.adj,
+            loom_idx,
+            dnp_idx,
+            dnp03_indices=dnp03_idx,
+            one_hop_gain=path_gain,
+            rest_incoming_scale=rest_scale,
+        )
+        print(
+            f"  Engineered looming-path calibration: one_hop_gain={path_gain}, "
+            f"rest_incoming_scale={rest_scale}"
+        )
         if controller.use_engineered_looming_residual:
             print("  Engineered looming-residual escape is ON (ablation)")
         else:
@@ -187,10 +210,9 @@ def run_simulation(
                 left_luminance=visual_features["left_ommatidia"],
                 right_luminance=visual_features["right_ommatidia"],
                 optic_flow_features=optic_flow_features,
-                looming_features={
-                    "left": visual_features["looming_features"][:4].mean(),
-                    "right": visual_features["looming_features"][4:].mean(),
-                },
+                looming_features=pack_looming_features(
+                    visual_features["looming_features"]
+                ),
                 brain=brain,
                 angular_velocity=env.get_fly_angular_velocity(),
             )
@@ -249,10 +271,9 @@ def run_simulation(
                 left_luminance=left_lum,
                 right_luminance=right_lum,
                 optic_flow_features=optic_flow_features,
-                looming_features={
-                    "left": visual_features["looming_features"][:4].mean(),
-                    "right": visual_features["looming_features"][4:].mean(),
-                },
+                looming_features=pack_looming_features(
+                    visual_features["looming_features"]
+                ),
                 brain=brain,
                 angular_velocity=env.get_fly_angular_velocity(),
             )

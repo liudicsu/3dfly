@@ -4,6 +4,21 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Optional
 
+# 8 proximity sectors from StereoVision.compute_looming_features:
+# 0 forward, 1 FL, 2 L, 3 BL, 4 back, 5 BR, 6 R, 7 FR.
+LOOMING_N_SECTORS = 8
+LOOMING_LEFT_SECTORS = (0, 1, 2, 3)
+LOOMING_RIGHT_SECTORS = (0, 7, 6, 5)
+
+
+def pack_looming_features(sectors) -> Dict[str, np.ndarray]:
+    """Pack the 8-sector proximity vector for retinotopic LPLC2/LC4 encoding."""
+    s = np.atleast_1d(np.asarray(sectors, dtype=np.float32)).ravel()
+    if s.size < LOOMING_N_SECTORS:
+        s = np.pad(s, (0, LOOMING_N_SECTORS - int(s.size)))
+    s = np.asarray(s[:LOOMING_N_SECTORS], dtype=np.float32)
+    return {"left": s.copy(), "right": s.copy(), "sectors": s}
+
 
 class FlightController:
     """
@@ -174,7 +189,15 @@ class BiologicalFlightController:
         self.hover_action = 0.32
         self.input_drive = 0.8
         self.input_drive_clip = 1.5
+        # Fixed references (typical full-scale), not the instantaneous population mean.
+        self.luminance_reference = 1.0
+        self.flow_reference = 1.0
+        self.haltere_reference = 2.0
+        self.looming_reference = 1.0
         self.looming_input_gain = 2.0
+        self.looming_onset_gain = 1.0
+        self.silent_side_hz = 1.0
+        self.silent_side_rel = 0.05
         self._last_looming = 0.0
         self.brain_escape_count = 0
         self.engineered_escape_count = 0
@@ -226,6 +249,18 @@ class BiologicalFlightController:
         )
         print(f"Looming → LPLC2+LC4: L={len(self.input_mapping['looming_left'])}, "
               f"R={len(self.input_mapping['looming_right'])}")
+        self._looming_rf_left = self._seeded_rf_indices(
+            len(self.input_mapping["looming_left"]), len(LOOMING_LEFT_SECTORS), seed=42
+        )
+        self._looming_rf_right = self._seeded_rf_indices(
+            len(self.input_mapping["looming_right"]), len(LOOMING_RIGHT_SECTORS), seed=43
+        )
+        self._prev_looming_left = np.zeros(
+            len(self.input_mapping["looming_left"]), dtype=np.float32
+        )
+        self._prev_looming_right = np.zeros(
+            len(self.input_mapping["looming_right"]), dtype=np.float32
+        )
 
         # Haltere afferents: body angular velocity. Empty → engineered damping fallback.
         hex_cols = find_optic_lobe_hex_columns(annotations)
@@ -274,6 +309,85 @@ class BiologicalFlightController:
         self.alpha = 0.7
         self.last_wing_strokes = np.array([self.hover_action, self.hover_action], dtype=np.float64)
     
+    @staticmethod
+    def _seeded_rf_indices(n_cells: int, n_sectors: int, seed: int) -> np.ndarray:
+        """Seeded RF assignment: shuffle a repeating sector cycle so every sector is used."""
+        n_cells = int(n_cells)
+        n_sectors = max(int(n_sectors), 1)
+        if n_cells <= 0:
+            return np.array([], dtype=np.int32)
+        rng = np.random.RandomState(seed)
+        idx = (np.arange(n_cells, dtype=np.int32) % n_sectors)
+        rng.shuffle(idx)
+        return idx
+
+    def _encode_fixed_ref(self, indices, raw_values, reference: float, extra_gain: float = 1.0):
+        """Map a feature vector onto a population with a fixed full-scale reference."""
+        indices = np.asarray(indices, dtype=np.int32)
+        if indices.size == 0:
+            return indices, np.array([], dtype=np.float32)
+        values = np.atleast_1d(np.asarray(raw_values, dtype=np.float32)).ravel()
+        if values.size == 1:
+            values = np.full(indices.size, float(values[0]), dtype=np.float32)
+        elif values.size != indices.size:
+            assignment = self.create_fixed_input_assignment(
+                values.size, indices.size, seed=42
+            )
+            values = values[assignment].astype(np.float32)
+        ref = max(float(reference), 1e-6)
+        values = values * (self.input_drive / ref) * float(extra_gain)
+        values = np.clip(values, -self.input_drive_clip, self.input_drive_clip)
+        return indices, values.astype(np.float32)
+
+    def _local_looming(self, raw, side: str) -> np.ndarray:
+        """Per-cell looming in a side's hemifield (scalar, 4-sector, or 8-sector)."""
+        mapping = self.input_mapping.get(f"looming_{side}", np.array([], dtype=np.int32))
+        n_cells = int(mapping.size)
+        if n_cells == 0:
+            return np.array([], dtype=np.float32)
+        values = np.atleast_1d(np.asarray(raw, dtype=np.float32)).ravel()
+        rf = self._looming_rf_left if side == "left" else self._looming_rf_right
+        hemifield = np.asarray(
+            LOOMING_LEFT_SECTORS if side == "left" else LOOMING_RIGHT_SECTORS,
+            dtype=np.int32,
+        )
+        if rf.size != n_cells:
+            rf = self._seeded_rf_indices(n_cells, max(hemifield.size, 1), seed=42 if side == "left" else 43)
+        if values.size == 1:
+            return np.full(n_cells, float(values[0]), dtype=np.float32)
+        if values.size >= LOOMING_N_SECTORS:
+            local_sectors = values[:LOOMING_N_SECTORS][hemifield]
+            return np.asarray(local_sectors[rf], dtype=np.float32)
+        if values.size == hemifield.size:
+            return np.asarray(values[rf], dtype=np.float32)
+        if values.size == n_cells:
+            return values.astype(np.float32)
+        assignment = self.create_fixed_input_assignment(values.size, n_cells, seed=42)
+        return values[assignment].astype(np.float32)
+
+    def _encode_looming(self, raw, side: str) -> np.ndarray:
+        """Absolute looming rate code plus an onset kick on rising expansion."""
+        local = self._local_looming(raw, side)
+        if local.size == 0:
+            return local
+        prev = self._prev_looming_left if side == "left" else self._prev_looming_right
+        if prev.size != local.size:
+            prev = np.zeros_like(local)
+        onset = np.maximum(local - prev, 0.0)
+        level_gain = (
+            float(self.looming_input_gain)
+            * float(self.input_drive)
+            / max(float(self.looming_reference), 1e-6)
+        )
+        drive = level_gain * local + float(self.looming_onset_gain) * onset
+        drive = np.clip(drive, 0.0, self.input_drive_clip).astype(np.float32)
+        if side == "left":
+            self._prev_looming_left = local.copy()
+        else:
+            self._prev_looming_right = local.copy()
+        self._last_looming = max(self._last_looming, float(np.max(np.abs(local))))
+        return drive
+
     def set_visual_input(
         self,
         left_luminance: np.ndarray,
@@ -290,64 +404,52 @@ class BiologicalFlightController:
             left_luminance: Left eye luminance (scalar or array)
             right_luminance: Right eye luminance (scalar or array)
             optic_flow_features: Dict with keys like "t4a_left", "t5c_right"
-            looming_features: Dict with keys "left", "right"
+            looming_features: Dict with keys "left", "right" (scalar, hemifield,
+                or 8-sector vector). Encoding is absolute (not mean-normalised)
+                and retinotopic within each side's hemifield.
             brain: Brain simulator instance
         """
         pending_idx: list = []
         pending_val: list = []
 
-        def _extend(indices, raw_values, extra_gain: float = 1.0):
-            indices = np.asarray(indices, dtype=np.int32)
-            if indices.size == 0:
+        def _extend(indices, raw_values, reference: float, extra_gain: float = 1.0):
+            idx, values = self._encode_fixed_ref(indices, raw_values, reference, extra_gain)
+            if idx.size == 0:
                 return
-            values = np.atleast_1d(np.asarray(raw_values, dtype=np.float32)).ravel()
-            if values.size == 1:
-                values = np.full(indices.size, float(values[0]), dtype=np.float32)
-            elif values.size != indices.size:
-                assignment = self.create_fixed_input_assignment(
-                    values.size, indices.size, seed=42
-                )
-                values = values[assignment].astype(np.float32)
-            mean_abs = float(np.mean(np.abs(values))) + 1e-6
-            values = values * (self.input_drive / mean_abs) * float(extra_gain)
-            values = np.clip(values, -self.input_drive_clip, self.input_drive_clip)
-            pending_idx.extend(indices.tolist())
+            pending_idx.extend(idx.tolist())
             pending_val.extend(values.tolist())
 
         if self.input_mapping["luminance_left"].size > 0:
-            if np.isscalar(left_luminance):
-                lum_left_val = float(left_luminance)
-            else:
-                lum_left_val = np.asarray(left_luminance, dtype=np.float32).ravel()
-            _extend(self.input_mapping["luminance_left"], lum_left_val)
+            _extend(
+                self.input_mapping["luminance_left"],
+                left_luminance,
+                self.luminance_reference,
+            )
         if self.input_mapping["luminance_right"].size > 0:
-            if np.isscalar(right_luminance):
-                lum_right_val = float(right_luminance)
-            else:
-                lum_right_val = np.asarray(right_luminance, dtype=np.float32).ravel()
-            _extend(self.input_mapping["luminance_right"], lum_right_val)
+            _extend(
+                self.input_mapping["luminance_right"],
+                right_luminance,
+                self.luminance_reference,
+            )
 
         for key, feature_val in optic_flow_features.items():
             neurons = self.input_mapping.get(key, np.array([], dtype=np.int32))
             if neurons.size == 0:
                 continue
-            _extend(neurons, feature_val)
+            _extend(neurons, feature_val, self.flow_reference)
 
         self._last_looming = 0.0
-        loom_gain = float(self.looming_input_gain)
         if "left" in looming_features and self.input_mapping["looming_left"].size > 0:
-            raw = np.atleast_1d(looming_features["left"])[0] if np.isscalar(looming_features["left"]) else looming_features["left"].mean()
-            raw = float(raw)
-            self._last_looming = max(self._last_looming, abs(raw))
-            _extend(self.input_mapping["looming_left"], raw, extra_gain=loom_gain)
+            drive = self._encode_looming(looming_features["left"], "left")
+            pending_idx.extend(self.input_mapping["looming_left"].tolist())
+            pending_val.extend(drive.tolist())
         if "right" in looming_features and self.input_mapping["looming_right"].size > 0:
-            raw = np.atleast_1d(looming_features["right"])[0] if np.isscalar(looming_features["right"]) else looming_features["right"].mean()
-            raw = float(raw)
-            self._last_looming = max(self._last_looming, abs(raw))
-            _extend(self.input_mapping["looming_right"], raw, extra_gain=loom_gain)
+            drive = self._encode_looming(looming_features["right"], "right")
+            pending_idx.extend(self.input_mapping["looming_right"].tolist())
+            pending_val.extend(drive.tolist())
 
         if angular_velocity is not None:
-            self._extend_haltere(pending_idx, pending_val, angular_velocity, _extend)
+            self._extend_haltere(pending_idx, pending_val, angular_velocity)
 
         if pending_idx:
             brain.set_input(
@@ -355,7 +457,7 @@ class BiologicalFlightController:
                 neuron_indices=np.array(pending_idx, dtype=np.int32),
             )
 
-    def _extend_haltere(self, pending_idx, pending_val, angular_velocity, _extend) -> None:
+    def _extend_haltere(self, pending_idx, pending_val, angular_velocity) -> None:
         """Encode body-frame angular velocity onto left/right haltere afferents."""
         ang = np.atleast_1d(np.asarray(angular_velocity, dtype=np.float32)).ravel()
         if ang.size < 3:
@@ -364,34 +466,23 @@ class BiologicalFlightController:
         left = self.input_mapping.get("haltere_left", np.array([], dtype=np.int32))
         right = self.input_mapping.get("haltere_right", np.array([], dtype=np.int32))
         if left.size > 0:
-            _extend(left, np.array([wx, wy, wz], dtype=np.float32))
+            idx, values = self._encode_fixed_ref(
+                left, np.array([wx, wy, wz], dtype=np.float32), self.haltere_reference
+            )
+            pending_idx.extend(idx.tolist())
+            pending_val.extend(values.tolist())
         if right.size > 0:
-            _extend(right, np.array([wx, -wy, wz], dtype=np.float32))
+            idx, values = self._encode_fixed_ref(
+                right, np.array([wx, -wy, wz], dtype=np.float32), self.haltere_reference
+            )
+            pending_idx.extend(idx.tolist())
+            pending_val.extend(values.tolist())
 
     def set_haltere_input(self, angular_velocity: np.ndarray, brain) -> None:
         """Write angular-velocity drive onto annotated haltere neurons (test helper)."""
         pending_idx: list = []
         pending_val: list = []
-
-        def _extend(indices, raw_values):
-            indices = np.asarray(indices, dtype=np.int32)
-            if indices.size == 0:
-                return
-            values = np.atleast_1d(np.asarray(raw_values, dtype=np.float32)).ravel()
-            if values.size == 1:
-                values = np.full(indices.size, float(values[0]), dtype=np.float32)
-            elif values.size != indices.size:
-                assignment = self.create_fixed_input_assignment(
-                    values.size, indices.size, seed=42
-                )
-                values = values[assignment].astype(np.float32)
-            mean_abs = float(np.mean(np.abs(values))) + 1e-6
-            values = values * (self.input_drive / mean_abs)
-            values = np.clip(values, -self.input_drive_clip, self.input_drive_clip)
-            pending_idx.extend(indices.tolist())
-            pending_val.extend(values.tolist())
-
-        self._extend_haltere(pending_idx, pending_val, angular_velocity, _extend)
+        self._extend_haltere(pending_idx, pending_val, angular_velocity)
         if pending_idx:
             brain.set_input(
                 np.array(pending_val, dtype=np.float32),
@@ -525,38 +616,65 @@ class BiologicalFlightController:
             return 0.0
         return float(brain_activity[indices].mean())
 
-    def _normalized_readout(self, dn_type: str, brain_activity: np.ndarray) -> float:
-        indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
-        if len(indices) == 0:
-            return 0.0
-        rate = float(brain_activity[indices].mean())
+    def _side_z(self, dn_type: str, brain_activity: np.ndarray) -> float:
+        """Z-score one DN channel against its own rest/spread."""
+        rate = self._raw_rate(dn_type, brain_activity)
         if not self.warmup_complete:
             return float(np.tanh(rate))
         rest = self.resting_rates.get(dn_type, 0.0)
         scale = max(self.resting_std.get(dn_type, 0.0), 0.25 * abs(rest), 0.5)
-        return float(np.tanh((rate - rest) / scale))
+        return float((rate - rest) / scale)
+
+    def _normalized_readout(self, dn_type: str, brain_activity: np.ndarray) -> float:
+        left_key, right_key = f"{dn_type}_L", f"{dn_type}_R"
+        left_idx = self.output_mapping.get(left_key, np.array([], dtype=np.int32))
+        right_idx = self.output_mapping.get(right_key, np.array([], dtype=np.int32))
+        if len(left_idx) > 0 and len(right_idx) > 0:
+            return 0.5 * (
+                float(np.tanh(self._side_z(left_key, brain_activity)))
+                + float(np.tanh(self._side_z(right_key, brain_activity)))
+            )
+        indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
+        if len(indices) == 0:
+            return 0.0
+        return float(np.tanh(self._side_z(dn_type, brain_activity)))
+
+    def _channel_energy(self, dn_type: str, brain_activity: np.ndarray) -> float:
+        current = abs(self._raw_rate(dn_type, brain_activity))
+        rest = abs(self.resting_rates.get(dn_type, 0.0))
+        return max(current, rest)
+
+    def _side_near_silent(self, key: str, partner_key: str, brain_activity: np.ndarray) -> bool:
+        energy = self._channel_energy(key, brain_activity)
+        partner = self._channel_energy(partner_key, brain_activity)
+        return energy < self.silent_side_hz and energy < self.silent_side_rel * max(partner, 1e-9)
 
     def _channel_usable(self, dn_type: str, brain_activity: np.ndarray, eps: float = 1e-6) -> bool:
         indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
         if len(indices) == 0:
             return False
-        current = float(np.abs(brain_activity[indices]).mean())
-        rest = abs(self.resting_rates.get(dn_type, 0.0))
-        return max(current, rest) > eps
+        return self._channel_energy(dn_type, brain_activity) > eps
 
     def _pair_usable(self, left_key: str, right_key: str, brain_activity: np.ndarray) -> bool:
-        return self._channel_usable(left_key, brain_activity) and self._channel_usable(
+        if not self._channel_usable(left_key, brain_activity) or not self._channel_usable(
             right_key, brain_activity
-        )
+        ):
+            return False
+        if self._side_near_silent(left_key, right_key, brain_activity) or self._side_near_silent(
+            right_key, left_key, brain_activity
+        ):
+            return False
+        return True
 
     def _pair_yaw(self, left_key: str, right_key: str, brain_activity: np.ndarray) -> float:
-        """Zero-mean L−R of a bilateral pair; 0 if either side is silent."""
+        """Zero-mean L−R of per-side z-scores; 0 if either side is near-silent."""
         if not self._pair_usable(left_key, right_key, brain_activity):
             return 0.0
-        diff = self._raw_rate(left_key, brain_activity) - self._raw_rate(right_key, brain_activity)
-        rest = self.resting_pair_mean.get((left_key, right_key), 0.0)
-        scale = self.resting_pair_scale.get((left_key, right_key), 0.5)
-        return float(np.tanh((diff - rest) / max(scale, 0.5)))
+        return float(
+            np.tanh(
+                self._side_z(left_key, brain_activity) - self._side_z(right_key, brain_activity)
+            )
+        )
     
     def compute_action(
         self,

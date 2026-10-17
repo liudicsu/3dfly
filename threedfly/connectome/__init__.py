@@ -4,6 +4,8 @@ from threedfly.connectome.loader import ConnectomeLoader
 from threedfly.connectome.simulator import (
     BrainSimulator,
     RateSimulator,
+    DEFAULT_LOOMING_PATH_GAIN,
+    DEFAULT_LOOMING_REST_INCOMING_SCALE,
     amplify_incoming_to_targets,
     attenuate_nonpath_incoming,
     calibrate_looming_to_dnp01,
@@ -29,6 +31,8 @@ __all__ = [
     "ConnectomeLoader",
     "BrainSimulator",
     "RateSimulator",
+    "DEFAULT_LOOMING_PATH_GAIN",
+    "DEFAULT_LOOMING_REST_INCOMING_SCALE",
     "amplify_incoming_to_targets",
     "attenuate_nonpath_incoming",
     "calibrate_looming_to_dnp01",

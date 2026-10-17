@@ -44,19 +44,19 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - MuJoCo near plane sized for the 2.5 cm fly (plus a body-fixed `fly_closeup` camera); Viser god-view, optional follow-fly close-up, dashboard, brain cloud, and StereoBM are unchanged
 - Stroke-averaged quasi-steady wing force (visual 200 Hz flap only; not a blade-element 200 Hz sim)
 - 20 ms control ticks: each `env.step` runs 10 MuJoCo substeps (2 ms) so 1000 steps = 20 s of flight, aligned with the brain
-- Per-population visual-input normalisation, extra LPLC2/LC4 input gain, and rate ceiling 50 Hz so DN readouts are not pinned
-- Warm-up giant-fiber calibration: per-neuron thresholds drop DNp01/DNp03 rest; LPLC2/LC4→DNp01/DNp03 weights are boosted while other excitatory incoming is attenuated
+- Fixed-reference visual encoding (not the instantaneous population mean): R1–R6 / T4/T5 / halteres scale by a typical full-scale; looming is an **absolute** rate code (`gain * looming`, 0 when nothing is looming), retinotopic per LPLC2/LC4 cell in its hemifield, plus an expansion-onset kick. Rate ceiling 50 Hz so DN readouts are not pinned
+- Engineered looming-path calibration (configurable): LPLC2/LC4→DNp01/DNp03 one-hop gain **2.0**; other excitatory incoming onto those cells is **not** attenuated (`rest_incoming_scale=1.0`). Per-neuron thresholds still drop DNp01/DNp03 rest after warm-up
 - DN → motor readout:
   - DNp01 → escape (threshold over rest: short brake + turn away from the side with stronger LPLC2/LC4 or DNp03 L/R activity — not the raw looming vector)
   - DNp03 L/R → looming-evoked evasive yaw (counts logged)
   - DNg02 L/R → left/right wing stroke amplitude (lift around hover; L−R yaw/roll)
-  - DNa02 / DNg02 L−R → yaw (bilateral, zero-mean at rest; silent side drops the pair)
+  - DNa02 / DNg02 L−R → yaw (each side z-scored on its own rest/spread; a near-silent side drops the pair; DNg02 pooled readout averages the two sides so a hot/quiet mix does not pin)
   - DNb → roll
 - Engineered looming-residual escape trigger is **off by default** (bypasses the connectome; ablation only via `--engineered-looming-residual`)
 - Warm-up rest stats are median/MAD; convergence is a moving-window median vs spread
 - Exploration biases left/right visual input only; it does not override the DN action
 - Safety limits (minimal collision recovery as last resort; fly-vs-environment contacts; room bounds ±5 m, never an inner ±1.9 teleport)
-- Diagnostic: `threedfly diagnose-looming data/full_connectome.npz` injects synthetic looming into LPLC2/LC4 and prints DNp01/DNp03 rest, driven rate, latency, and L/R selectivity
+- Diagnostic: `threedfly diagnose-looming data/full_connectome.npz` injects synthetic looming into LPLC2/LC4 and prints DNp01/DNp03 rest, driven rate, latency, L/R selectivity, and a closed-loop tonic-then-ramp check (does DNp01 still cross rest+margin after warm-up, not just from silence)
 - Runner log: `DNp01 escapes: brain-triggered=..., engineered-residual=...` (residual is 0 by default)
 
 **Scientific honesty:**
@@ -811,19 +811,19 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
 - MuJoCo 近裁剪面按 2.5 cm 果蝇设置（另有随体 `fly_closeup` 相机）；Viser 上帝视角、可选跟随特写、仪表盘、脑点云与 StereoBM 保持不变
 - 拍幅平均的准定常翅膀力（视觉上 200 Hz 拍动；不是 200 Hz 叶片元仿真）
 - 20 ms 控制节拍：每步 10 个 2 ms 物理子步，1000 步 = 20 s 飞行，与脑时间对齐
-- 按群体归一化视觉输入、提高 LPLC2/LC4 输入增益、发放上限 50 Hz，避免 DN 读出顶死在上限
-- 预热巨纤维校准：按神经元阈值压低 DNp01/DNp03 静息；加强 LPLC2/LC4→DNp01/DNp03，衰减其它兴奋性输入
+- 固定参考视觉编码（不用瞬时群体均值）：R1–R6 / T4/T5 / 平衡棒按典型满幅缩放；逼近是**绝对**速率码（`gain * looming`，无逼近时为 0），LPLC2/LC4 在各自半视野内视网膜拓扑，并加扩张 onset。发放上限 50 Hz，避免 DN 读出顶死
+- 工程化逼近通路校准（可配置）：LPLC2/LC4→DNp01/DNp03 单跳增益 **2.0**；其它兴奋性输入**不**衰减（`rest_incoming_scale=1.0`）。预热后仍按神经元阈值压低 DNp01/DNp03 静息
 - DN → 运动读取：
   - DNp01 → 逃逸（相对静息的阈值：短刹车 + 转向逼近更强的一侧；侧向来自 LPLC2/LC4 或 DNp03 左右活动，而非原始逼近向量）
   - DNp03 左/右 → 逼近诱发的逃逸偏航（单独计数）
   - DNg02 左/右 → 左右翅膀拍幅（悬停附近升力；左右差产生偏航/滚转）
-  - DNa02 / DNg02 左右差 → 偏航（双侧、静息零均值；一侧静默则丢弃该对）
+  - DNa02 / DNg02 左右差 → 偏航（每侧按自身静息/散布 z-score；近静默一侧丢弃该对；DNg02 群体读出对两侧取平均，避免一侧很热一侧很静时顶死）
   - DNb → 滚转
 - 工程化逼近残差逃逸默认**关闭**（绕过连接组；仅消融用 `--engineered-looming-residual`）
 - 预热用中位数/MAD；收敛看滑动窗口中位数相对散布
 - 探索策略只偏置左右视觉输入，不覆盖 DN 动作
 - 安全限制（最小化碰撞恢复作为最后手段；按果蝇 body 识别接触；房间边界 ±5 m，不做 ±1.9 内框传送）
-- 诊断：`threedfly diagnose-looming data/full_connectome.npz` 向 LPLC2/LC4 注入合成逼近并打印 DNp01/DNp03 的静息、驱动发放、潜伏期与左右选择性
+- 诊断：`threedfly diagnose-looming data/full_connectome.npz` 向 LPLC2/LC4 注入合成逼近并打印 DNp01/DNp03 的静息、驱动发放、潜伏期、左右选择性，以及 tonic-then-ramp 闭环检查（预热后 DNp01 是否仍越过 rest+margin，而不只是从静默 onset）
 - 运行日志：`DNp01 escapes: brain-triggered=..., engineered-residual=...`（默认残差为 0）
 
 **科学诚实性：**

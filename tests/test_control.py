@@ -402,7 +402,7 @@ def test_warmup_converges_when_median_stable():
 
 
 def test_visual_input_is_population_normalized():
-    """Injected current per population must stay well below the rate ceiling."""
+    """Fixed-reference encoding: still clipped, zeros stay zero, 0.1 vs 0.8 differ."""
     from threedfly.connectome.simulator import RateSimulator
     from threedfly.control.controller import BiologicalFlightController
     from scipy import sparse
@@ -426,6 +426,36 @@ def test_visual_input_is_population_normalized():
     driven = brain.external_input[brain.external_input != 0]
     assert driven.size > 0
     assert float(np.max(np.abs(driven))) <= 2.0
+
+    r1 = controller.input_mapping["luminance_left"]
+    controller.set_visual_input(
+        left_luminance=0.0,
+        right_luminance=0.0,
+        optic_flow_features={"t4a_left": np.array([0.0])},
+        looming_features={"left": 0.0, "right": 0.0},
+        brain=brain,
+    )
+    assert float(np.max(np.abs(brain.external_input[r1]))) < 1e-6
+
+    controller.set_visual_input(
+        left_luminance=0.1,
+        right_luminance=0.0,
+        optic_flow_features={},
+        looming_features={"left": 0.0, "right": 0.0},
+        brain=brain,
+    )
+    weak = float(np.max(np.abs(brain.external_input[r1])))
+    controller.set_visual_input(
+        left_luminance=0.8,
+        right_luminance=0.0,
+        optic_flow_features={},
+        looming_features={"left": 0.0, "right": 0.0},
+        brain=brain,
+    )
+    strong = float(np.max(np.abs(brain.external_input[r1])))
+    assert strong > weak * 3.0, (
+        f"Fixed-ref luminance should scale (0.1→{weak:.3f} vs 0.8→{strong:.3f})"
+    )
 
 
 def test_brain_triggered_escape_is_counted_separately():

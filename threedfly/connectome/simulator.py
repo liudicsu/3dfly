@@ -301,20 +301,27 @@ def _boost_one_hop_path(
                 )
 
 
+DEFAULT_LOOMING_PATH_GAIN = 2.0
+DEFAULT_LOOMING_REST_INCOMING_SCALE = 1.0
+
+
 def calibrate_looming_to_dnp01(
     adjacency: sparse.csr_matrix,
     looming_indices: np.ndarray,
     dnp01_indices: np.ndarray,
-    one_hop_gain: float = 3.0,
+    one_hop_gain: float = DEFAULT_LOOMING_PATH_GAIN,
     incoming_gain: float = 1.0,
     assist_weight: float = 1.0,
-    rest_incoming_scale: float = 0.25,
+    rest_incoming_scale: float = DEFAULT_LOOMING_REST_INCOMING_SCALE,
     dnp03_indices: Optional[np.ndarray] = None,
 ) -> sparse.csr_matrix:
-    """Boost LPLC2/LC4 → DNp01 (and DNp03); cut other excitatory drive so rest stays low.
+    """Engineered LPLC2/LC4 → DNp01/DNp03 path gain; other incoming is unchanged by default.
 
+    ``one_hop_gain`` defaults to 2 (boost the looming path at most 2×).
+    ``rest_incoming_scale`` defaults to 1 (do not attenuate other excitatory inputs).
     ``incoming_gain`` defaults to 1 (do not amplify all incoming — that pinned DNp01
-    at the rate ceiling). Pass ``incoming_gain>1`` only for ablation.
+    at the rate ceiling). Pass ``incoming_gain>1`` or ``rest_incoming_scale<1`` only
+    for ablation.
     """
     csr = adjacency.tocsr()
     adj = adjacency.tolil(copy=True)
@@ -370,8 +377,17 @@ def diagnose_looming_to_dnp01(
     dnp03_indices: Optional[np.ndarray] = None,
     looming_left: Optional[np.ndarray] = None,
     looming_right: Optional[np.ndarray] = None,
+    n_baseline: int = 40,
+    baseline_current: float = 0.05,
+    closed_loop_margin: float = 0.05,
 ) -> Dict[str, float]:
-    """Inject current into LPLC2/LC4 and report DNp01/DNp03 rest, drive, latency, L/R selectivity."""
+    """Inject current into LPLC2/LC4 and report DNp01/DNp03 rest, drive, latency, L/R selectivity.
+
+    Also runs a closed-loop-like protocol: tonic ``baseline_current`` for
+    ``n_baseline`` steps, then a ramp to ``looming_current``. Reports whether
+    late DNp01 still crosses rest+margin after that warm-up (not just onset
+    from silence).
+    """
     hops = count_directed_hops(adjacency, looming_indices, dnp01_indices)
     dnp03 = np.asarray(
         dnp03_indices if dnp03_indices is not None else [], dtype=np.int32
@@ -446,6 +462,45 @@ def diagnose_looming_to_dnp01(
         "looming_driven": float(np.max(loom_hist)) if loom_hist else 0.0,
         "rose": float(driven > rest + 0.05),
     }
+
+    # Closed-loop-like: hold tonic baseline, then ramp. Score late rates, not the
+    # onset spike from silence (which looks healthy even when the path adapts away).
+    sim.reset()
+    n_base = max(int(n_baseline), 1)
+    baseline_hist = []
+    for _ in range(n_base):
+        if loom.size:
+            sim.set_input(
+                np.full(loom.size, float(baseline_current), dtype=np.float32),
+                neuron_indices=loom,
+            )
+        rates = sim.step()
+        baseline_hist.append(_mean_rate(rates, dnp))
+    tail_b = max(3, n_base // 3)
+    cl_rest = float(np.median(baseline_hist[-tail_b:])) if baseline_hist else 0.0
+
+    ramp_hist = []
+    n_ramp = max(int(n_drive), 1)
+    for i in range(n_ramp):
+        frac = float(i + 1) / float(n_ramp)
+        cur = float(baseline_current) + frac * (
+            float(looming_current) - float(baseline_current)
+        )
+        if loom.size:
+            sim.set_input(
+                np.full(loom.size, cur, dtype=np.float32), neuron_indices=loom
+            )
+        rates = sim.step()
+        ramp_hist.append(_mean_rate(rates, dnp))
+    tail_d = max(3, n_ramp // 3)
+    cl_driven = float(np.max(ramp_hist)) if ramp_hist else 0.0
+    cl_late = float(np.median(ramp_hist[-tail_d:])) if ramp_hist else 0.0
+    report["dnp01_closed_loop_rest"] = cl_rest
+    report["dnp01_closed_loop_driven"] = cl_driven
+    report["dnp01_closed_loop_late_driven"] = cl_late
+    report["dnp01_closed_loop_crossed"] = float(
+        cl_late > cl_rest + float(closed_loop_margin)
+    )
     return report
 
 

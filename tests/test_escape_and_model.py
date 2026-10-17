@@ -182,6 +182,239 @@ def test_left_looming_turns_right_and_vice_versa():
     assert mean_left * mean_right < 0
 
 
+def _loom_drive(controller, brain, left, right):
+    controller.set_visual_input(
+        left_luminance=0.0,
+        right_luminance=0.0,
+        optic_flow_features={},
+        looming_features={"left": left, "right": right},
+        brain=brain,
+    )
+
+
+def test_looming_encoding_is_absolute_not_mean_normalized():
+    """Looming is an absolute rate code: 0 stays 0; 0.1 vs 0.8 must not collapse to the same drive."""
+    from threedfly.connectome.simulator import RateSimulator
+
+    n, controller = _bio_controller(warmup_steps=3)
+    brain = RateSimulator(sparse.csr_matrix((n, n), dtype=np.float32), dt=0.010, max_rate=50.0)
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+
+    _loom_drive(controller, brain, 0.0, 0.0)
+    assert float(np.max(np.abs(brain.external_input[loom]))) < 1e-6
+
+    _loom_drive(controller, brain, 0.1, 0.1)
+    weak = brain.external_input[loom].copy()
+    _loom_drive(controller, brain, 0.8, 0.8)
+    strong = brain.external_input[loom].copy()
+    assert float(np.max(np.abs(weak))) <= 2.0
+    assert float(np.max(np.abs(strong))) <= 2.0
+    assert not np.allclose(weak, strong, atol=1e-3)
+    assert float(np.max(np.abs(strong))) > float(np.max(np.abs(weak))) * 3.0
+
+
+def test_looming_encoding_is_retinotopic_across_sectors():
+    """Each LPLC2/LC4 cell has a seeded RF in its hemifield; local sectors drive different cells."""
+    from threedfly.connectome.simulator import RateSimulator
+
+    n, controller = _bio_controller(warmup_steps=3)
+    brain = RateSimulator(sparse.csr_matrix((n, n), dtype=np.float32), dt=0.010, max_rate=50.0)
+    left_idx = controller.input_mapping["looming_left"]
+    right_idx = controller.input_mapping["looming_right"]
+
+    left_sector = np.zeros(8, dtype=np.float32)
+    left_sector[1] = 0.8  # forward-left
+    right_sector = np.zeros(8, dtype=np.float32)
+    right_sector[6] = 0.8  # right
+
+    _loom_drive(controller, brain, left_sector, np.zeros(8))
+    assert float(brain.external_input[left_idx].max()) > float(brain.external_input[right_idx].max()) + 0.05
+
+    _loom_drive(controller, brain, np.zeros(8), right_sector)
+    assert float(brain.external_input[right_idx].max()) > float(brain.external_input[left_idx].max()) + 0.05
+
+    mixed = np.array([0.1, 0.8, 0.0, 0.4, 0.05, 0.2, 0.9, 0.3], dtype=np.float32)
+    _loom_drive(controller, brain, mixed, mixed)
+    assert float(np.std(brain.external_input[left_idx])) > 0.01
+    assert float(np.std(brain.external_input[right_idx])) > 0.01
+
+
+def test_looming_onset_boosts_rising_expansion():
+    """Rising looming adds an onset kick; holding the same level does not."""
+    from threedfly.connectome.simulator import RateSimulator
+
+    n, controller = _bio_controller(warmup_steps=3)
+    brain = RateSimulator(sparse.csr_matrix((n, n), dtype=np.float32), dt=0.010, max_rate=50.0)
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+    for _ in range(4):
+        _loom_drive(controller, brain, 0.2, 0.2)
+    tonic = float(np.mean(np.abs(brain.external_input[loom])))
+    _loom_drive(controller, brain, 0.9, 0.9)
+    onset = float(np.mean(np.abs(brain.external_input[loom])))
+    _loom_drive(controller, brain, 0.9, 0.9)
+    held = float(np.mean(np.abs(brain.external_input[loom])))
+    assert onset > tonic + 0.05
+    assert held < onset - 1e-4
+
+
+def test_tonic_cruise_then_ramp_still_raises_dnp01():
+    """Closed-loop-like: tonic cruise input must not collapse the giant-fiber path; a ramp still raises DNp01."""
+    from threedfly.connectome.simulator import RateSimulator, calibrate_looming_to_dnp01
+
+    n, controller = _bio_controller(warmup_steps=6)
+    adj, loom, dnp = _looming_connectome(controller, n)
+    adj = calibrate_looming_to_dnp01(adj, loom, dnp)
+    brain = RateSimulator(adj, dt=0.010, syn_weight_scale=0.1, max_rate=50.0)
+
+    tonic_hist = []
+    tonic_in = []
+    for _ in range(80):
+        _loom_drive(controller, brain, 0.05, 0.05)
+        tonic_in.append(float(np.max(np.abs(brain.external_input[loom]))))
+        rates = brain.step()
+        controller.record_resting_rates(rates)
+        tonic_hist.append(float(rates[dnp].mean()))
+    controller.finalize_warmup()
+    tonic = float(np.mean(tonic_hist[-8:]))
+    tonic_drive = float(np.mean(tonic_in[-8:]))
+
+    driven = []
+    ramp_in = []
+    for _ in range(25):
+        _loom_drive(controller, brain, 0.8, 0.8)
+        ramp_in.append(float(np.max(np.abs(brain.external_input[loom]))))
+        rates = brain.step()
+        driven.append(float(rates[dnp].mean()))
+    late = float(np.mean(driven[-8:]))
+    ramp_drive = float(np.mean(ramp_in[-8:]))
+    assert ramp_drive > tonic_drive * 3.0, (
+        f"Cruise looming must not be mean-normalised to the same drive as a ramp "
+        f"(tonic_in={tonic_drive:.3f} ramp_in={ramp_drive:.3f})"
+    )
+    assert late > tonic + 0.15, (
+        f"DNp01 did not rise after tonic warmup (tonic={tonic:.4f} late={late:.4f})"
+    )
+
+
+def test_haltere_and_flow_use_fixed_reference_not_mean():
+    """Halteres and T4/T5 scale by a fixed reference so zeros stay zero and strength is preserved."""
+    from threedfly.connectome.simulator import RateSimulator
+
+    n, controller = _bio_controller(warmup_steps=3)
+    brain = RateSimulator(sparse.csr_matrix((n, n), dtype=np.float32), dt=0.010, max_rate=50.0)
+    t4 = controller.input_mapping["t4a_left"]
+
+    controller.set_visual_input(
+        left_luminance=0.0,
+        right_luminance=0.0,
+        optic_flow_features={"t4a_left": np.array([0.0])},
+        looming_features={"left": 0.0, "right": 0.0},
+        brain=brain,
+        angular_velocity=np.array([0.0, 0.0, 0.0]),
+    )
+    assert float(np.max(np.abs(brain.external_input[t4]))) < 1e-6
+
+    controller.set_visual_input(
+        left_luminance=0.0,
+        right_luminance=0.0,
+        optic_flow_features={"t4a_left": np.array([0.1])},
+        looming_features={"left": 0.0, "right": 0.0},
+        brain=brain,
+    )
+    weak = float(np.max(np.abs(brain.external_input[t4])))
+    controller.set_visual_input(
+        left_luminance=0.0,
+        right_luminance=0.0,
+        optic_flow_features={"t4a_left": np.array([0.8])},
+        looming_features={"left": 0.0, "right": 0.0},
+        brain=brain,
+    )
+    strong = float(np.max(np.abs(brain.external_input[t4])))
+    assert strong > weak * 3.0, f"T4/T5 should scale with a fixed ref (0.1→{weak:.3f} vs 0.8→{strong:.3f})"
+
+    if controller.input_mapping["haltere_left"].size == 0:
+        return
+    controller.set_haltere_input(np.array([0.0, 0.0, 0.4]), brain)
+    h_weak = float(np.max(np.abs(brain.external_input[controller.input_mapping["haltere_left"]])))
+    controller.set_haltere_input(np.array([0.0, 0.0, 2.0]), brain)
+    h_strong = float(np.max(np.abs(brain.external_input[controller.input_mapping["haltere_left"]])))
+    assert h_weak < h_strong
+    assert h_strong <= 2.0
+
+
+def test_yaw_drops_near_silent_dna02_side():
+    """A near-silent DNa02 side (0.26 Hz vs 33.5 Hz) must not drive a one-sided yaw."""
+    n, controller = _bio_controller(warmup_steps=12)
+    rest = np.full(n, 1.0)
+    rest[controller.output_mapping["DNa02_L"]] = 33.5
+    rest[controller.output_mapping["DNa02_R"]] = 0.26
+    rest[controller.output_mapping["DNg02_L"]] = 1.0
+    rest[controller.output_mapping["DNg02_R"]] = 1.0
+    for _ in range(8):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    controller.prev_action[:] = 0.0
+    controller.alpha = 1.0
+    driven = rest.copy()
+    driven[controller.output_mapping["DNa02_L"]] = 50.0
+    yaw = float(controller.compute_action(driven)[4])
+    assert abs(yaw) < 0.08, f"Near-silent DNa02_R leaked into yaw: {yaw:.3f}"
+
+
+def test_dng02_readout_averages_per_side_zscores():
+    """Pooled DNg02 must not saturate from mixing a hot side with a quiet side."""
+    n, controller = _bio_controller(warmup_steps=12)
+    rest = np.full(n, 1.0)
+    rest[controller.output_mapping["DNg02_L"]] = 10.0
+    rest[controller.output_mapping["DNg02_R"]] = 0.5
+    for _ in range(8):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    at_rest = float(controller._normalized_readout("DNg02", rest))
+    assert abs(at_rest) < 0.2, f"DNg02 rest readout should be ~0, got {at_rest:.3f}"
+    spiked = rest.copy()
+    spiked[controller.output_mapping["DNg02_L"]] = 50.0
+    z = float(controller._normalized_readout("DNg02", spiked))
+    assert abs(z) < 0.85, f"One-sided DNg02 spike should not pin the pooled readout, got {z:.3f}"
+
+
+def test_looming_path_calibration_defaults_are_minimal():
+    """After absolute encoding, boost ≤ 2× and do not attenuate other incoming onto DNp01."""
+    from threedfly.connectome.simulator import (
+        DEFAULT_LOOMING_PATH_GAIN,
+        DEFAULT_LOOMING_REST_INCOMING_SCALE,
+        calibrate_looming_to_dnp01,
+    )
+
+    assert DEFAULT_LOOMING_PATH_GAIN <= 2.0 + 1e-9
+    assert DEFAULT_LOOMING_REST_INCOMING_SCALE == pytest.approx(1.0)
+
+    n, controller = _bio_controller(warmup_steps=2)
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+    dnp = controller.output_mapping["DNp01"]
+    other = int(controller.output_mapping["DNb"][0])
+    adj = sparse.csr_matrix((n, n), dtype=np.float32).tolil()
+    for pre in loom:
+        for post in dnp:
+            adj[int(pre), int(post)] = 2.0
+    for post in dnp:
+        adj[other, int(post)] = 4.0
+    out = calibrate_looming_to_dnp01(adj.tocsr(), loom, dnp)
+    assert float(out[int(loom[0]), int(dnp[0])]) == pytest.approx(
+        2.0 * DEFAULT_LOOMING_PATH_GAIN
+    )
+    assert float(out[other, int(dnp[0])]) == pytest.approx(4.0)
+
+
 def test_diagnose_looming_reports_dnp01_dnp03_latency_and_selectivity():
     """diagnose-looming reports rest/driven/latency and L/R selectivity for DNp01 and DNp03."""
     from threedfly.connectome.simulator import diagnose_looming_to_dnp01
@@ -217,6 +450,34 @@ def test_diagnose_looming_reports_dnp01_dnp03_latency_and_selectivity():
         assert key in report, f"missing diagnostic key {key}"
     assert report["dnp01_driven"] > report["dnp01_rest"] + 0.05
     assert np.isfinite(report["dnp01_latency_steps"])
+
+
+def test_diagnose_looming_closed_loop_tonic_then_ramp():
+    """diagnose-looming must report whether DNp01 still crosses rest+margin after tonic warmup."""
+    from threedfly.connectome.simulator import diagnose_looming_to_dnp01
+
+    n, controller = _bio_controller(warmup_steps=3)
+    adj, loom, dnp = _looming_connectome(controller, n, weight=2.0)
+    report = diagnose_looming_to_dnp01(
+        adjacency=adj,
+        looming_indices=loom,
+        dnp01_indices=dnp,
+        dnp03_indices=controller.output_mapping["DNp03"],
+        n_rest=6,
+        n_drive=16,
+        n_baseline=20,
+        baseline_current=0.05,
+        looming_current=1.0,
+    )
+    for key in (
+        "dnp01_closed_loop_rest",
+        "dnp01_closed_loop_driven",
+        "dnp01_closed_loop_late_driven",
+        "dnp01_closed_loop_crossed",
+    ):
+        assert key in report, f"missing diagnostic key {key}"
+    assert report["dnp01_closed_loop_late_driven"] > report["dnp01_closed_loop_rest"] + 0.05
+    assert float(report["dnp01_closed_loop_crossed"]) >= 1.0
 
 
 def test_dnp03_selected_when_annotated():
