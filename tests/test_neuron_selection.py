@@ -216,5 +216,118 @@ def test_get_neuron_transmitters():
     assert transmitters[8] == "acetylcholine"
 
 
+def test_create_fixed_input_assignment():
+    """Test fixed seeded assignment of features to neuron population."""
+    from threedfly.connectome.neuron_selection import create_fixed_input_assignment
+    
+    # 100 neurons, 10 features
+    assignment = create_fixed_input_assignment(100, 10, seed=42)
+    
+    assert len(assignment) == 10
+    assert assignment.max() < 100
+    assert assignment.min() >= 0
+    
+    # Should be deterministic
+    assignment2 = create_fixed_input_assignment(100, 10, seed=42)
+    assert np.array_equal(assignment, assignment2)
+    
+    # Different seed should give different assignment
+    assignment3 = create_fixed_input_assignment(100, 10, seed=99)
+    assert not np.array_equal(assignment, assignment3)
+
+
+def test_select_input_neurons_for_luminance():
+    """Test R1-R6 selection by side."""
+    from threedfly.connectome.neuron_selection import select_input_neurons_for_luminance
+    
+    # Create annotations with somaSide and rootSide
+    annotations = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4, 5, 6, 7, 8],
+        "type": ["R1", "R2", "R3", "R4", "R5", "R6", "R1", "R2"],
+        "celltype": ["R1", "R2", "R3", "R4", "R5", "R6", "R1", "R2"],
+        "somaSide": ["L", "L", "R", "R", "?", "?", "?", "?"],
+        "rootSide": ["L", "L", "R", "R", "L", "R", "L", "R"],
+    })
+    
+    body_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8])
+    body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
+    
+    # Select left side
+    left_indices = select_input_neurons_for_luminance(
+        annotations, body_ids, body_id_to_idx, side="L"
+    )
+    
+    # Should find: 1, 2 (somaSide=L), 5, 7 (rootSide=L when somaSide=?)
+    assert len(left_indices) == 4
+    assert set(left_indices) == {0, 1, 4, 6}
+    
+    # Select right side
+    right_indices = select_input_neurons_for_luminance(
+        annotations, body_ids, body_id_to_idx, side="R"
+    )
+    
+    # Should find: 3, 4 (somaSide=R), 6, 8 (rootSide=R when somaSide=?)
+    assert len(right_indices) == 4
+    assert set(right_indices) == {2, 3, 5, 7}
+
+
+def test_select_input_neurons_for_optic_flow():
+    """Test T4/T5 selection by subtype and side."""
+    from threedfly.connectome.neuron_selection import select_input_neurons_for_optic_flow
+    
+    annotations = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4, 5, 6],
+        "type": ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b"],
+        "celltype": ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b"],
+        "somaSide": ["L", "L", "R", "R", "L", "R"],
+    })
+    
+    body_ids = np.array([1, 2, 3, 4, 5, 6])
+    body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
+    
+    # Select T4a left
+    indices = select_input_neurons_for_optic_flow(
+        annotations, body_ids, body_id_to_idx, subtype="a", side="L"
+    )
+    assert len(indices) >= 1
+    assert 0 in indices  # T4a, somaSide=L
+    
+    # Select T5b right
+    indices = select_input_neurons_for_optic_flow(
+        annotations, body_ids, body_id_to_idx, subtype="b", side="R"
+    )
+    assert len(indices) >= 1
+    assert 5 in indices  # T5b, somaSide=R
+
+
+def test_select_input_neurons_for_looming():
+    """Test LPLC2 + LC4 selection by side."""
+    from threedfly.connectome.neuron_selection import select_input_neurons_for_looming
+    
+    annotations = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4, 5],
+        "type": ["LPLC2", "LPLC2", "LC4", "LC4", "other"],
+        "celltype": ["LPLC2", "LPLC2", "LC4", "LC4", "other"],
+        "somaSide": ["L", "R", "L", "R", "L"],
+    })
+    
+    body_ids = np.array([1, 2, 3, 4, 5])
+    body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
+    
+    # Select left
+    left_indices = select_input_neurons_for_looming(
+        annotations, body_ids, body_id_to_idx, side="L"
+    )
+    assert len(left_indices) == 2  # LPLC2 + LC4 on left
+    assert set(left_indices) == {0, 2}
+    
+    # Select right
+    right_indices = select_input_neurons_for_looming(
+        annotations, body_ids, body_id_to_idx, side="R"
+    )
+    assert len(right_indices) == 2  # LPLC2 + LC4 on right
+    assert set(right_indices) == {1, 3}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
