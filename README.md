@@ -44,8 +44,8 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - MuJoCo near plane sized for the 2.5 cm fly (plus a body-fixed `fly_closeup` camera); Viser god-view, optional follow-fly close-up, dashboard, brain cloud, and StereoBM are unchanged
 - Stroke-averaged quasi-steady wing force (visual 200 Hz flap only; not a blade-element 200 Hz sim)
 - 20 ms control ticks: each `env.step` runs 10 MuJoCo substeps (2 ms) so 1000 steps = 20 s of flight, aligned with the brain
-- Fixed-reference visual encoding (not the instantaneous population mean): R1–R6 / T4/T5 / halteres scale by a typical full-scale; looming is per-eye **expansion** (flow divergence) packed into 8 sectors, then an **absolute** phasic rate code (`tonic * local + onset * relu(Δ)`, 0 when nothing is looming), retinotopic per LPLC2/LC4 cell in its hemifield. Rate ceiling 50 Hz so DN readouts are not pinned. MuJoCo sector rays are a diagnostic GT (logged correlation vs flow-looming; not fed to the brain)
-- Engineered looming-path calibration (configurable): LPLC2/LC4→DNp01/DNp03 one-hop gain **2.0**; other excitatory incoming onto those cells is **not** attenuated (`rest_incoming_scale=1.0`). Sensory encoding is phasic (`looming_input_gain=0.5`, `looming_onset_gain=2.0`). Per-neuron thresholds still drop DNp01/DNp03 rest after warm-up
+- Fixed-reference visual encoding (not the instantaneous population mean): R1–R6 / T4/T5 / halteres scale by a typical full-scale; looming is per-eye **expansion** (flow divergence) packed into 8 sectors, then an **onset / positive ROC** rate code with decay (`trace ← 0.8·trace + 2.0·relu(Δ)`, no tonic level — a held expansion dies out so LPLC2 is not parked in the suppressed regime), retinotopic per LPLC2/LC4 cell in its hemifield. Rate ceiling 50 Hz so DN readouts are not pinned. MuJoCo sector rays are a diagnostic GT (logged Pearson r vs **forward** sectors 0/1/7 closing speed; not fed to the brain)
+- Engineered looming-path calibration (configurable): LPLC2/LC4→DNp01/DNp03 one-hop gain **2.0**; other excitatory incoming onto those cells is **not** attenuated (`rest_incoming_scale=1.0`). **Inhibitory** synapses whose postsynaptic target is LPLC2/LC4 are scaled by `looming_inhibition_scale=0.5` (largest value in 0.2–0.5 that still lets DNp01 cross rest under flight-like ~0.8 R1–R6/T4/T5/haltere drive in `diagnose-looming`; excitatory weights and all other cells are untouched). Per-neuron thresholds still drop DNp01/DNp03 rest after warm-up. Top inhibitory presynaptic types (Σ weight×rate) are written to `lplc2_inhibition.json`
 - DN → motor readout:
   - DNp01 → escape (threshold over rest: short brake + turn away from the side with stronger LPLC2/LC4 or DNp03 L/R activity — not the raw looming vector)
   - DNp03 L/R → looming-evoked evasive yaw (counts logged)
@@ -56,7 +56,7 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 - Warm-up rest stats are median/MAD; convergence is a moving-window median vs spread
 - Exploration biases left/right visual input only; it does not override the DN action
 - Safety limits (minimal collision recovery as last resort; fly-vs-environment contacts; room bounds ±5 m, never an inner ±1.9 teleport)
-- Diagnostic: `threedfly diagnose-looming data/full_connectome.npz` injects synthetic looming into LPLC2/LC4 and prints DNp01/DNp03 rest, driven rate, latency, L/R selectivity, and a closed-loop tonic-then-**pulse** check (does DNp01 still cross rest+margin after warm-up, matching phasic LPLC2 rather than a long hold)
+- Diagnostic: `threedfly diagnose-looming data/full_connectome.npz` holds other sensory inputs at flight-like ~0.8, looming at ~0.3 plus small onsets then a pulse, prints DNp01/DNp03 rest/driven/latency/L/R selectivity, writes `lplc2_inhibition.json`, and reports whether DNp01 still crosses rest+margin (`crossed>0`) under that load
 - Runner log: `DNp01 escapes: brain-triggered=..., engineered-residual=...` (residual is 0 by default)
 
 **Scientific honesty:**
@@ -811,8 +811,8 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
 - MuJoCo 近裁剪面按 2.5 cm 果蝇设置（另有随体 `fly_closeup` 相机）；Viser 上帝视角、可选跟随特写、仪表盘、脑点云与 StereoBM 保持不变
 - 拍幅平均的准定常翅膀力（视觉上 200 Hz 拍动；不是 200 Hz 叶片元仿真）
 - 20 ms 控制节拍：每步 10 个 2 ms 物理子步，1000 步 = 20 s 飞行，与脑时间对齐
-- 固定参考视觉编码（不用瞬时群体均值）：R1–R6 / T4/T5 / 平衡棒按典型满幅缩放；逼近是每眼光流**扩张**（散度）的 8 扇区，再做成**绝对**相位型速率码（`tonic * local + onset * relu(Δ)`，无逼近时为 0），LPLC2/LC4 在各自半视野内视网膜拓扑。发放上限 50 Hz。MuJoCo 扇区射线仅作诊断 GT（与光流逼近的相关会打日志，不送入脑）
-- 工程化逼近通路校准（可配置）：LPLC2/LC4→DNp01/DNp03 单跳增益 **2.0**；其它兴奋性输入**不**衰减（`rest_incoming_scale=1.0`）。感觉编码为相位型（`looming_input_gain=0.5`，`looming_onset_gain=2.0`）。预热后仍按神经元阈值压低 DNp01/DNp03 静息
+- 固定参考视觉编码（不用瞬时群体均值）：R1–R6 / T4/T5 / 平衡棒按典型满幅缩放；逼近是每眼光流**扩张**（散度）的 8 扇区，再做成**起始/正变化率**速率码并衰减（`trace ← 0.8·trace + 2.0·relu(Δ)`，无持续 tonic，避免 LPLC2 被压在抑制区），LPLC2/LC4 在各自半视野内视网膜拓扑。发放上限 50 Hz。MuJoCo 扇区射线仅作诊断 GT（与**前方**扇区 0/1/7 闭合速度的 Pearson r 会打日志，不送入脑）
+- 工程化逼近通路校准（可配置）：LPLC2/LC4→DNp01/DNp03 单跳增益 **2.0**；其它兴奋性输入**不**衰减（`rest_incoming_scale=1.0`）。**仅**对突触后为 LPLC2/LC4 的抑制性突触乘 `looming_inhibition_scale=0.5`（0.2–0.5 中仍能在飞行样 ~0.8 其它感觉输入下让 DNp01 越过静息的最大尺度；兴奋性及其它细胞不动）。预热后仍按神经元阈值压低 DNp01/DNp03 静息。抑制源细胞类型（Σ 权重×发放）写入 `lplc2_inhibition.json`
 - DN → 运动读取：
   - DNp01 → 逃逸（相对静息的阈值：短刹车 + 转向逼近更强的一侧；侧向来自 LPLC2/LC4 或 DNp03 左右活动，而非原始逼近向量）
   - DNp03 左/右 → 逼近诱发的逃逸偏航（单独计数）
@@ -823,7 +823,7 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
 - 预热用中位数/MAD；收敛看滑动窗口中位数相对散布
 - 探索策略只偏置左右视觉输入，不覆盖 DN 动作
 - 安全限制（最小化碰撞恢复作为最后手段；按果蝇 body 识别接触；房间边界 ±5 m，不做 ±1.9 内框传送）
-- 诊断：`threedfly diagnose-looming data/full_connectome.npz` 向 LPLC2/LC4 注入合成逼近并打印 DNp01/DNp03 的静息、驱动发放、潜伏期、左右选择性，以及 tonic-then-**pulse** 闭环检查（预热后短脉冲是否越过 rest+margin，符合 LPLC2 相位型，而不是长时间维持）
+- 诊断：`threedfly diagnose-looming data/full_connectome.npz` 将其它感觉输入维持在飞行样 ~0.8、逼近 ~0.3 加小起始再脉冲，打印 DNp01/DNp03 静息/驱动/潜伏期/左右选择性，写入 `lplc2_inhibition.json`，并报告该负荷下 DNp01 是否仍越过 rest+margin（`crossed>0`）
 - 运行日志：`DNp01 escapes: brain-triggered=..., engineered-residual=...`（默认残差为 0）
 
 **科学诚实性：**

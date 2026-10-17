@@ -386,6 +386,25 @@ def test_transmitter_to_sign_mapping():
     assert transmitter_to_sign("glutamate", inhibitory_transmitters=("gaba",)) == 1.0
 
 
+def test_side_mask_accepts_left_right_aliases():
+    """somaSide/rootSide may be left/right/LHS/RHS rather than L/R."""
+    from threedfly.connectome.neuron_selection import select_input_neurons_for_looming
+
+    annotations = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4],
+        "type": ["LPLC2", "LPLC2", "LC4", "LC4"],
+        "celltype": ["LPLC2", "LPLC2", "LC4", "LC4"],
+        "somaSide": ["left", "RIGHT", "LHS", "rhs"],
+        "rootSide": ["?", "?", "?", "?"],
+    })
+    body_ids = np.array([1, 2, 3, 4])
+    mapping = {int(b): i for i, b in enumerate(body_ids)}
+    left = select_input_neurons_for_looming(annotations, body_ids, mapping, side="L")
+    right = select_input_neurons_for_looming(annotations, body_ids, mapping, side="R")
+    assert set(left) == {0, 2}
+    assert set(right) == {1, 3}
+
+
 def test_select_output_neurons_for_motor():
     """Test DN selection for motor readout."""
     from threedfly.connectome.neuron_selection import select_output_neurons_for_motor

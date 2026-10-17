@@ -264,7 +264,7 @@ def test_looming_onset_boosts_rising_expansion():
 
 
 def test_tonic_cruise_then_ramp_still_raises_dnp01():
-    """Closed-loop-like: tonic cruise input must not collapse the giant-fiber path; a ramp still raises DNp01."""
+    """Closed-loop-like: tonic cruise must not collapse the path; score the pulse after rise, not the late hold."""
     from threedfly.connectome.simulator import RateSimulator, calibrate_looming_to_dnp01
 
     n, controller = _bio_controller(warmup_steps=6)
@@ -291,14 +291,19 @@ def test_tonic_cruise_then_ramp_still_raises_dnp01():
         ramp_in.append(float(np.max(np.abs(brain.external_input[loom]))))
         rates = brain.step()
         driven.append(float(rates[dnp].mean()))
-    late = float(np.mean(driven[-8:]))
-    ramp_drive = float(np.mean(ramp_in[-8:]))
-    assert ramp_drive > tonic_drive * 3.0, (
-        f"Cruise looming must not be mean-normalised to the same drive as a ramp "
-        f"(tonic_in={tonic_drive:.3f} ramp_in={ramp_drive:.3f})"
+    pulse = float(np.max(driven[:8]))
+    onset_drive = float(np.max(ramp_in[:4]))
+    late_drive = float(np.mean(ramp_in[-8:]))
+    assert onset_drive > tonic_drive + 0.2, (
+        f"Onset of a ramp must exceed decayed cruise drive "
+        f"(tonic_in={tonic_drive:.3f} onset_in={onset_drive:.3f})"
     )
-    assert late > tonic + 0.15, (
-        f"DNp01 did not rise after tonic warmup (tonic={tonic:.4f} late={late:.4f})"
+    assert late_drive < onset_drive - 1e-4, (
+        f"Held expansion must decay, not stay as a tonic level "
+        f"(onset={onset_drive:.3f} late={late_drive:.3f})"
+    )
+    assert pulse > tonic + 0.15, (
+        f"DNp01 did not rise on the looming pulse (tonic={tonic:.4f} pulse={pulse:.4f})"
     )
 
 
@@ -389,11 +394,13 @@ def test_looming_path_calibration_defaults_are_minimal():
     from threedfly.connectome.simulator import (
         DEFAULT_LOOMING_PATH_GAIN,
         DEFAULT_LOOMING_REST_INCOMING_SCALE,
+        DEFAULT_LOOMING_INHIBITION_SCALE,
         calibrate_looming_to_dnp01,
     )
 
     assert DEFAULT_LOOMING_PATH_GAIN <= 2.0 + 1e-9
     assert DEFAULT_LOOMING_REST_INCOMING_SCALE == pytest.approx(1.0)
+    assert 0.2 - 1e-9 <= DEFAULT_LOOMING_INHIBITION_SCALE <= 0.5 + 1e-9
 
     n, controller = _bio_controller(warmup_steps=2)
     loom = np.concatenate([
@@ -476,6 +483,106 @@ def test_yaw_running_baseline_when_pair_dropped():
     )
 
 
+def test_scale_inhibition_only_negative_incoming_onto_lplc2_lc4():
+    """looming_inhibition_scale multiplies I→LPLC2/LC4 only; excitatory and other cells stay put."""
+    from threedfly.connectome.simulator import (
+        DEFAULT_LOOMING_PATH_GAIN,
+        scale_inhibition_onto_targets,
+        calibrate_looming_to_dnp01,
+    )
+
+    adj = sparse.csr_matrix(np.array([
+        [0.0, -20.0, -3.0],
+        [0.0, 4.0, 10.0],
+        [0.0, -8.0, 0.0],
+    ], dtype=np.float32))
+    loom = np.array([1], dtype=np.int32)
+    dnp = np.array([2], dtype=np.int32)
+    scaled = scale_inhibition_onto_targets(adj, loom, scale=0.5)
+    assert float(scaled[0, 1]) == pytest.approx(-10.0)
+    assert float(scaled[1, 1]) == pytest.approx(4.0)
+    assert float(scaled[2, 1]) == pytest.approx(-4.0)
+    assert float(scaled[0, 2]) == pytest.approx(-3.0)
+    assert float(scaled[1, 2]) == pytest.approx(10.0)
+
+    calibrated = calibrate_looming_to_dnp01(
+        adj, loom, dnp, looming_inhibition_scale=0.5
+    )
+    assert float(calibrated[0, 1]) == pytest.approx(-10.0)
+    assert float(calibrated[1, 2]) == pytest.approx(10.0 * DEFAULT_LOOMING_PATH_GAIN)
+    assert float(calibrated[0, 2]) == pytest.approx(-3.0)
+
+
+def test_diagnose_lplc2_inhibition_lists_top_inhibitory_types(tmp_path):
+    """Top inhibitory presynaptic types onto LPLC2/LC4 by summed weight×rate, written as JSON."""
+    import json
+    import pandas as pd
+    from threedfly.connectome.simulator import diagnose_lplc2_inhibition
+
+    adj = sparse.csr_matrix(np.array([
+        [0.0, -20.0, 0.0, 0.0],
+        [0.0, 0.0, 8.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, -5.0, 0.0, 0.0],
+    ], dtype=np.float32))
+    annotations = pd.DataFrame({
+        "bodyId": [10, 11, 12, 13],
+        "type": ["R1", "LPLC2", "DNp01", "LPi04"],
+        "celltype": ["R1", "LPLC2", "DNp01", "LPi04"],
+    })
+    body_ids = np.array([10, 11, 12, 13])
+    rates = np.array([0.8, 0.3, 0.0, 0.8], dtype=np.float32)
+    report = diagnose_lplc2_inhibition(
+        adj,
+        looming_indices=np.array([1], dtype=np.int32),
+        rates=rates,
+        annotations=annotations,
+        body_ids=body_ids,
+        top_k=5,
+    )
+    types = [row["cell_type"] for row in report["top_inhibitory_types"]]
+    assert types[0] == "R1"
+    assert "LPi04" in types
+    assert report["top_inhibitory_types"][0]["sum_weight_x_rate"] < 0.0
+    out = tmp_path / "lplc2_inhibition.json"
+    out.write_text(json.dumps(report, indent=2))
+    loaded = json.loads(out.read_text())
+    assert loaded["n_looming_cells"] == 1
+    assert loaded["top_inhibitory_types"][0]["cell_type"] == "R1"
+
+
+def test_flight_like_diagnose_crossed_with_inhibition_scale():
+    """Under flight-like other-sensory drive, unscaled I→LPLC2 blocks DNp01; scaled I lets it cross."""
+    from threedfly.connectome.simulator import diagnose_looming_to_dnp01
+
+    adj = sparse.csr_matrix(np.array([
+        [0.0, -20.0, 0.0],
+        [0.0, 0.0, 20.0],
+        [0.0, 0.0, 0.0],
+    ], dtype=np.float32))
+    loom = np.array([1], dtype=np.int32)
+    dnp = np.array([2], dtype=np.int32)
+    other = np.array([0], dtype=np.int32)
+    kwargs = dict(
+        adjacency=adj,
+        looming_indices=loom,
+        dnp01_indices=dnp,
+        other_sensory_indices=other,
+        other_sensory_current=0.8,
+        n_rest=6,
+        n_drive=16,
+        n_baseline=20,
+        baseline_current=0.3,
+        looming_current=1.0,
+        n_pulse=8,
+        closed_loop_margin=0.05,
+    )
+    blocked = diagnose_looming_to_dnp01(**kwargs, looming_inhibition_scale=1.0)
+    assert float(blocked["dnp01_closed_loop_crossed"]) == 0.0
+    released = diagnose_looming_to_dnp01(**kwargs, looming_inhibition_scale=0.5)
+    assert float(released["dnp01_closed_loop_crossed"]) >= 1.0
+
+
 def test_diagnose_looming_closed_loop_tonic_then_ramp():
     """diagnose-looming must report whether DNp01 still crosses rest+margin after tonic warmup."""
     from threedfly.connectome.simulator import diagnose_looming_to_dnp01
@@ -521,6 +628,49 @@ def test_dnp03_selected_when_annotated():
     assert len(motor["DNp03"]) == 2
     assert len(motor["DNp03_L"]) == 1
     assert len(motor["DNp03_R"]) == 1
+
+
+def test_dnp03_and_dna02_sides_from_aliases_suffixes_and_unlabeled_split():
+    """Left/right DN channels must both exist: aliases, type suffix, or unlabeled split."""
+    from threedfly.connectome.neuron_selection import select_output_neurons_for_motor
+    import pandas as pd
+
+    aliased = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4],
+        "type": ["DNp03", "DNp03", "DNa02", "DNa02"],
+        "celltype": ["DNp03", "DNp03", "DNa02", "DNa02"],
+        "somaSide": ["left", "RIGHT", "LHS", "rhs"],
+        "rootSide": ["?", "?", "?", "?"],
+    })
+    body_ids = np.array([1, 2, 3, 4])
+    mapping = {int(b): i for i, b in enumerate(body_ids)}
+    motor = select_output_neurons_for_motor(aliased, body_ids, mapping)
+    assert len(motor["DNp03_L"]) == 1 and len(motor["DNp03_R"]) == 1
+    assert len(motor["DNa02_L"]) == 1 and len(motor["DNa02_R"]) == 1
+
+    suffixed = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4],
+        "type": ["DNp03_L", "DNp03_R", "DNa02_L", "DNa02_R"],
+        "celltype": ["DNp03_L", "DNp03_R", "DNa02_L", "DNa02_R"],
+        "somaSide": ["?", "?", "?", "?"],
+        "rootSide": ["?", "?", "?", "?"],
+    })
+    motor = select_output_neurons_for_motor(suffixed, body_ids, mapping)
+    assert set(motor["DNp03_L"]) == {0} and set(motor["DNp03_R"]) == {1}
+    assert set(motor["DNa02_L"]) == {2} and set(motor["DNa02_R"]) == {3}
+
+    unlabeled = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4],
+        "type": ["DNp03", "DNp03", "DNa02", "DNa02"],
+        "celltype": ["DNp03", "DNp03", "DNa02", "DNa02"],
+        "somaSide": ["?", "?", "?", "?"],
+        "rootSide": ["?", "?", "?", "?"],
+    })
+    motor = select_output_neurons_for_motor(unlabeled, body_ids, mapping)
+    assert len(motor["DNp03_L"]) == 1 and len(motor["DNp03_R"]) == 1
+    assert len(motor["DNa02_L"]) == 1 and len(motor["DNa02_R"]) == 1
+    assert set(motor["DNp03_L"]).isdisjoint(set(motor["DNp03_R"]))
+    assert set(motor["DNa02_L"]).isdisjoint(set(motor["DNa02_R"]))
 
 
 def test_legs_attach_at_thorax_coxa():

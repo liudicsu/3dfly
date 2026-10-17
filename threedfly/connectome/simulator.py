@@ -2,7 +2,7 @@
 
 import numpy as np
 from scipy import sparse
-from typing import Optional, Dict, Union
+from typing import Optional, Dict, List, Union
 
 
 def apply_ei_signs(
@@ -303,6 +303,88 @@ def _boost_one_hop_path(
 
 DEFAULT_LOOMING_PATH_GAIN = 2.0
 DEFAULT_LOOMING_REST_INCOMING_SCALE = 1.0
+# Largest scale in 0.2–0.5 that still lets DNp01 cross under flight-like
+# I→LPLC2/LC4 suppression (0.5 = keep half the inhibition; smaller = more release).
+DEFAULT_LOOMING_INHIBITION_SCALE = 0.5
+
+
+def scale_inhibition_onto_targets(
+    adjacency: sparse.csr_matrix,
+    targets: np.ndarray,
+    scale: float = DEFAULT_LOOMING_INHIBITION_SCALE,
+) -> sparse.csr_matrix:
+    """Multiply *negative* incoming weights onto ``targets`` by ``scale``.
+
+    Excitatory synapses and all non-target columns are left unchanged. Used to
+    partially release LPLC2/LC4 from flight-like network inhibition so DNp01
+    can fire from the brain; it is not a global E/I rewrite.
+    """
+    if adjacency.nnz == 0 or len(targets) == 0 or float(scale) == 1.0:
+        return adjacency.tocsr()
+    adj = adjacency.tocsc(copy=True)
+    for t in np.unique(np.asarray(targets, dtype=np.int32)):
+        t = int(t)
+        if t < 0 or t >= adj.shape[1]:
+            continue
+        start, end = int(adj.indptr[t]), int(adj.indptr[t + 1])
+        if start == end:
+            continue
+        col = adj.data[start:end]
+        adj.data[start:end] = np.where(col < 0.0, col * float(scale), col)
+    return adj.tocsr()
+
+
+def diagnose_lplc2_inhibition(
+    adjacency: sparse.csr_matrix,
+    looming_indices: np.ndarray,
+    rates: np.ndarray,
+    annotations=None,
+    body_ids=None,
+    top_k: int = 15,
+) -> Dict:
+    """Sum negative weight×rate onto LPLC2/LC4, grouped by presynaptic cell type."""
+    adj = adjacency.tocsc()
+    loom = np.unique(np.asarray(looming_indices, dtype=np.int32))
+    loom = loom[(loom >= 0) & (loom < adj.shape[1])]
+    rates = np.asarray(rates, dtype=np.float64).ravel()
+    idx_to_type: Dict[int, str] = {}
+    if annotations is not None and body_ids is not None:
+        type_col = "celltype" if "celltype" in annotations.columns else "type"
+        bid_to_type = {
+            int(b): str(t)
+            for b, t in zip(annotations["bodyId"], annotations[type_col].astype(str))
+        }
+        for i, bid in enumerate(np.asarray(body_ids).ravel()):
+            idx_to_type[int(i)] = bid_to_type.get(int(bid), "unknown")
+    contrib: Dict[str, Dict[str, float]] = {}
+    n_neg = 0
+    for t in loom:
+        start, end = int(adj.indptr[int(t)]), int(adj.indptr[int(t) + 1])
+        rows = adj.indices[start:end]
+        data = adj.data[start:end]
+        for pre, w in zip(rows, data):
+            if float(w) >= 0.0:
+                continue
+            n_neg += 1
+            pre_i = int(pre)
+            r = float(rates[pre_i]) if pre_i < rates.size else 0.0
+            ctype = idx_to_type.get(pre_i, f"idx_{pre_i}")
+            row = contrib.setdefault(
+                ctype,
+                {"sum_weight_x_rate": 0.0, "n_synapses": 0, "sum_weight": 0.0},
+            )
+            row["sum_weight_x_rate"] += float(w) * r
+            row["n_synapses"] += 1
+            row["sum_weight"] += float(w)
+    ranked: List[Dict] = [
+        {"cell_type": name, **vals} for name, vals in contrib.items()
+    ]
+    ranked.sort(key=lambda x: x["sum_weight_x_rate"])
+    return {
+        "n_looming_cells": int(loom.size),
+        "n_inhibitory_synapses": int(n_neg),
+        "top_inhibitory_types": ranked[: max(int(top_k), 0)],
+    }
 
 
 def calibrate_looming_to_dnp01(
@@ -314,6 +396,7 @@ def calibrate_looming_to_dnp01(
     assist_weight: float = 1.0,
     rest_incoming_scale: float = DEFAULT_LOOMING_REST_INCOMING_SCALE,
     dnp03_indices: Optional[np.ndarray] = None,
+    looming_inhibition_scale: float = DEFAULT_LOOMING_INHIBITION_SCALE,
 ) -> sparse.csr_matrix:
     """Engineered LPLC2/LC4 → DNp01/DNp03 path gain; other incoming is unchanged by default.
 
@@ -322,6 +405,9 @@ def calibrate_looming_to_dnp01(
     ``incoming_gain`` defaults to 1 (do not amplify all incoming — that pinned DNp01
     at the rate ceiling). Pass ``incoming_gain>1`` or ``rest_incoming_scale<1`` only
     for ablation.
+    ``looming_inhibition_scale`` (default 0.5) multiplies *inhibitory* synapses
+    whose postsynaptic cell is LPLC2/LC4; excitatory and all other cells are
+    untouched.
     """
     csr = adjacency.tocsr()
     adj = adjacency.tolil(copy=True)
@@ -340,6 +426,9 @@ def calibrate_looming_to_dnp01(
     )
     if incoming_gain != 1.0 and tgt.size > 0:
         scaled = amplify_incoming_to_targets(scaled, tgt, gain=incoming_gain)
+    scaled = scale_inhibition_onto_targets(
+        scaled, src, scale=float(looming_inhibition_scale)
+    )
     return scaled
 
 
@@ -381,6 +470,10 @@ def diagnose_looming_to_dnp01(
     baseline_current: float = 0.05,
     closed_loop_margin: float = 0.05,
     n_pulse: int = 8,
+    other_sensory_indices: Optional[np.ndarray] = None,
+    other_sensory_current: float = 0.8,
+    looming_inhibition_scale: Optional[float] = None,
+    onset_bump: float = 0.15,
 ) -> Dict[str, float]:
     """Inject current into LPLC2/LC4 and report DNp01/DNp03 rest, drive, latency, L/R selectivity.
 
@@ -388,15 +481,29 @@ def diagnose_looming_to_dnp01(
     ``n_baseline`` steps, then a brief pulse of ``looming_current`` (LPLC2 is
     phasic). Reports whether DNp01 crosses rest+margin after that warm-up,
     not just the onset spike from silence.
+
+    When ``other_sensory_indices`` is set (R1–R6 / T4/T5 / haltere), those
+    cells are held at ``other_sensory_current`` (~0.8) during the closed-loop
+    check so inhibition onto LPLC2/LC4 matches flight, and looming sits at
+    ~0.3 plus small onsets before the pulse.
     """
     hops = count_directed_hops(adjacency, looming_indices, dnp01_indices)
     dnp03 = np.asarray(
         dnp03_indices if dnp03_indices is not None else [], dtype=np.int32
     )
     adj = adjacency
+    inhib_scale = (
+        DEFAULT_LOOMING_INHIBITION_SCALE
+        if looming_inhibition_scale is None
+        else float(looming_inhibition_scale)
+    )
     if calibrate:
         adj = calibrate_looming_to_dnp01(
-            adjacency, looming_indices, dnp01_indices, dnp03_indices=dnp03
+            adjacency,
+            looming_indices,
+            dnp01_indices,
+            dnp03_indices=dnp03,
+            looming_inhibition_scale=inhib_scale,
         )
     sim = RateSimulator(adj, dt=0.010, syn_weight_scale=syn_weight_scale, max_rate=max_rate)
     loom = np.asarray(looming_indices, dtype=np.int32)
@@ -466,15 +573,38 @@ def diagnose_looming_to_dnp01(
 
     # Closed-loop-like: tonic cruise, then a brief pulse (phasic LPLC2). Score
     # the pulse after warm-up, not a long hold that the network can suppress.
+    # With other sensory populations, hold them at flight-like drive so the
+    # I→LPLC2/LC4 path is actually loaded.
+    other = np.asarray(
+        other_sensory_indices if other_sensory_indices is not None else [],
+        dtype=np.int32,
+    )
+    other_cur = float(other_sensory_current)
+
+    def _set_flight_like(loom_current: float) -> None:
+        idx = []
+        val = []
+        if other.size:
+            idx.extend(int(i) for i in other)
+            val.extend([other_cur] * int(other.size))
+        if loom.size:
+            idx.extend(int(i) for i in loom)
+            val.extend([float(loom_current)] * int(loom.size))
+        if idx:
+            sim.set_input(
+                np.asarray(val, dtype=np.float32),
+                neuron_indices=np.asarray(idx, dtype=np.int32),
+            )
+
     sim.reset()
     n_base = max(int(n_baseline), 1)
     baseline_hist = []
-    for _ in range(n_base):
-        if loom.size:
-            sim.set_input(
-                np.full(loom.size, float(baseline_current), dtype=np.float32),
-                neuron_indices=loom,
-            )
+    bump = float(onset_bump) if other.size else 0.0
+    for i in range(n_base):
+        cur = float(baseline_current)
+        if bump > 0.0 and (i % 8) == 7:
+            cur = float(baseline_current) + bump
+        _set_flight_like(cur)
         rates = sim.step()
         baseline_hist.append(_mean_rate(rates, dnp))
     tail_b = max(3, n_base // 3)
@@ -485,10 +615,7 @@ def diagnose_looming_to_dnp01(
     pulse_hist = []
     for i in range(n_ramp):
         cur = float(looming_current) if i < n_on else float(baseline_current)
-        if loom.size:
-            sim.set_input(
-                np.full(loom.size, cur, dtype=np.float32), neuron_indices=loom
-            )
+        _set_flight_like(cur)
         rates = sim.step()
         if i < n_on:
             pulse_hist.append(_mean_rate(rates, dnp))
@@ -501,6 +628,7 @@ def diagnose_looming_to_dnp01(
     report["dnp01_closed_loop_crossed"] = float(
         cl_driven > cl_rest + float(closed_loop_margin)
     )
+    report["looming_inhibition_scale"] = float(inhib_scale if calibrate else 1.0)
     return report
 
 

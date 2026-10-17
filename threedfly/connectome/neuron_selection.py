@@ -1,9 +1,12 @@
 """Helper functions for selecting neurons by type from annotations."""
 
+import re
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from pathlib import Path
+
+_TYPE_SIDE_SUFFIX = re.compile(r"[_-]([LRlr])(?:$|[^A-Za-z0-9])")
 
 
 def find_neurons_by_type(
@@ -339,22 +342,83 @@ def _bodies_to_indices(
     )
 
 
+def _canonical_side_label(val) -> str:
+    """Map somaSide/rootSide/type-suffix labels to L, R, or ?."""
+    if val is None:
+        return "?"
+    try:
+        if pd.isna(val):
+            return "?"
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip().upper()
+    if s in ("L", "LEFT", "LHS", "LH"):
+        return "L"
+    if s in ("R", "RIGHT", "RHS", "RH"):
+        return "R"
+    return "?"
+
+
+def _type_suffix_sides(annotations: pd.DataFrame) -> pd.Series:
+    sides = pd.Series(["?"] * len(annotations), index=annotations.index)
+    for col in ("celltype", "type"):
+        if col not in annotations.columns:
+            continue
+        extracted = annotations[col].astype(str).str.extract(_TYPE_SIDE_SUFFIX, expand=False)
+        mapped = extracted.map(lambda x: _canonical_side_label(x) if pd.notna(x) else "?")
+        missing = ~sides.isin(["L", "R"])
+        sides = sides.where(~missing, mapped)
+    return sides
+
+
+def _effective_side_series(annotations: pd.DataFrame) -> pd.Series:
+    """somaSide (if L/R), else rootSide, else a `_L`/`_R` type suffix."""
+    sides = pd.Series(["?"] * len(annotations), index=annotations.index)
+    if "somaSide" in annotations.columns:
+        soma = annotations["somaSide"].map(_canonical_side_label)
+        sides = soma.where(soma.isin(["L", "R"]), sides)
+    if "rootSide" in annotations.columns:
+        root = annotations["rootSide"].map(_canonical_side_label)
+        missing = ~sides.isin(["L", "R"])
+        sides = sides.where(~missing, root)
+    suffix = _type_suffix_sides(annotations)
+    missing = ~sides.isin(["L", "R"])
+    return sides.where(~missing, suffix)
+
+
 def _get_side_mask(annotations: pd.DataFrame, side: str) -> pd.Series:
     """Get boolean mask for neurons on specified side (L/R)."""
-    # Check somaSide first, fallback to rootSide if missing/unclear
-    if "somaSide" in annotations.columns and "rootSide" in annotations.columns:
-        soma = annotations["somaSide"].fillna("?")
-        root = annotations["rootSide"].fillna("?")
-        # Use somaSide if available, otherwise rootSide
-        effective_side = soma.where(soma.isin(["L", "R"]), root)
-        return effective_side == side
-    elif "somaSide" in annotations.columns:
-        return annotations["somaSide"] == side
-    elif "rootSide" in annotations.columns:
-        return annotations["rootSide"] == side
-    else:
-        # No side information, return all False
-        return pd.Series([False] * len(annotations))
+    want = _canonical_side_label(side)
+    if want not in ("L", "R"):
+        return pd.Series([False] * len(annotations), index=annotations.index)
+    return _effective_side_series(annotations) == want
+
+
+def _fill_unlabeled_sides(
+    all_idx: np.ndarray,
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """If a DN type exists but one side is empty, split unlabeled cells across L/R."""
+    all_i = np.asarray(all_idx, dtype=np.int32)
+    left = np.asarray(left_idx, dtype=np.int32)
+    right = np.asarray(right_idx, dtype=np.int32)
+    labeled = set(int(i) for i in left) | set(int(i) for i in right)
+    unlabeled = [int(i) for i in all_i if int(i) not in labeled]
+    if not unlabeled:
+        return left, right
+    if left.size == 0 and right.size == 0:
+        if len(unlabeled) >= 2:
+            return (
+                np.asarray(unlabeled[0::2], dtype=np.int32),
+                np.asarray(unlabeled[1::2], dtype=np.int32),
+            )
+        return left, right
+    if left.size == 0:
+        return np.asarray(unlabeled, dtype=np.int32), right
+    if right.size == 0:
+        return left, np.asarray(unlabeled, dtype=np.int32)
+    return left, right
 
 
 def select_input_neurons_for_luminance(
@@ -415,7 +479,7 @@ def select_input_neurons_for_looming(
     annotations: pd.DataFrame,
     body_ids: np.ndarray,
     body_id_to_idx: Dict[int, int],
-    side: str
+    side: Optional[str] = None,
 ) -> np.ndarray:
     """
     Select LPLC2 + LC4 neurons for looming input.
@@ -424,13 +488,16 @@ def select_input_neurons_for_looming(
         annotations: Annotation DataFrame
         body_ids: Body IDs in connectome
         body_id_to_idx: Body ID to index mapping
-        side: "L" or "R"
+        side: "L" or "R", or None for both sides
     
     Returns:
         Array of neuron indices for LPLC2 + LC4 on specified side
     """
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
     loom_mask = _annotation_type_mask(valid_annotations, r"^(?:LPLC2|LC4)$")
+    if side is None:
+        matching_body_ids = valid_annotations.loc[loom_mask, "bodyId"].values
+        return _bodies_to_indices(matching_body_ids, body_id_to_idx)
     side_mask = _get_side_mask(valid_annotations, side)
     matching_body_ids = valid_annotations.loc[loom_mask & side_mask, "bodyId"].values
     return _bodies_to_indices(matching_body_ids, body_id_to_idx)
@@ -492,6 +559,17 @@ def select_output_neurons_for_motor(
         "DNp03_L": _select_side(r"^DNp03(?:$|[^A-Za-z0-9])", "L"),
         "DNp03_R": _select_side(r"^DNp03(?:$|[^A-Za-z0-9])", "R"),
     }
+    for pooled, left_key, right_key in (
+        ("DNp03", "DNp03_L", "DNp03_R"),
+        ("DNa02", "DNa02_L", "DNa02_R"),
+        ("DNg02", "DNg02_L", "DNg02_R"),
+        ("DNa01", "DNa01_L", "DNa01_R"),
+    ):
+        left, right = _fill_unlabeled_sides(
+            result[pooled], result[left_key], result[right_key]
+        )
+        result[left_key] = left
+        result[right_key] = right
     return result
 
 

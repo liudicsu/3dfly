@@ -11,6 +11,8 @@ from threedfly.vision.hex_eye import (
 )
 
 LOOMING_N_SECTORS = 8
+# Forward / forward-oblique sectors used for diagnostic closing-speed correlation.
+LOOMING_FORWARD_SECTORS = (0, 1, 7)
 # Ignore sub-pixel Farneback jitter; expansion is scored with a percentile.
 _LOOMING_NOISE_FLOOR = 0.05
 _LOOMING_PERCENTILE = 75.0
@@ -97,6 +99,27 @@ def looming_approach_correlation(looming_strength, approach_rate) -> float:
     if float(np.std(a)) < 1e-12 or float(np.std(b)) < 1e-12:
         return 0.0
     return float(np.corrcoef(a, b)[0, 1])
+
+
+def forward_looming_and_approach(
+    looming_left,
+    looming_right,
+    prev_rays,
+    curr_rays,
+    dt: float,
+) -> tuple:
+    """Mean forward-sector (0, 1, 7) expansion vs those rays' closing speed."""
+    idx = np.asarray(LOOMING_FORWARD_SECTORS, dtype=np.int32)
+    left = np.asarray(looming_left, dtype=np.float64).ravel()
+    right = np.asarray(looming_right, dtype=np.float64).ravel()
+    prev = np.asarray(prev_rays, dtype=np.float64).ravel()
+    curr = np.asarray(curr_rays, dtype=np.float64).ravel()
+    n = 8
+    if left.size < n or right.size < n or prev.size < n or curr.size < n:
+        return 0.0, 0.0
+    loom = 0.5 * (left[idx] + right[idx])
+    approach = np.maximum(prev[idx] - curr[idx], 0.0) / max(float(dt), 1e-9)
+    return float(np.mean(loom)), float(np.mean(approach))
 
 
 class StereoVision:

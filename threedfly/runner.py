@@ -1,5 +1,6 @@
 """Main simulation runner."""
 
+import json
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
@@ -15,8 +16,10 @@ from threedfly.connectome.neuron_selection import (
 from threedfly.connectome.simulator import (
     DEFAULT_LOOMING_PATH_GAIN,
     DEFAULT_LOOMING_REST_INCOMING_SCALE,
+    DEFAULT_LOOMING_INHIBITION_SCALE,
     calibrate_looming_to_dnp01,
     count_directed_hops,
+    diagnose_lplc2_inhibition,
 )
 from threedfly.sim import FlyEnvironment
 from threedfly.vision import (
@@ -24,6 +27,7 @@ from threedfly.vision import (
     PointCloudMapper,
     BrainDepthEstimator,
     looming_approach_correlation,
+    forward_looming_and_approach,
 )
 from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
@@ -46,6 +50,7 @@ def run_simulation(
     use_engineered_looming_residual: bool = False,
     looming_path_gain: Optional[float] = None,
     looming_rest_incoming_scale: Optional[float] = None,
+    looming_inhibition_scale: Optional[float] = None,
 ):
     """
     Run complete 3dfly simulation.
@@ -165,6 +170,11 @@ def run_simulation(
             if looming_rest_incoming_scale is None
             else float(looming_rest_incoming_scale)
         )
+        inhib_scale = (
+            DEFAULT_LOOMING_INHIBITION_SCALE
+            if looming_inhibition_scale is None
+            else float(looming_inhibition_scale)
+        )
         brain.adj = calibrate_looming_to_dnp01(
             brain.adj,
             loom_idx,
@@ -172,10 +182,12 @@ def run_simulation(
             dnp03_indices=dnp03_idx,
             one_hop_gain=path_gain,
             rest_incoming_scale=rest_scale,
+            looming_inhibition_scale=inhib_scale,
         )
         print(
             f"  Engineered looming-path calibration: one_hop_gain={path_gain}, "
-            f"rest_incoming_scale={rest_scale}"
+            f"rest_incoming_scale={rest_scale}, "
+            f"looming_inhibition_scale={inhib_scale} (I→LPLC2/LC4 only)"
         )
         if controller.use_engineered_looming_residual:
             print("  Engineered looming-residual escape is ON (ablation)")
@@ -234,6 +246,22 @@ def run_simulation(
                 break
         controller.finalize_warmup()
         controller.apply_giant_fiber_calibration(brain)
+        inhib = diagnose_lplc2_inhibition(
+            brain.adj,
+            loom_idx,
+            brain_activity,
+            annotations=annotations,
+            body_ids=body_ids,
+        )
+        inhib["looming_inhibition_scale"] = inhib_scale
+        inhib_path = output_dir / "lplc2_inhibition.json"
+        inhib_path.write_text(json.dumps(inhib, indent=2))
+        print(f"  Wrote LPLC2/LC4 inhibitory sources: {inhib_path}")
+        for row in inhib.get("top_inhibitory_types", [])[:5]:
+            print(
+                f"    I {row['cell_type']}: Σ(w·r)={row['sum_weight_x_rate']:.4g} "
+                f"n={int(row['n_synapses'])}"
+            )
     
     # Simulation loop
     
@@ -252,9 +280,15 @@ def run_simulation(
             env.sector_ray_distances("left") + env.sector_ray_distances("right")
         )
         if prev_gt_rays is not None:
-            approach = np.maximum(prev_gt_rays - gt_rays, 0.0) / float(sim_dt)
-            loom_series.append(float(np.max(visual_features["looming_features"])))
-            approach_series.append(float(np.max(approach)))
+            loom_v, app_v = forward_looming_and_approach(
+                visual_features.get("looming_left", visual_features["looming_features"]),
+                visual_features.get("looming_right", visual_features["looming_features"]),
+                prev_gt_rays,
+                gt_rays,
+                sim_dt,
+            )
+            loom_series.append(loom_v)
+            approach_series.append(app_v)
         prev_gt_rays = gt_rays
         
         # *** NEW: Get fly velocity for motion parallax ***
@@ -445,7 +479,7 @@ def run_simulation(
         print(f"DNp03 evasive turns: {controller.dnp03_turn_count}")
         r_gt = looming_approach_correlation(loom_series, approach_series)
         print(
-            f"Flow-looming vs GT approach correlation: {r_gt:.3f} "
+            f"Flow-looming vs GT approach correlation (forward sectors 0,1,7): {r_gt:.3f} "
             "(diagnostic; MuJoCo rays are not fed to the brain)"
         )
     print(f"\nPrimary (Brain Depth):")

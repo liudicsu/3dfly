@@ -215,8 +215,21 @@ def inspect_types(subgraph_path):
 @click.argument("subgraph_path", type=click.Path(exists=True))
 @click.option("--no-ei", is_flag=True, help="Skip neurotransmitter E/I signs")
 @click.option("--looming", type=float, default=1.0, help="Injected looming current")
-def diagnose_looming(subgraph_path, no_ei, looming):
+@click.option(
+    "--looming-inhibition-scale",
+    type=float,
+    default=None,
+    help="Scale I→LPLC2/LC4 synapses only (default 0.5).",
+)
+@click.option(
+    "--inhibition-json",
+    type=click.Path(),
+    default="lplc2_inhibition.json",
+    help="Write top inhibitory presynaptic types onto LPLC2/LC4 as JSON.",
+)
+def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, inhibition_json):
     """Inject strong synthetic looming into LPLC2/LC4 and print DNp01/DNp03 vs rest."""
+    import json
     import numpy as np
     from threedfly.connectome import ConnectomeLoader
     from threedfly.connectome.neuron_selection import (
@@ -224,9 +237,13 @@ def diagnose_looming(subgraph_path, no_ei, looming):
         build_transmitter_sign_vector,
     )
     from threedfly.connectome.simulator import (
+        RateSimulator,
         apply_ei_signs,
+        calibrate_looming_to_dnp01,
+        diagnose_lplc2_inhibition,
         diagnose_looming_to_dnp01,
         count_directed_hops,
+        DEFAULT_LOOMING_INHIBITION_SCALE,
     )
     from threedfly.control.controller import BiologicalFlightController
 
@@ -269,6 +286,22 @@ def diagnose_looming(subgraph_path, no_ei, looming):
         f"LPLC2/LC4 n={hops['n_sources']}  DNp01 n={hops['n_targets']}  "
         f"DNp03 n={len(dnp03)}  1-hop={hops['n_one_hop']}  2-hop={hops['n_two_hop']}"
     )
+    other = []
+    for key, idx in controller.input_mapping.items():
+        if key.startswith("looming"):
+            continue
+        if idx is not None and len(idx) > 0:
+            other.append(np.asarray(idx, dtype=np.int32))
+    other_idx = np.unique(np.concatenate(other)) if other else np.array([], dtype=np.int32)
+    inhib_scale = (
+        DEFAULT_LOOMING_INHIBITION_SCALE
+        if looming_inhibition_scale is None
+        else float(looming_inhibition_scale)
+    )
+    click.echo(
+        f"Flight-like other sensory n={other_idx.size} at 0.8; "
+        f"looming baseline 0.3 + pulse; I→LPLC2/LC4 scale={inhib_scale}"
+    )
     report = diagnose_looming_to_dnp01(
         adjacency=adj,
         looming_indices=loom,
@@ -277,7 +310,42 @@ def diagnose_looming(subgraph_path, no_ei, looming):
         looming_left=controller.input_mapping["looming_left"],
         looming_right=controller.input_mapping["looming_right"],
         looming_current=float(looming),
+        other_sensory_indices=other_idx,
+        other_sensory_current=0.8,
+        baseline_current=0.3,
+        looming_inhibition_scale=inhib_scale,
     )
+    calibrated = calibrate_looming_to_dnp01(
+        adj, loom, dnp, dnp03_indices=dnp03, looming_inhibition_scale=inhib_scale
+    )
+    sim = RateSimulator(calibrated, dt=0.010, syn_weight_scale=0.1, max_rate=50.0)
+    idx, val = [], []
+    if other_idx.size:
+        idx.extend(other_idx.tolist())
+        val.extend([0.8] * int(other_idx.size))
+    if loom.size:
+        idx.extend(loom.tolist())
+        val.extend([0.3] * int(loom.size))
+    for _ in range(24):
+        if idx:
+            sim.set_input(np.asarray(val, dtype=np.float32), neuron_indices=np.asarray(idx, dtype=np.int32))
+        sim.step()
+    inhib = diagnose_lplc2_inhibition(
+        calibrated,
+        loom,
+        sim.rates,
+        annotations=annotations,
+        body_ids=body_ids,
+    )
+    inhib["looming_inhibition_scale"] = inhib_scale
+    json_path = Path(inhibition_json)
+    json_path.write_text(json.dumps(inhib, indent=2))
+    click.echo(f"Wrote LPLC2/LC4 inhibitory sources to {json_path}")
+    for row in inhib["top_inhibitory_types"][:8]:
+        click.echo(
+            f"  I {row['cell_type']}: Σ(w·r)={row['sum_weight_x_rate']:.4g} "
+            f"n={int(row['n_synapses'])}"
+        )
     click.echo(f"Looming cells driven rate: {report['looming_driven']:.4g}")
     click.echo(
         f"DNp01 rest: {report['dnp01_rest']:.4g}  driven: {report['dnp01_driven']:.4g}  "
@@ -295,10 +363,11 @@ def diagnose_looming(subgraph_path, no_ei, looming):
     )
     click.echo("DNp01 rose above rest." if report["rose"] else "DNp01 did NOT rise above rest.")
     click.echo(
-        f"Closed-loop tonic-then-pulse: rest={report['dnp01_closed_loop_rest']:.4g}  "
+        f"Closed-loop flight-like tonic-then-pulse: rest={report['dnp01_closed_loop_rest']:.4g}  "
         f"driven={report['dnp01_closed_loop_driven']:.4g}  "
         f"late={report['dnp01_closed_loop_late_driven']:.4g}  "
-        f"crossed={int(report['dnp01_closed_loop_crossed'])}"
+        f"crossed={int(report['dnp01_closed_loop_crossed'])}  "
+        f"inhib_scale={report.get('looming_inhibition_scale', inhib_scale)}"
     )
     if report["dnp01_closed_loop_crossed"]:
         click.echo("DNp01 crossed rest+margin after tonic warm-up.")
@@ -377,7 +446,13 @@ def diagnose_looming(subgraph_path, no_ei, looming):
     default=None,
     help="Scale other excitatory incoming onto DNp01/DNp03 (default 1.0 = no attenuation).",
 )
-def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale):
+@click.option(
+    "--looming-inhibition-scale",
+    type=float,
+    default=None,
+    help="Scale inhibitory synapses onto LPLC2/LC4 only (default 0.5).",
+)
+def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale, looming_inhibition_scale):
     """Run 3dfly exploration simulation (static visualization)."""
     from threedfly.runner import run_simulation
     
@@ -407,6 +482,7 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
             use_engineered_looming_residual=engineered_looming_residual,
             looming_path_gain=looming_path_gain,
             looming_rest_incoming_scale=looming_rest_incoming_scale,
+            looming_inhibition_scale=looming_inhibition_scale,
         )
         click.echo("\n✓ Simulation complete!")
     except Exception as e:
@@ -488,7 +564,13 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
     default=None,
     help="Scale other excitatory incoming onto DNp01/DNp03 (default 1.0 = no attenuation).",
 )
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale):
+@click.option(
+    "--looming-inhibition-scale",
+    type=float,
+    default=None,
+    help="Scale inhibitory synapses onto LPLC2/LC4 only (default 0.5).",
+)
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale, looming_inhibition_scale):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -515,6 +597,7 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
             use_engineered_looming_residual=engineered_looming_residual,
             looming_path_gain=looming_path_gain,
             looming_rest_incoming_scale=looming_rest_incoming_scale,
+            looming_inhibition_scale=looming_inhibition_scale,
         )
     except Exception as e:
         click.echo(f"\nError running interactive simulation: {e}", err=True)

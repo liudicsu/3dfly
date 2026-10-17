@@ -161,6 +161,41 @@ def test_approach_correlation_helper():
     assert looming_approach_correlation(np.array([1.0]), np.array([1.0])) == 0.0
 
 
+def test_forward_sector_approach_scores_closing_speed():
+    """Diagnostic Pearson uses forward sectors (0, 1, 7), not the max of all 8."""
+    from threedfly.vision.stereo import (
+        LOOMING_FORWARD_SECTORS,
+        forward_looming_and_approach,
+        looming_approach_correlation,
+    )
+
+    assert tuple(LOOMING_FORWARD_SECTORS) == (0, 1, 7)
+    loom_l = np.array([0.8, 0.6, 0.0, 0.0, 0.9, 0.0, 0.0, 0.5], dtype=np.float32)
+    loom_r = loom_l.copy()
+    prev = np.array([2.0, 1.8, 4.0, 4.0, 4.0, 4.0, 4.0, 1.5], dtype=np.float32)
+    curr = np.array([1.6, 1.5, 4.0, 4.0, 0.05, 4.0, 4.0, 1.2], dtype=np.float32)
+    loom_v, approach_v = forward_looming_and_approach(loom_l, loom_r, prev, curr, dt=0.02)
+    assert approach_v > 0
+    # Back-sector closing (index 4) must not dominate the diagnostic.
+    back_close = float(max(prev[4] - curr[4], 0.0) / 0.02)
+    assert approach_v < back_close, (
+        f"forward approach {approach_v:.1f} should ignore back closing {back_close:.1f}"
+    )
+    series_loom, series_app = [], []
+    distances = np.linspace(2.0, 0.4, 8)
+    for i in range(1, len(distances)):
+        p = np.full(8, 4.0, dtype=np.float32)
+        c = np.full(8, 4.0, dtype=np.float32)
+        p[list(LOOMING_FORWARD_SECTORS)] = distances[i - 1]
+        c[list(LOOMING_FORWARD_SECTORS)] = distances[i]
+        lv = np.zeros(8, dtype=np.float32)
+        lv[list(LOOMING_FORWARD_SECTORS)] = 1.0 / distances[i]
+        loom_i, app_i = forward_looming_and_approach(lv, lv, p, c, dt=0.02)
+        series_loom.append(loom_i)
+        series_app.append(app_i)
+    assert looming_approach_correlation(series_loom, series_app) >= 0.4
+
+
 def test_point_cloud_mapper_init():
     """Test PointCloudMapper initialization."""
     mapper = PointCloudMapper(voxel_size=0.05)

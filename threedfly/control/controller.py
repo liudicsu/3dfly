@@ -182,6 +182,7 @@ class BiologicalFlightController:
             select_haltere_afferent_neurons,
             find_optic_lobe_hex_columns,
             create_fixed_input_assignment,
+            _fill_unlabeled_sides,
         )
         
         self.n_neurons = n_neurons
@@ -198,9 +199,10 @@ class BiologicalFlightController:
         self.flow_reference = 1.0
         self.haltere_reference = 2.0
         self.looming_reference = 1.0
-        # Phasic LPLC2-like encoding: small tonic scale, strong onset kick.
-        self.looming_input_gain = 0.5
+        # Phasic LPLC2-like encoding: onset / positive ROC with decay, no tonic level.
+        self.looming_input_gain = 0.0
         self.looming_onset_gain = 2.0
+        self.looming_onset_decay = 0.8
         self.yaw_baseline_alpha = 0.05  # engineered slow L−R baseline (~1 s)
         self._yaw_baseline = 0.0
         self.silent_side_hz = 1.0
@@ -247,13 +249,19 @@ class BiologicalFlightController:
         
         print(f"Optic flow → T4/T5: {', '.join(flow_subtypes) if flow_subtypes else 'none found'}")
         
-        # Looming → LPLC2 + LC4
-        self.input_mapping["looming_left"] = select_input_neurons_for_looming(
+        # Looming → LPLC2 + LC4 (split unlabeled cells so both hemifields exist)
+        loom_left = select_input_neurons_for_looming(
             annotations, body_ids, body_id_to_idx, side="L"
         )
-        self.input_mapping["looming_right"] = select_input_neurons_for_looming(
+        loom_right = select_input_neurons_for_looming(
             annotations, body_ids, body_id_to_idx, side="R"
         )
+        loom_all = select_input_neurons_for_looming(
+            annotations, body_ids, body_id_to_idx, side=None
+        )
+        loom_left, loom_right = _fill_unlabeled_sides(loom_all, loom_left, loom_right)
+        self.input_mapping["looming_left"] = loom_left
+        self.input_mapping["looming_right"] = loom_right
         print(f"Looming → LPLC2+LC4: L={len(self.input_mapping['looming_left'])}, "
               f"R={len(self.input_mapping['looming_right'])}")
         self._looming_rf_left = self._seeded_rf_indices(
@@ -266,6 +274,12 @@ class BiologicalFlightController:
             len(self.input_mapping["looming_left"]), dtype=np.float32
         )
         self._prev_looming_right = np.zeros(
+            len(self.input_mapping["looming_right"]), dtype=np.float32
+        )
+        self._loom_trace_left = np.zeros(
+            len(self.input_mapping["looming_left"]), dtype=np.float32
+        )
+        self._loom_trace_right = np.zeros(
             len(self.input_mapping["looming_right"]), dtype=np.float32
         )
 
@@ -291,12 +305,40 @@ class BiologicalFlightController:
         )
         
         print(f"\nMotor readout from descending neurons:")
-        for dn_type in ("DNp01", "DNp03", "DNg02", "DNa01", "DNa02", "DNb"):
+        for dn_type in (
+            "DNp01",
+            "DNp03",
+            "DNp03_L",
+            "DNp03_R",
+            "DNg02",
+            "DNa01",
+            "DNa02",
+            "DNa02_L",
+            "DNa02_R",
+            "DNb",
+        ):
             indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
             if len(indices) > 0:
                 print(f"  {dn_type}: {len(indices)} neurons")
             else:
                 print(f"  {dn_type}: not found (graceful fallback)")
+        for name, left_key, right_key in (
+            ("DNp03", "DNp03_L", "DNp03_R"),
+            ("DNa02", "DNa02_L", "DNa02_R"),
+            ("DNg02", "DNg02_L", "DNg02_R"),
+            ("looming", "looming_left", "looming_right"),
+        ):
+            left_n = len(
+                self.output_mapping.get(left_key, self.input_mapping.get(left_key, []))
+            )
+            right_n = len(
+                self.output_mapping.get(right_key, self.input_mapping.get(right_key, []))
+            )
+            denom = min(left_n, right_n)
+            if denom == 0 and max(left_n, right_n) > 0:
+                print(f"  WARNING: {name} L/R mapping {left_n}/{right_n} — one side empty")
+            elif denom > 0 and max(left_n, right_n) / denom > 3.0:
+                print(f"  WARNING: {name} L/R mapping {left_n}/{right_n} differs >3×")
         
         print("="*70)
         
@@ -373,25 +415,28 @@ class BiologicalFlightController:
         return values[assignment].astype(np.float32)
 
     def _encode_looming(self, raw, side: str) -> np.ndarray:
-        """Absolute looming rate code plus an onset kick on rising expansion."""
+        """Onset / positive ROC of local expansion, with exponential decay (no tonic level)."""
         local = self._local_looming(raw, side)
         if local.size == 0:
             return local
         prev = self._prev_looming_left if side == "left" else self._prev_looming_right
+        trace = self._loom_trace_left if side == "left" else self._loom_trace_right
         if prev.size != local.size:
             prev = np.zeros_like(local)
+        if getattr(trace, "size", 0) != local.size:
+            trace = np.zeros_like(local, dtype=np.float32)
         onset = np.maximum(local - prev, 0.0)
-        level_gain = (
-            float(self.looming_input_gain)
-            * float(self.input_drive)
-            / max(float(self.looming_reference), 1e-6)
+        drive = (
+            float(self.looming_onset_decay) * trace
+            + float(self.looming_onset_gain) * onset
         )
-        drive = level_gain * local + float(self.looming_onset_gain) * onset
         drive = np.clip(drive, 0.0, self.input_drive_clip).astype(np.float32)
         if side == "left":
             self._prev_looming_left = local.copy()
+            self._loom_trace_left = drive.copy()
         else:
             self._prev_looming_right = local.copy()
+            self._loom_trace_right = drive.copy()
         self._last_looming = max(self._last_looming, float(np.max(np.abs(local))))
         return drive
 
