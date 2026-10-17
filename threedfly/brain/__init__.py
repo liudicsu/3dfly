@@ -14,7 +14,12 @@ from threedfly.brain.constants import (
     connectome_available,
     flyvis_available,
 )
-from threedfly.brain.core_subgraph import CoreSelection, select_core_tplus, slice_connectome
+from threedfly.brain.core_subgraph import (
+    CoreSelection,
+    load_core_tplus_body_ids,
+    select_core_tplus,
+    slice_connectome,
+)
 from threedfly.brain.handoff import (
     FlyvisCalibration,
     FlyvisEye,
@@ -44,6 +49,7 @@ __all__ = [
     "connectome_available",
     "connectome_from_counts",
     "flyvis_available",
+    "load_core_tplus_body_ids",
     "read_dns",
     "select_core_tplus",
     "slice_connectome",

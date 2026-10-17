@@ -36,11 +36,21 @@ TRACE_KEYS = (
 
 def peak_delta(trace: Iterable[float], base_n: int = 30, stim_n: int = 100) -> float:
     v = np.asarray(list(trace), dtype=float)
-    return float(v[base_n : base_n + stim_n].max() - v[:base_n].mean())
+    if v.size == 0:
+        return 0.0
+    base_n = min(int(base_n), max(1, v.size // 3))
+    hi = min(v.size, base_n + int(stim_n))
+    if hi <= base_n:
+        return 0.0
+    return float(v[base_n:hi].max() - v[:base_n].mean())
 
 
 def end_delta(trace: Iterable[float], base_n: int = 30, end_n: int = 20) -> float:
     v = np.asarray(list(trace), dtype=float)
+    if v.size == 0:
+        return 0.0
+    base_n = min(int(base_n), max(1, v.size // 3))
+    end_n = min(int(end_n), max(1, v.size // 4))
     return float(v[-end_n:].mean() - v[:base_n].mean())
 
 
@@ -48,8 +58,12 @@ def yaw_lr(traces: Mapping[str, Iterable[float]], key: str, base_n: int = 30, st
     """Stimulus-window Δ(L) − Δ(R). CW should be < 0 for HSE and DNa02."""
     L = np.asarray(list(traces[f"{key}|L"]), dtype=float)
     R = np.asarray(list(traces[f"{key}|R"]), dtype=float)
-    dL = L[base_n : base_n + stim_n].mean() - L[:base_n].mean()
-    dR = R[base_n : base_n + stim_n].mean() - R[:base_n].mean()
+    if L.size == 0 or R.size == 0:
+        return 0.0
+    base_n = min(int(base_n), max(1, L.size // 3))
+    hi = min(L.size, base_n + int(stim_n))
+    dL = L[base_n:hi].mean() - L[:base_n].mean()
+    dR = R[base_n:hi].mean() - R[:base_n].mean()
     return float(dL - dR)
 
 

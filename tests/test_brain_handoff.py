@@ -8,8 +8,12 @@ import pytest
 from threedfly.brain.constants import N_HEX, RMAX, connectome_available, flyvis_available
 from threedfly.brain.connectome_matrix import build_signed_matrix
 from threedfly.brain.handoff import (
+    FlyvisCalibration,
     FlyvisEye,
+    apply_handoff_plan,
     build_handoff_map,
+    compile_handoff_plan,
+    handoff_rates_for_frame,
     impute_hex,
     voltages_to_rates,
 )
@@ -56,6 +60,24 @@ def test_handoff_map_covers_both_eyes_and_tmy9_split():
     # TmY9b starts without hex but is connected to TmY9a
     assert hmap.counts.get("TmY9|L", 0) >= 1
     assert hmap.n_mapped >= 3
+
+
+def test_compile_handoff_plan_matches_per_frame():
+    conn = tiny_signed_connectome()
+    hmap = build_handoff_map(conn)
+    uv = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    calib = FlyvisCalibration(
+        V_gray={"T4a": np.array([0.5, 0.5, 0.5], dtype=np.float32)},
+        p99={"T4a": 1.0},
+        uv={"T4a": uv},
+        rmax=150.0,
+    )
+    voltages = {"T4a": np.array([0.5, 1.5, 2.5], dtype=np.float32)}
+    idx_a, rate_a = handoff_rates_for_frame(voltages, calib, hmap, "L")
+    plan = compile_handoff_plan(hmap, calib, "L")
+    idx_b, rate_b = apply_handoff_plan(plan, voltages)
+    np.testing.assert_array_equal(idx_a, idx_b)
+    np.testing.assert_allclose(rate_a, rate_b, atol=1e-5)
 
 
 def test_flyvis_eye_skips_cleanly_when_missing():

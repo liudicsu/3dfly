@@ -288,6 +288,83 @@ def _activity_from_state(state) -> Optional[np.ndarray]:
         return None
 
 
+@dataclass
+class HandoffPlan:
+    """Precomputed nearest-column map so each frame is O(n) indexing."""
+
+    idx: np.ndarray
+    types: np.ndarray
+    cols: np.ndarray
+    v_gray: np.ndarray
+    p99: np.ndarray
+    rmax: float = RMAX
+
+
+def compile_handoff_plan(
+    hmap: HandoffMap,
+    calib: FlyvisCalibration,
+    side: str,
+    remap: Optional[np.ndarray] = None,
+) -> HandoffPlan:
+    idx_all, typ_all, col_all, vg_all, p_all = [], [], [], [], []
+    for t in HANDOFF_FLYVIS_TYPES:
+        key = f"{t}|{side}"
+        if key not in hmap.index or t not in calib.uv or t not in calib.V_gray:
+            continue
+        cidx = hmap.index[key]
+        uv = hmap.uv[key]
+        if cidx.size == 0:
+            continue
+        col = nearest_flyvis_columns(uv, calib.uv[t])
+        V_gray = calib.V_gray[t]
+        vg = V_gray[col] if np.ndim(V_gray) else np.full(col.shape, float(V_gray))
+        if remap is not None:
+            mapped = remap[cidx]
+            ok = mapped >= 0
+            cidx, col, vg = mapped[ok], col[ok], vg[ok]
+        idx_all.append(cidx)
+        typ_all.append(np.full(len(cidx), t, dtype=object))
+        col_all.append(col)
+        vg_all.append(np.asarray(vg, dtype=np.float32))
+        p_all.append(np.full(len(cidx), float(calib.p99[t]), dtype=np.float32))
+    if not idx_all:
+        return HandoffPlan(
+            idx=np.zeros(0, dtype=np.int64),
+            types=np.zeros(0, dtype=object),
+            cols=np.zeros(0, dtype=np.int64),
+            v_gray=np.zeros(0, dtype=np.float32),
+            p99=np.zeros(0, dtype=np.float32),
+            rmax=calib.rmax,
+        )
+    return HandoffPlan(
+        idx=np.concatenate(idx_all).astype(np.int64),
+        types=np.concatenate(typ_all),
+        cols=np.concatenate(col_all).astype(np.int64),
+        v_gray=np.concatenate(vg_all),
+        p99=np.concatenate(p_all),
+        rmax=float(calib.rmax),
+    )
+
+
+def apply_handoff_plan(
+    plan: HandoffPlan,
+    voltages: Dict[str, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    if plan.idx.size == 0:
+        return plan.idx, np.zeros(0, dtype=np.float32)
+    V = np.zeros(plan.idx.size, dtype=np.float32)
+    for t in np.unique(plan.types):
+        if t not in voltages:
+            continue
+        m = plan.types == t
+        src = np.asarray(voltages[t], dtype=np.float32)
+        V[m] = src[plan.cols[m]]
+    rates = (plan.rmax * np.clip(np.maximum(V - plan.v_gray, 0.0) / (plan.p99 + 1e-6), 0.0, 1.0)).astype(
+        np.float32
+    )
+    return plan.idx, rates
+
+
 def handoff_rates_for_frame(
     voltages: Dict[str, np.ndarray],
     calib: FlyvisCalibration,
@@ -298,31 +375,9 @@ def handoff_rates_for_frame(
     """Return (core_indices, rates) for one eye / frame.
 
     ``remap`` maps full-connectome indices → core indices (−1 if dropped).
+    Prefer ``compile_handoff_plan`` + ``apply_handoff_plan`` in tight loops.
     """
-    idx_all, rate_all = [], []
-    for t in HANDOFF_FLYVIS_TYPES:
-        key = f"{t}|{side}"
-        if key not in hmap.index or t not in voltages or t not in calib.uv:
-            continue
-        cidx = hmap.index[key]
-        uv = hmap.uv[key]
-        if cidx.size == 0:
-            continue
-        col = nearest_flyvis_columns(uv, calib.uv[t])
-        V = np.asarray(voltages[t], dtype=np.float32)
-        V_gray = calib.V_gray[t]
-        # V_gray is per flyvis column.
-        vg = V_gray[col] if V_gray.ndim else np.full(col.shape, float(V_gray))
-        rates = voltages_to_rates(V[col], vg, calib.p99[t], calib.rmax)
-        if remap is not None:
-            mapped = remap[cidx]
-            ok = mapped >= 0
-            cidx, rates = mapped[ok], rates[ok]
-        idx_all.append(cidx)
-        rate_all.append(rates)
-    if not idx_all:
-        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
-    return np.concatenate(idx_all), np.concatenate(rate_all)
+    return apply_handoff_plan(compile_handoff_plan(hmap, calib, side, remap=remap), voltages)
 
 
 def haltere_indices(connectome: ConnectomeData, remap: Optional[np.ndarray] = None) -> np.ndarray:

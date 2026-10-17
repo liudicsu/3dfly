@@ -48,7 +48,7 @@ dev = [
 ]
 brain = [
     "torch>=2.0.0",
-    "flyvis",
+    "flyvis>=1.1.0; python_version < '3.13'",
 ]
 
 [project.scripts]
@@ -57,6 +57,9 @@ threedfly = "threedfly.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["threedfly*"]
+
+[tool.setuptools.package-data]
+"threedfly.brain.data" = ["*.txt.gz"]
 
 [tool.black]
 line-length = 100

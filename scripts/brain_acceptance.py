@@ -4,6 +4,7 @@
 Single command (verification machine with connectome + flyvis):
 
     python scripts/brain_acceptance.py
+    python scripts/brain_acceptance.py --quick   # short movies, unofficial metrics
 
 Writes ``output/m1/acceptance.json`` and a trace plot. Prints T1–T7 plus
 ms/step (brain-only and flyvis). Skips nothing here — missing data is an error
@@ -41,9 +42,10 @@ from threedfly.brain.core_subgraph import select_core_tplus, slice_connectome
 from threedfly.brain.handoff import (
     FlyvisCalibration,
     FlyvisEye,
+    apply_handoff_plan,
     build_handoff_map,
+    compile_handoff_plan,
     haltere_indices,
-    handoff_rates_for_frame,
 )
 from threedfly.brain.rate_core import RateCore
 from threedfly.brain.readouts import build_readout_index
@@ -68,42 +70,58 @@ def _run_core(
     core: RateCore,
     index,
     cond_acts,
-    hmap,
-    calib,
-    remap,
+    plans,
     halt,
     settle: int = 50,
+    pre_steps: int = 100,
     flyvis_ms: float = 0.0,
+    label: str = "brain",
 ) -> dict:
     traces = {}
     nceil_rest = 0
     brain_ms = []
-    nT = next(iter(cond_acts.values()))
-    nT = next(iter(nT.values())).shape[0]
-    for name, (cl, cr) in SCENARIOS.items():
+    nT = next(iter(next(iter(cond_acts.values())).values())).shape[0]
+    n_scen = len(SCENARIOS)
+    print(
+        f"{label}: {n_scen} scenarios × {settle + nT} steps (settle={settle}, movie={nT})",
+        flush=True,
+    )
+    for si, (name, (cl, cr)) in enumerate(SCENARIOS.items(), 1):
         core.reset()
         tr = {k: [] for k in TRACE_KEYS if k in index}
+        scen_ms = []
+        t_sc = time.perf_counter()
         for k in range(settle + nT):
             f = max(0, k - settle)
             VL = _voltages_at(cond_acts, cl, f)
             VR = _voltages_at(cond_acts, cr, f)
-            IL, RL = handoff_rates_for_frame(VL, calib, hmap, "L", remap)
-            IR, RR = handoff_rates_for_frame(VR, calib, hmap, "R", remap)
+            IL, RL = apply_handoff_plan(plans["L"], VL)
+            IR, RR = apply_handoff_plan(plans["R"], VR)
             ci = np.concatenate([IL, IR, halt]) if halt.size else np.concatenate([IL, IR])
             cv = np.concatenate(
                 [RL, RR, np.full(len(halt), HALTERE_RATE, dtype=np.float32)]
             )
             t0 = time.perf_counter()
             r = core.step(clamp_idx=ci, clamp_val=cv)
-            brain_ms.append(1000.0 * (time.perf_counter() - t0))
-            if name == "gray" and k == settle + 20:
+            dt_ms = 1000.0 * (time.perf_counter() - t0)
+            brain_ms.append(dt_ms)
+            scen_ms.append(dt_ms)
+            rest_k = min(settle + 20, settle + nT - 1)
+            if name == "gray" and k == rest_k:
                 nceil_rest = int((r >= core.cap - 1).sum())
             for key in tr:
                 tr[key].append(float(r[index[key]].mean()) if index.size(key) else 0.0)
-        s0 = settle + int(round(1.0 / DT))
+        s0 = settle + int(pre_steps)
+        start = max(0, s0 - 30)
         traces[name] = {
-            "trace": {k: np.round(np.array(v)[s0 - 30 :], 3).tolist() for k, v in tr.items()},
+            "trace": {k: np.round(np.array(v)[start:], 3).tolist() for k, v in tr.items()},
         }
+        elapsed = time.perf_counter() - t_sc
+        print(
+            f"  [{si}/{n_scen}] {name}: {settle + nT} steps, "
+            f"{float(np.median(scen_ms)):.2f} ms/step ({elapsed:.1f}s)",
+            flush=True,
+        )
     summary = summarize_traces(traces, nceil_rest=nceil_rest)
     summary["ms_per_step_brain"] = round(float(np.median(brain_ms)), 2)
     summary["ms_per_frame_flyvis"] = round(float(flyvis_ms), 2)
@@ -141,6 +159,11 @@ def main(argv=None) -> int:
     p.add_argument("--dng02-bias", type=float, default=DNG02_BIAS_DEFAULT)
     p.add_argument("--no-shuffle-control", action="store_true")
     p.add_argument(
+        "--quick",
+        action="store_true",
+        help="Short movies + no shuffle so a 2-core box finishes in a few minutes (metrics unofficial)",
+    )
+    p.add_argument(
         "--rho-mode",
         choices=("subgraph", "full_reference"),
         default="subgraph",
@@ -156,7 +179,12 @@ def main(argv=None) -> int:
         )
         return 2
     if not flyvis_available():
-        print("ERROR: flyvis is not installed. pip install 'threedfly[brain]'", file=sys.stderr)
+        print(
+            "ERROR: flyvis is not installed. "
+            "On Python 3.12: pip install -e '.[brain]'. "
+            "On Python 3.13 flyvis is not on PyPI; use a 3.12 venv (see README).",
+            file=sys.stderr,
+        )
         return 2
 
     print("Building signed connectome matrix…")
@@ -198,17 +226,26 @@ def main(argv=None) -> int:
     hmap = build_handoff_map(conn)
     print(f"  mapped neurons={hmap.n_mapped} sides={sorted(hmap.sides_present())}")
 
-    print("Init flyvis + calibration (batch simulate, as fv4_run.py)…")
+    print("Init flyvis + calibration (batch simulate, as fv4_run.py)…", flush=True)
     eye = FlyvisEye(torch_threads=2)
     cache = Path(args.output).parent / "flyvis_cal.npz"
-    movies = acceptance_eye_movies()
+    if args.quick:
+        movies = acceptance_eye_movies(pre=0.3, stim=0.3, loom_T=0.3, tail=0.2)
+        settle, pre_steps = 15, 30
+        print("  --quick: pre=0.3s stim=0.3s settle=15, shuffle off (metrics unofficial)", flush=True)
+    else:
+        movies = acceptance_eye_movies()
+        settle, pre_steps = 50, int(round(1.0 / DT))
     if cache.is_file():
         calib = FlyvisCalibration.load(cache)
-        print(f"  loaded calibration {cache}")
+        print(f"  loaded calibration {cache}", flush=True)
     else:
         calib = eye.calibrate(conditions=movies)
-        calib.save(cache)
-        print(f"  wrote calibration {cache}")
+        if not args.quick:
+            calib.save(cache)
+            print(f"  wrote calibration {cache}", flush=True)
+        else:
+            print("  --quick: calibration not cached", flush=True)
     cond_acts = {}
     fly_ms = []
     for name, movie in movies.items():
@@ -216,16 +253,36 @@ def main(argv=None) -> int:
         acts, ms = eye.simulate_movie(movie)
         cond_acts[name] = acts
         fly_ms.append(ms)
-        print(f"  {name}: {movie.shape[0]} frames, {ms:.2f} ms/frame")
+        print(f"  flyvis {name}: {movie.shape[0]} frames, {ms:.2f} ms/frame", flush=True)
     halt = haltere_indices(conn, remap)
+    print("Compiling handoff column map (once)…", flush=True)
+    t_plan = time.perf_counter()
+    plans = {
+        "L": compile_handoff_plan(hmap, calib, "L", remap),
+        "R": compile_handoff_plan(hmap, calib, "R", remap),
+    }
+    print(
+        f"  L={plans['L'].idx.size} R={plans['R'].idx.size} mapped "
+        f"({time.perf_counter() - t_plan:.1f}s)",
+        flush=True,
+    )
 
-    print("Running brain scenarios…")
+    print("Running brain scenarios…", flush=True)
     result = _run_core(
-        core, index, cond_acts, hmap, calib, remap, halt, flyvis_ms=float(np.median(fly_ms))
+        core,
+        index,
+        cond_acts,
+        plans,
+        halt,
+        settle=settle,
+        pre_steps=pre_steps,
+        flyvis_ms=float(np.median(fly_ms)),
+        label="brain",
     )
     shuffle_summary = None
-    if not args.no_shuffle_control:
-        print("Shuffle control…")
+    run_shuffle = not args.no_shuffle_control and not args.quick
+    if run_shuffle:
+        print("Shuffle control…", flush=True)
         shuf = RateCore.from_connectome(
             sub,
             g_inh=args.g_inh,
@@ -235,7 +292,15 @@ def main(argv=None) -> int:
             rho=rho_arg,
         )
         sh = _run_core(
-            shuf, index, cond_acts, hmap, calib, remap, halt, flyvis_ms=float(np.median(fly_ms))
+            shuf,
+            index,
+            cond_acts,
+            plans,
+            halt,
+            settle=settle,
+            pre_steps=pre_steps,
+            flyvis_ms=float(np.median(fly_ms)),
+            label="shuffle",
         )
         shuffle_summary = sh["summary"]
 
@@ -250,6 +315,7 @@ def main(argv=None) -> int:
         "g_inh": args.g_inh,
         "g_gap": args.g_gap,
         "dng02_bias": args.dng02_bias,
+        "quick": bool(args.quick),
         "handoff_mapped": hmap.n_mapped,
         "summary": result["summary"],
         "shuffle_summary": shuffle_summary,

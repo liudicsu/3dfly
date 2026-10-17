@@ -1,10 +1,13 @@
-"""coreTplus cell-type subgraph (research_r4/core_type.py + inh_sources.json)."""
+"""coreTplus cell-type subgraph (research body-ID list + type-graph fallback)."""
 
 from __future__ import annotations
 
+import gzip
 import logging
 from dataclasses import dataclass, field
-from typing import Iterable, Optional, Sequence
+from importlib.resources import files
+from pathlib import Path
+from typing import Iterable, Optional, Sequence, Union
 
 import numpy as np
 import scipy.sparse as sp
@@ -16,6 +19,7 @@ from threedfly.brain.constants import (
     CORE_THR,
     CORE_TPLUS_N_TARGET,
     CORE_TPLUS_N_TOL,
+    CORE_TPLUS_N_TYPES,
     DNP03_BODY,
     FORCED_TYPES,
     HANDOFF_CONNECTOME_TYPES,
@@ -94,7 +98,108 @@ def is_required_type(name: str) -> bool:
     return any(str(name).startswith(p) for p in REQUIRED_PREFIXES + ("DNg02",))
 
 
+def core_tplus_bodyids_resource():
+    return files("threedfly.brain.data").joinpath("coreTplus_bodyids.txt.gz")
+
+
+def load_core_tplus_body_ids(
+    path: Optional[Union[str, Path]] = None,
+) -> np.ndarray:
+    """Research coreTplus MaleCNS body IDs (45,230 unique)."""
+    if path is None:
+        with core_tplus_bodyids_resource().open("rb") as fh:
+            with gzip.open(fh, "rt") as gz:
+                return np.fromiter((int(line) for line in gz if line.strip()), dtype=np.int64)
+    p = str(path)
+    if p.endswith(".gz"):
+        with gzip.open(p, "rt") as gz:
+            return np.fromiter((int(line) for line in gz if line.strip()), dtype=np.int64)
+    return np.loadtxt(p, dtype=np.int64)
+
+
+def _selection_from_keep(connectome: ConnectomeData, keep: np.ndarray, recipe: str, extras: dict) -> CoreSelection:
+    keep = np.unique(np.asarray(keep, dtype=np.int64))
+    W_sub = connectome.W[keep][:, keep]
+    keep_types = tuple(sorted({str(t) for t in connectome.typ[keep] if str(t)}))
+    return CoreSelection(
+        keep=keep,
+        keep_types=keep_types,
+        n_neurons=int(len(keep)),
+        n_types=len(keep_types),
+        nnz=int(W_sub.nnz),
+        recipe=recipe,
+        extras=extras,
+    )
+
+
+def select_core_tplus_body_ids(
+    connectome: ConnectomeData,
+    body_ids: Optional[np.ndarray] = None,
+) -> CoreSelection:
+    """Map the packaged research body-ID list onto ``connectome.body_ids``."""
+    ref = np.asarray(load_core_tplus_body_ids() if body_ids is None else body_ids, dtype=np.int64)
+    order = np.argsort(connectome.body_ids, kind="mergesort")
+    sorted_ids = connectome.body_ids[order]
+    pos = np.searchsorted(sorted_ids, ref)
+    in_range = pos < len(sorted_ids)
+    pos_c = np.clip(pos, 0, max(len(sorted_ids) - 1, 0))
+    matched = in_range & (sorted_ids[pos_c] == ref)
+    keep = order[pos_c[matched]]
+    keep.sort()
+    n_miss = int((~matched).sum())
+    if keep.size == 0:
+        raise ValueError(
+            "No coreTplus body IDs matched this connectome. "
+            "For synthetic graphs pass method='recipe'."
+        )
+    recipe = (
+        f"coreTplus body-ID list ({len(ref)} packaged IDs) mapped onto connectome "
+        f"body_ids; matched={len(keep)} missing={n_miss} "
+        f"(research {CORE_TPLUS_N_TARGET} neurons / {CORE_TPLUS_N_TYPES} types)."
+    )
+    logger.info(recipe)
+    if n_miss:
+        logger.warning("coreTplus body-ID map missed %d of %d IDs", n_miss, len(ref))
+    return _selection_from_keep(
+        connectome,
+        keep,
+        recipe,
+        extras={"method": "body_ids", "n_ref": int(len(ref)), "n_missing": n_miss},
+    )
+
+
 def select_core_tplus(
+    connectome: ConnectomeData,
+    method: str = "body_ids",
+    thr: int = CORE_THR,
+    k_handoff_dn: int = CORE_K_HANDOFF_DN,
+    k_dn_mn: int = CORE_K_DN_MN,
+    extra_types: Sequence[str] = (),
+    body_ids: Optional[np.ndarray] = None,
+) -> CoreSelection:
+    """Select the coreTplus subgraph.
+
+    Default ``method='body_ids'`` loads the research list
+    ``threedfly/brain/data/coreTplus_bodyids.txt.gz`` (45,230 MaleCNS IDs)
+    and maps them through ``connectome.body_ids``.
+
+    ``method='recipe'`` is the type-graph reconstruction (thr/K + forced +
+    inh_sources). Use it for synthetic graphs that do not carry MaleCNS IDs.
+    """
+    if method == "body_ids":
+        return select_core_tplus_body_ids(connectome, body_ids=body_ids)
+    if method != "recipe":
+        raise ValueError(f"unknown coreTplus method {method!r}; use 'body_ids' or 'recipe'")
+    return select_core_tplus_recipe(
+        connectome,
+        thr=thr,
+        k_handoff_dn=k_handoff_dn,
+        k_dn_mn=k_dn_mn,
+        extra_types=extra_types,
+    )
+
+
+def select_core_tplus_recipe(
     connectome: ConnectomeData,
     thr: int = CORE_THR,
     k_handoff_dn: int = CORE_K_HANDOFF_DN,
@@ -108,13 +213,11 @@ def select_core_tplus(
       2. Keep types on a handoff→DN path whose hop-sum ≤ ``k_handoff_dn``
          using edges with ≥ ``thr`` synapses (default thr=300, K=2).
       3. Keep types on a DN→wing-MN path with hop-sum ≤ ``k_dn_mn`` (default 3).
-      4. Force HS / LPLC / LC4 / LPi43 / LPi34.
-      5. Force inhibitory sources onto LPLC2/LC4 from research_r4/inh_sources.json
+      4. Force every handoff, target-DN, and wing-MN type (research ``hs+dn+mn``).
+      5. Force HS / LPLC / LC4 / LPi43 / LPi34.
+      6. Force inhibitory sources onto LPLC2/LC4 from research_r4/inh_sources.json
          — this is the “plus” in coreTplus; coreT_thr300_K2 alone fails T3.
-      6. Force required DNs / DNg02* / TTMn / PSI / DLMn* and spec body IDs.
-
-    Target neuron count is 45,230 ± 5%. The exact saved index from r4 was not
-    checked in; this reconstructs it from the published recipe.
+      7. Force required DNs / DNg02* / TTMn / PSI / DLMn* and spec body IDs.
     """
     typ = connectome.typ
     ut, inv = _unique_types(typ)
@@ -140,6 +243,7 @@ def select_core_tplus(
     for t in list(ut):
         if is_required_type(str(t)):
             forced.add(str(t))
+    keep_t |= set(handoff + dns + mns)
     keep_t |= set(_ids_for(forced, tid))
     keep_t.discard(tid.get("__untyped", -1))
 
@@ -180,7 +284,7 @@ def select_core_tplus(
         n_types=len(keep_types),
         nnz=int(W_sub.nnz),
         recipe=recipe,
-        extras={"thr": thr, "k_handoff_dn": k_handoff_dn, "k_dn_mn": k_dn_mn},
+        extras={"method": "recipe", "thr": thr, "k_handoff_dn": k_handoff_dn, "k_dn_mn": k_dn_mn},
     )
 
 

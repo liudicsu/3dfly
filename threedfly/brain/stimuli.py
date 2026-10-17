@@ -94,23 +94,36 @@ def expansion(
     ).astype(np.float32)
 
 
-def calibration_conditions(pre: float = 1.0, stim: float = 1.0, dt: float = DT) -> Dict[str, np.ndarray]:
+def calibration_conditions(
+    pre: float = 1.0,
+    stim: float = 1.0,
+    loom_T: float = 0.6,
+    tail: float = 1.0,
+    dt: float = DT,
+) -> Dict[str, np.ndarray]:
     """Gray + loom + gratings + expansion used to fit V_gray / p99.9."""
+    post_loom = max(tail + stim - loom_T, dt)
     return {
-        "gray": gray(pre + stim + 1.0, dt=dt),
-        "loom": np.concatenate([gray(pre, dt=dt), loom(0.6, dt=dt), gray(stim + 1.0 - 0.6, dt=dt)]),
-        "grat_px": np.concatenate([gray(pre, dt=dt), grating(stim, +1, dt=dt), gray(1.0, dt=dt)]),
-        "grat_nx": np.concatenate([gray(pre, dt=dt), grating(stim, -1, dt=dt), gray(1.0, dt=dt)]),
+        "gray": gray(pre + stim + tail, dt=dt),
+        "loom": np.concatenate([gray(pre, dt=dt), loom(loom_T, dt=dt), gray(post_loom, dt=dt)]),
+        "grat_px": np.concatenate([gray(pre, dt=dt), grating(stim, +1, dt=dt), gray(tail, dt=dt)]),
+        "grat_nx": np.concatenate([gray(pre, dt=dt), grating(stim, -1, dt=dt), gray(tail, dt=dt)]),
         "loom_front": np.concatenate(
-            [gray(pre, dt=dt), loom(0.6, x0=60.0, dt=dt), gray(stim + 1.0 - 0.6, dt=dt)]
+            [gray(pre, dt=dt), loom(loom_T, x0=60.0, dt=dt), gray(post_loom, dt=dt)]
         ),
-        "expand": np.concatenate([gray(pre, dt=dt), expansion(stim, dt=dt), gray(1.0, dt=dt)]),
+        "expand": np.concatenate([gray(pre, dt=dt), expansion(stim, dt=dt), gray(tail, dt=dt)]),
     }
 
 
-def acceptance_eye_movies(pre: float = 1.0, stim: float = 1.0, dt: float = DT) -> Dict[str, np.ndarray]:
+def acceptance_eye_movies(
+    pre: float = 1.0,
+    stim: float = 1.0,
+    loom_T: float = 0.6,
+    tail: float = 1.0,
+    dt: float = DT,
+) -> Dict[str, np.ndarray]:
     """Per-eye hex movies. Scenarios pair these as in e2e4.py."""
-    return calibration_conditions(pre=pre, stim=stim, dt=dt)
+    return calibration_conditions(pre=pre, stim=stim, loom_T=loom_T, tail=tail, dt=dt)
 
 
 # (left_cond, right_cond) — research_r4/e2e4.py

@@ -147,6 +147,24 @@ cd 3dfly
 pip install -e ".[dev]"
 ```
 
+### Optional flyvis extra (`[brain]`, M1)
+
+`pip install -e ".[brain]"` always installs PyTorch. **flyvis** (TuragaLab) declares
+`Requires-Python: >=3.9,<3.13` on PyPI and on git `main`, so it is only pulled
+on Python 3.12 and earlier. A git URL does not lift that pin.
+
+The default box venv is Python 3.13 — the extra is installable there (torch only;
+flyvis is skipped via an environment marker). For the M1 acceptance run and any
+test that needs flyvis, use a 3.12 environment:
+
+```bash
+python3.12 -m venv .venv312
+source .venv312/bin/activate
+pip install -e ".[brain]"
+python scripts/brain_acceptance.py          # full T1–T7 (needs connectome + flyvis)
+python scripts/brain_acceptance.py --quick  # short movies, no shuffle, a few minutes
+```
+
 ---
 
 ## Quick Start
