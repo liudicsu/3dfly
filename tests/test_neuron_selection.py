@@ -326,51 +326,54 @@ def test_t4_and_t5_populations_are_distinct():
 
 
 def test_select_input_neurons_for_looming():
-    """Test LPLC2 + LC4 selection by side."""
-    from threedfly.connectome.neuron_selection import select_input_neurons_for_looming
+    """Test LPLC1/LPLC2/LPLC4/LC4 selection by side."""
+    from threedfly.connectome.neuron_selection import (
+        select_input_neurons_for_looming,
+        looming_type_composition,
+    )
     
     annotations = pd.DataFrame({
-        "bodyId": [1, 2, 3, 4, 5],
-        "type": ["LPLC2", "LPLC2", "LC4", "LC4", "other"],
-        "celltype": ["LPLC2", "LPLC2", "LC4", "LC4", "other"],
-        "somaSide": ["L", "R", "L", "R", "L"],
+        "bodyId": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "type": ["LPLC2", "LPLC2", "LC4", "LC4", "LPLC1", "LPLC1", "LPLC4", "LPLC4", "other"],
+        "celltype": ["LPLC2", "LPLC2", "LC4", "LC4", "LPLC1", "LPLC1", "LPLC4", "LPLC4", "other"],
+        "somaSide": ["L", "R", "L", "R", "L", "R", "L", "R", "L"],
     })
     
-    body_ids = np.array([1, 2, 3, 4, 5])
+    body_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9])
     body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
     
     # Select left
     left_indices = select_input_neurons_for_looming(
         annotations, body_ids, body_id_to_idx, side="L"
     )
-    assert len(left_indices) == 2  # LPLC2 + LC4 on left
-    assert set(left_indices) == {0, 2}
+    assert set(left_indices) == {0, 2, 4, 6}  # LPLC2, LC4, LPLC1, LPLC4 on left
     
     # Select right
     right_indices = select_input_neurons_for_looming(
         annotations, body_ids, body_id_to_idx, side="R"
     )
-    assert len(right_indices) == 2  # LPLC2 + LC4 on right
-    assert set(right_indices) == {1, 3}
+    assert set(right_indices) == {1, 3, 5, 7}
+    comp = looming_type_composition(annotations, body_ids, left_indices)
+    assert comp == {"LPLC1": 1, "LPLC2": 1, "LPLC4": 1, "LC4": 1}
 
 
 def test_looming_does_not_overmatch_similar_types():
-    """LPLC4 / LC40 / LC43 must not be selected as LPLC2+LC4."""
+    """LC40 / LC43 must not be selected; LPLC1/LPLC4/LC4 must."""
     from threedfly.connectome.neuron_selection import select_input_neurons_for_looming
 
     annotations = pd.DataFrame({
-        "bodyId": [1, 2, 3, 4, 5, 6, 7, 8],
-        "type": ["LPLC2", "LC4", "LPLC4", "LC40", "LC43", "LC41", "LC46b", "LC44"],
-        "celltype": ["LPLC2", "LC4", "LPLC4", "LC40", "LC43", "LC41", "LC46b", "LC44"],
-        "somaSide": ["L"] * 8,
+        "bodyId": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "type": ["LPLC2", "LC4", "LPLC4", "LPLC1", "LC40", "LC43", "LC41", "LC46b", "LC44"],
+        "celltype": ["LPLC2", "LC4", "LPLC4", "LPLC1", "LC40", "LC43", "LC41", "LC46b", "LC44"],
+        "somaSide": ["L"] * 9,
     })
-    body_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8])
+    body_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9])
     body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
 
     left = select_input_neurons_for_looming(
         annotations, body_ids, body_id_to_idx, side="L"
     )
-    assert set(left) == {0, 1}
+    assert set(left) == {0, 1, 2, 3}
 
 
 def test_transmitter_to_sign_mapping():

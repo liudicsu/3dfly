@@ -183,6 +183,8 @@ class BiologicalFlightController:
             find_optic_lobe_hex_columns,
             create_fixed_input_assignment,
             _fill_unlabeled_sides,
+            describe_side_assignment,
+            looming_type_composition,
         )
         
         self.n_neurons = n_neurons
@@ -203,6 +205,11 @@ class BiologicalFlightController:
         self.looming_input_gain = 0.0
         self.looming_onset_gain = 2.0
         self.looming_onset_decay = 0.8
+        # Multiply encoded onset by typical |I_syn| onto LPLC2/LC4 (flight-matched).
+        self.looming_syn_match = 1.5
+        self.looming_current_scale = 1.0
+        self.looming_current_clip = 200.0
+        self.giant_fiber_ceiling_error = False
         self.yaw_baseline_alpha = 0.05  # engineered slow L−R baseline (~1 s)
         self._yaw_baseline = 0.0
         self.silent_side_hz = 1.0
@@ -217,6 +224,7 @@ class BiologicalFlightController:
         self._last_warmup_activity = None
         self._escape_yaw_sign = 0.0
         self._dnp03_prev_active = False
+        self._last_side_drive = {"left": 0.0, "right": 0.0}
         
         # Input mapping: visual features → neuron populations
         print("\n[Biological I/O Mapping]")
@@ -249,7 +257,7 @@ class BiologicalFlightController:
         
         print(f"Optic flow → T4/T5: {', '.join(flow_subtypes) if flow_subtypes else 'none found'}")
         
-        # Looming → LPLC2 + LC4 (split unlabeled cells so both hemifields exist)
+        # Looming → ipsilateral LPLC1/LPLC2/LPLC4/LC4 (LPLC2→DNp01; LC4/LPLC1/LPLC4→DNp03)
         loom_left = select_input_neurons_for_looming(
             annotations, body_ids, body_id_to_idx, side="L"
         )
@@ -262,8 +270,19 @@ class BiologicalFlightController:
         loom_left, loom_right = _fill_unlabeled_sides(loom_all, loom_left, loom_right)
         self.input_mapping["looming_left"] = loom_left
         self.input_mapping["looming_right"] = loom_right
-        print(f"Looming → LPLC2+LC4: L={len(self.input_mapping['looming_left'])}, "
-              f"R={len(self.input_mapping['looming_right'])}")
+        left_comp = looming_type_composition(annotations, body_ids, loom_left)
+        right_comp = looming_type_composition(annotations, body_ids, loom_right)
+        print(
+            f"Looming → LPLC1/LPLC2/LPLC4/LC4: L={len(loom_left)}, R={len(loom_right)}"
+        )
+        print(
+            "  left types: "
+            + ", ".join(f"{k}={v}" for k, v in left_comp.items())
+        )
+        print(
+            "  right types: "
+            + ", ".join(f"{k}={v}" for k, v in right_comp.items())
+        )
         self._looming_rf_left = self._seeded_rf_indices(
             len(self.input_mapping["looming_left"]), len(LOOMING_LEFT_SECTORS), seed=42
         )
@@ -315,7 +334,13 @@ class BiologicalFlightController:
             "DNa02",
             "DNa02_L",
             "DNa02_R",
+            "DNa15",
+            "DNa15_L",
+            "DNa15_R",
             "DNb",
+            "DNb01",
+            "DNb01_L",
+            "DNb01_R",
         ):
             indices = self.output_mapping.get(dn_type, np.array([], dtype=np.int32))
             if len(indices) > 0:
@@ -339,6 +364,24 @@ class BiologicalFlightController:
                 print(f"  WARNING: {name} L/R mapping {left_n}/{right_n} — one side empty")
             elif denom > 0 and max(left_n, right_n) / denom > 3.0:
                 print(f"  WARNING: {name} L/R mapping {left_n}/{right_n} differs >3×")
+        for key in (
+            "DNp03_L",
+            "DNp03_R",
+            "DNa02_L",
+            "DNa02_R",
+            "looming_left",
+            "looming_right",
+        ):
+            idx = self.output_mapping.get(key, self.input_mapping.get(key, np.array([], dtype=np.int32)))
+            rows = describe_side_assignment(annotations, body_ids, body_id_to_idx, idx)
+            print(f"  {key} n={len(rows)} (idx, bodyId, somaSide, rootSide):")
+            for rec in rows[:12]:
+                print(
+                    f"    {rec['index']}  {rec['bodyId']}  "
+                    f"soma={rec['somaSide']} root={rec['rootSide']}"
+                )
+            if len(rows) > 12:
+                print(f"    ... {len(rows) - 12} more")
         
         print("="*70)
         
@@ -426,19 +469,76 @@ class BiologicalFlightController:
         if getattr(trace, "size", 0) != local.size:
             trace = np.zeros_like(local, dtype=np.float32)
         onset = np.maximum(local - prev, 0.0)
-        drive = (
+        feature = (
             float(self.looming_onset_decay) * trace
             + float(self.looming_onset_gain) * onset
         )
-        drive = np.clip(drive, 0.0, self.input_drive_clip).astype(np.float32)
+        feature = np.clip(feature, 0.0, self.input_drive_clip).astype(np.float32)
         if side == "left":
             self._prev_looming_left = local.copy()
-            self._loom_trace_left = drive.copy()
+            self._loom_trace_left = feature.copy()
         else:
             self._prev_looming_right = local.copy()
-            self._loom_trace_right = drive.copy()
+            self._loom_trace_right = feature.copy()
+        drive = feature * float(self.looming_current_scale)
+        drive = np.clip(drive, 0.0, float(self.looming_current_clip)).astype(np.float32)
         self._last_looming = max(self._last_looming, float(np.max(np.abs(local))))
+        self._last_side_drive[side] = float(np.mean(drive)) if drive.size else 0.0
         return drive
+
+    def reset_looming_encoder(self) -> None:
+        """Clear onset traces so the next frame is a true rising edge."""
+        self._prev_looming_left = np.zeros_like(self._prev_looming_left)
+        self._prev_looming_right = np.zeros_like(self._prev_looming_right)
+        self._loom_trace_left = np.zeros_like(self._loom_trace_left)
+        self._loom_trace_right = np.zeros_like(self._loom_trace_right)
+
+    def match_looming_input_to_synapses(self, brain, reference_rate: float = 0.8) -> float:
+        """Set looming current scale so a unit onset matches typical |I_syn| onto LPLC2/LC4."""
+        from threedfly.connectome.simulator import typical_incoming_current
+
+        loom = np.concatenate([
+            np.asarray(self.input_mapping.get("looming_left", []), dtype=np.int32),
+            np.asarray(self.input_mapping.get("looming_right", []), dtype=np.int32),
+        ])
+        typical = typical_incoming_current(
+            brain.adj, loom, reference_rate=reference_rate
+        )
+        self.looming_current_scale = max(
+            float(typical) * float(self.looming_syn_match), 1.0
+        )
+        print(
+            f"  Looming current scale={self.looming_current_scale:.3f} "
+            f"(typical |I_syn|={typical:.3f} × match={self.looming_syn_match})"
+        )
+        return float(self.looming_current_scale)
+
+    def set_flight_like_input(
+        self,
+        brain,
+        looming_left=0.0,
+        looming_right=0.0,
+        other: float = 0.8,
+    ) -> None:
+        """Drive other senses at flight-like level and looming through the flight encoder."""
+        flow = {}
+        for key, idx in self.input_mapping.items():
+            if idx is None or len(idx) == 0:
+                continue
+            if key.startswith("t4") or key.startswith("t5"):
+                flow[key] = float(other)
+        ang = np.array(
+            [0.0, 0.0, float(other) * float(self.haltere_reference) / max(float(self.input_drive), 1e-6)],
+            dtype=np.float32,
+        )
+        self.set_visual_input(
+            left_luminance=float(other),
+            right_luminance=float(other),
+            optic_flow_features=flow,
+            looming_features={"left": looming_left, "right": looming_right},
+            brain=brain,
+            angular_velocity=ang,
+        )
 
     def set_visual_input(
         self,
@@ -622,13 +722,48 @@ class BiologicalFlightController:
         print("Resting rates (median ± MAD-scale):")
         for dn_type, rate in self.resting_rates.items():
             print(f"  {dn_type}: {rate:.4f} ± {self.resting_std.get(dn_type, 0):.4f}")
+        print(
+            f"  Per-side looming drive (last): "
+            f"L={self._last_side_drive.get('left', 0.0):.4f} "
+            f"R={self._last_side_drive.get('right', 0.0):.4f}"
+        )
+        for name, lk, rk in (
+            ("DNp03", "DNp03_L", "DNp03_R"),
+            ("DNa02", "DNa02_L", "DNa02_R"),
+        ):
+            lv = abs(float(self.resting_rates.get(lk, 0.0)))
+            rv = abs(float(self.resting_rates.get(rk, 0.0)))
+            hi, lo = max(lv, rv), min(lv, rv)
+            if lo > 1e-6 and hi / lo > 3.0:
+                print(
+                    f"  WARNING: {name} rest L={lv:.3f} R={rv:.3f} differs >3× "
+                    f"(side assignment / input mapping)"
+                )
 
-    def apply_giant_fiber_calibration(self, brain, target_rest: Optional[float] = None) -> None:
-        """Lower DNp01/DNp03 rest via per-neuron thresholds so looming can spike above rest."""
+    def apply_giant_fiber_calibration(self, brain, target_rest: Optional[float] = None) -> dict:
+        """Lower DNp01/DNp03 rest via per-neuron thresholds so looming can spike above rest.
+
+        If DNp01 is already at the rate ceiling, refuse calibration (raising the
+        threshold around 50 Hz hides a stuck-on network) and report an error.
+        """
         target = self.dnp01_target_rest if target_rest is None else float(target_rest)
         if not hasattr(brain, "apply_rest_thresholds"):
-            return
+            return {"skipped_ceiling": False}
         activity = self._last_warmup_activity
+        max_rate = float(getattr(brain, "max_rate", 50.0))
+        dnp_idx = self.output_mapping.get("DNp01", np.array([], dtype=np.int32))
+        if dnp_idx is not None and len(dnp_idx) > 0:
+            if activity is not None and len(activity) > int(np.max(dnp_idx)):
+                dnp_obs = np.asarray(activity[dnp_idx], dtype=float)
+            else:
+                dnp_obs = np.array([self.resting_rates.get("DNp01", 0.0)], dtype=float)
+            if float(np.mean(dnp_obs)) >= 0.9 * max_rate:
+                print(
+                    "ERROR: DNp01 at the rate ceiling during warm-up "
+                    f"({float(np.mean(dnp_obs)):.1f} Hz); refusing threshold calibration."
+                )
+                self.giant_fiber_ceiling_error = True
+                return {"skipped_ceiling": True}
         for key in ("DNp01", "DNp03", "DNp03_L", "DNp03_R"):
             idx = self.output_mapping.get(key, np.array([], dtype=np.int32))
             if idx is None or len(idx) == 0:
@@ -640,6 +775,7 @@ class BiologicalFlightController:
             brain.apply_rest_thresholds(idx, observed, target_rest=target)
             if key in self.resting_rates:
                 self.resting_rates[key] = min(float(self.resting_rates[key]), target)
+        return {"skipped_ceiling": False}
 
     def _threat_yaw_sign(self, brain_activity: np.ndarray) -> float:
         """+1 turn left (away from right threat), -1 turn right (away from left threat)."""
@@ -738,7 +874,8 @@ class BiologicalFlightController:
         
         Maps specific DN types to motor commands:
         - DNp01: escape → short brake + turn away from the looming side
-        - DNp03 L−R: looming-evoked evasive yaw (and escape-turn side)
+        - DNp03 L−R: looming-evoked evasive yaw away from the threat
+          (left DNp03 → right turn / negative yaw; right DNp03 → left turn)
         - DNg02: thrust/altitude deviations around hover = weight
         - DNa02 L−R and DNg02 L−R → yaw (bilateral, left/right symmetric)
         - DNb: baseline motor activity
@@ -823,7 +960,8 @@ class BiologicalFlightController:
         if escaping:
             yaw = 0.8 * self._escape_yaw_sign + 0.2 * yaw
         elif self._pair_usable("DNp03_L", "DNp03_R", brain_activity):
-            yaw += 0.35 * self._pair_yaw("DNp03_L", "DNp03_R", brain_activity)
+            # DNp03_L → contralateral (right) turn: invert L−R so left activity is negative yaw.
+            yaw -= 0.35 * self._pair_yaw("DNp03_L", "DNp03_R", brain_activity)
         else:
             dropped = True
         # Engineered: slow running baseline of the remaining L−R signal so a

@@ -92,15 +92,18 @@ def _synthetic_bio_annotations(n=80):
         ["R1"] * 8
         + ["T4a"] * 8
         + ["T5a"] * 8
+        + ["LPLC1"] * 4
         + ["LPLC2"] * 4
+        + ["LPLC4"] * 4
         + ["LC4"] * 4
         + ["DNp01"] * 2
         + ["DNp03"] * 4
         + ["DNg02_a"] * 8
         + ["DNa01"] * 2
         + ["DNa02"] * 2
+        + ["DNa15"] * 2
         + ["DNb01"] * 8
-        + ["other"] * (n - 58)
+        + ["other"] * (n - 68)
     )
     types = types[:n]
     sides = ["L" if i % 2 == 0 else "R" for i in range(n)]

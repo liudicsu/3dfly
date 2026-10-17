@@ -41,6 +41,32 @@ def _looming_connectome(controller, n, weight=8.0):
     return adj.tocsr(), np.concatenate([left, right]), dnp
 
 
+def _bistable_looming_graph(controller, n, rec=15.0, inhib=-69.0, exc=37.5, path=1.0):
+    """Recurrent LPLC2 + flight-like E/I: scale ~0.85 silent, ~0.5 pins the ceiling."""
+    adj = sparse.csr_matrix((n, n), dtype=np.float32).tolil()
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+    dnp = controller.output_mapping["DNp01"]
+    dnp03 = controller.output_mapping.get("DNp03", np.array([], dtype=np.int32))
+    other = np.concatenate([
+        controller.input_mapping["luminance_left"],
+        controller.input_mapping["luminance_right"],
+    ])
+    inh_src = int(other[0])
+    exc_src = int(other[1]) if other.size > 1 else inh_src
+    for post in loom:
+        adj[inh_src, int(post)] = inhib
+        adj[exc_src, int(post)] = exc
+        adj[int(post), int(post)] = rec
+        for tgt in dnp:
+            adj[int(post), int(tgt)] = path
+        for tgt in dnp03:
+            adj[int(post), int(tgt)] = path * 0.5
+    return adj.tocsr(), loom, dnp, other
+
+
 def test_engineered_residual_escape_off_by_default():
     """Raw looming must not trigger escape when DNp01 stays at rest (flag default OFF)."""
     n, controller = _bio_controller()
@@ -180,6 +206,62 @@ def test_left_looming_turns_right_and_vice_versa():
     assert mean_left < -0.02, f"Left looming should yaw right (neg), got {mean_left:.3f}"
     assert mean_right > 0.02, f"Right looming should yaw left (pos), got {mean_right:.3f}"
     assert mean_left * mean_right < 0
+
+
+def test_dnp03_left_activity_yaws_right():
+    """Left DNp03 turns the fly right (negative yaw); right DNp03 turns left."""
+    n, controller = _bio_controller(warmup_steps=8)
+    rest = np.full(n, 2.0)
+    for _ in range(8):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    controller.prev_action[:] = 0.0
+    controller.alpha = 1.0
+    controller.escape_timer = 0
+    controller.dnp01_prev_z = 0.0
+
+    left_drive = rest.copy()
+    left_drive[controller.output_mapping["DNp03_L"]] = 20.0
+    left_drive[controller.output_mapping["DNp03_R"]] = 2.0
+    yaw_left = float(controller.compute_action(left_drive)[4])
+
+    controller.prev_action[:] = 0.0
+    controller.escape_timer = 0
+    controller.dnp01_prev_z = 0.0
+    right_drive = rest.copy()
+    right_drive[controller.output_mapping["DNp03_L"]] = 2.0
+    right_drive[controller.output_mapping["DNp03_R"]] = 20.0
+    yaw_right = float(controller.compute_action(right_drive)[4])
+
+    assert yaw_left < -0.05, f"DNp03_L should yaw right (neg), got {yaw_left:.3f}"
+    assert yaw_right > 0.05, f"DNp03_R should yaw left (pos), got {yaw_right:.3f}"
+    assert yaw_left * yaw_right < 0
+
+
+def test_dnp03_sides_calibrated_equally():
+    """Giant-fiber calibration must apply the same rest-threshold path to DNp03_L and DNp03_R."""
+    n, controller = _bio_controller(warmup_steps=4)
+    rest = np.full(n, 2.0)
+    rest[controller.output_mapping["DNp03_L"]] = 8.0
+    rest[controller.output_mapping["DNp03_R"]] = 8.0
+    for _ in range(4):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    applied = {}
+
+    def _apply(idx, observed, target_rest=2.0):
+        key = tuple(int(i) for i in np.asarray(idx, dtype=np.int32))
+        applied[key] = (float(np.mean(observed)), float(target_rest))
+
+    brain = type("B", (), {})()
+    brain.max_rate = 50.0
+    brain.apply_rest_thresholds = _apply
+    result = controller.apply_giant_fiber_calibration(brain)
+    assert result["skipped_ceiling"] is False
+    left = tuple(int(i) for i in controller.output_mapping["DNp03_L"])
+    right = tuple(int(i) for i in controller.output_mapping["DNp03_R"])
+    assert left in applied and right in applied
+    assert applied[left] == applied[right]
 
 
 def _loom_drive(controller, brain, left, right):
@@ -400,7 +482,7 @@ def test_looming_path_calibration_defaults_are_minimal():
 
     assert DEFAULT_LOOMING_PATH_GAIN <= 2.0 + 1e-9
     assert DEFAULT_LOOMING_REST_INCOMING_SCALE == pytest.approx(1.0)
-    assert 0.2 - 1e-9 <= DEFAULT_LOOMING_INHIBITION_SCALE <= 0.5 + 1e-9
+    assert 0.7 - 1e-9 <= DEFAULT_LOOMING_INHIBITION_SCALE <= 0.8 + 1e-9
 
     n, controller = _bio_controller(warmup_steps=2)
     loom = np.concatenate([
@@ -671,6 +753,150 @@ def test_dnp03_and_dna02_sides_from_aliases_suffixes_and_unlabeled_split():
     assert len(motor["DNa02_L"]) == 1 and len(motor["DNa02_R"]) == 1
     assert set(motor["DNp03_L"]).isdisjoint(set(motor["DNp03_R"]))
     assert set(motor["DNa02_L"]).isdisjoint(set(motor["DNa02_R"]))
+
+
+def test_motor_laterality_prefers_root_side_over_conflicting_soma():
+    """Descending-neuron side is the descending tract (rootSide), not a conflicting somaSide."""
+    from threedfly.connectome.neuron_selection import (
+        select_output_neurons_for_motor,
+        describe_side_assignment,
+    )
+    import pandas as pd
+
+    annotations = pd.DataFrame({
+        "bodyId": [10, 11, 12, 13],
+        "type": ["DNp03", "DNp03", "DNa02", "DNa02"],
+        "celltype": ["DNp03", "DNp03", "DNa02", "DNa02"],
+        "somaSide": ["R", "R", "R", "R"],
+        "rootSide": ["L", "R", "L", "R"],
+    })
+    body_ids = np.array([10, 11, 12, 13])
+    mapping = {int(b): i for i, b in enumerate(body_ids)}
+    motor = select_output_neurons_for_motor(annotations, body_ids, mapping)
+    assert set(motor["DNp03_L"]) == {0} and set(motor["DNp03_R"]) == {1}
+    assert set(motor["DNa02_L"]) == {2} and set(motor["DNa02_R"]) == {3}
+    rows = describe_side_assignment(annotations, body_ids, mapping, motor["DNp03_L"])
+    assert rows[0]["rootSide"] == "L"
+    assert rows[0]["somaSide"] == "R"
+
+
+def test_inhibition_scale_is_bistable_without_adaptation():
+    """Without adaptation, I-scale is a silent/ceiling switch; looming 1.5 barely moves LPLC2."""
+    from threedfly.connectome.simulator import RateSimulator, calibrate_looming_to_dnp01
+
+    n, controller = _bio_controller(warmup_steps=4)
+    adj, loom, dnp, other = _bistable_looming_graph(controller, n)
+    idx = np.concatenate([loom, other])
+
+    def _rest_and_pulse(scale):
+        calibrated = calibrate_looming_to_dnp01(
+            adj, loom, dnp, dnp03_indices=controller.output_mapping["DNp03"],
+            looming_inhibition_scale=scale,
+        )
+        sim = RateSimulator(calibrated, dt=0.010, syn_weight_scale=0.1, max_rate=50.0)
+        def _set(lv):
+            val = np.concatenate([
+                np.full(loom.size, lv, dtype=np.float32),
+                np.full(other.size, 0.8, dtype=np.float32),
+            ])
+            sim.set_input(val, neuron_indices=idx)
+        for _ in range(80):
+            _set(0.05)
+            sim.step()
+        rest_loom = float(sim.rates[loom].mean())
+        rest_dnp = float(sim.rates[dnp].mean())
+        for _ in range(8):
+            _set(1.5)
+            sim.step()
+        pulse_loom = float(sim.rates[loom].mean())
+        pulse_dnp = float(sim.rates[dnp].mean())
+        return rest_loom, rest_dnp, pulse_loom, pulse_dnp
+
+    r_l, r_d, p_l, p_d = _rest_and_pulse(0.85)
+    assert r_d < 5.0 and p_d < 5.0, f"scale 0.85 should stay silent, rest={r_d} pulse={p_d}"
+    assert abs(p_l - r_l) < 1.0, f"unmatched 1.5 current must not move LPLC2 much ({r_l}→{p_l})"
+    c_l, c_d, _, c_pd = _rest_and_pulse(0.5)
+    assert c_d >= 45.0 or c_pd >= 45.0, f"scale 0.5 should pin DNp01, rest={c_d} pulse={c_pd}"
+
+
+def test_matched_onset_and_adaptation_crosses_without_ceiling():
+    """Matched looming current (>10 Hz LPLC2 Δ) + SFA: DNp01 rests low, pulses, does not stick on."""
+    from threedfly.connectome.simulator import (
+        RateSimulator,
+        calibrate_looming_to_dnp01,
+        diagnose_flight_looming,
+        DEFAULT_LOOMING_INHIBITION_SCALE,
+    )
+
+    n, controller = _bio_controller(warmup_steps=12)
+    adj, loom, dnp, other = _bistable_looming_graph(controller, n)
+    adj = calibrate_looming_to_dnp01(
+        adj, loom, dnp,
+        dnp03_indices=controller.output_mapping["DNp03"],
+        looming_inhibition_scale=DEFAULT_LOOMING_INHIBITION_SCALE,
+    )
+    brain = RateSimulator(adj, dt=0.010, syn_weight_scale=0.1, max_rate=50.0)
+    report = diagnose_flight_looming(controller, brain, n_warmup=40, n_rest=20, n_pulse=8)
+    assert report["looming_pulse_delta"] > 10.0, report
+    assert report["dnp01_rest"] < 0.5 * brain.max_rate, report
+    assert float(report["dnp01_closed_loop_crossed"]) >= 1.0, report
+    assert report["dnp01_ceiling_frac"] < 0.2, report
+    assert controller.use_engineered_looming_residual is False
+    assert controller.engineered_escape_count == 0
+
+
+def test_giant_fiber_calibration_refuses_ceiling():
+    """If DNp01 is at the rate ceiling at warm-up, do not silently raise the ReLU threshold."""
+    n, controller = _bio_controller(warmup_steps=4)
+    rest = np.full(n, 1.0)
+    rest[controller.output_mapping["DNp01"]] = 50.0
+    for _ in range(4):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    brain = type("B", (), {})()
+    brain.max_rate = 50.0
+    brain.threshold = np.zeros(n)
+    called = []
+
+    def _apply(idx, observed, target_rest=2.0):
+        called.append(True)
+        brain.threshold[np.asarray(idx, dtype=np.int32)] = 48.0
+
+    brain.apply_rest_thresholds = _apply
+    result = controller.apply_giant_fiber_calibration(brain)
+    assert result["skipped_ceiling"] is True
+    assert controller.giant_fiber_ceiling_error is True
+    assert not called
+    assert float(np.max(brain.threshold[controller.output_mapping["DNp01"]])) == 0.0
+
+
+def test_adaptation_pulls_a_held_cell_off_the_ceiling():
+    from threedfly.connectome.simulator import RateSimulator
+
+    adj = sparse.csr_matrix(np.array([[30.0]], dtype=np.float32))
+    sim = RateSimulator(adj, dt=0.010, syn_weight_scale=0.1, max_rate=50.0)
+    sim.enable_adaptation(np.array([0]), gain=0.15, tau=0.20)
+    peak = 0.0
+    late = 0.0
+    for i in range(120):
+        sim.set_input(np.array([8.0]))
+        r = sim.step()
+        peak = max(peak, float(r[0]))
+        if i >= 100:
+            late = float(r[0])
+    assert peak > 20.0
+    assert late < peak - 5.0
+    assert late < 0.9 * sim.max_rate
+
+
+def test_max_collisions_default_allows_2000_step_runs():
+    from threedfly.runner import DEFAULT_MAX_COLLISIONS, run_simulation
+    import inspect
+
+    assert DEFAULT_MAX_COLLISIONS == 0 or DEFAULT_MAX_COLLISIONS >= 200
+    params = inspect.signature(run_simulation).parameters
+    assert "max_collisions" in params
+    assert params["max_collisions"].default == DEFAULT_MAX_COLLISIONS
 
 
 def test_legs_attach_at_thorax_coxa():

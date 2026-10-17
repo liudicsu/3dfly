@@ -371,27 +371,41 @@ def _type_suffix_sides(annotations: pd.DataFrame) -> pd.Series:
     return sides
 
 
-def _effective_side_series(annotations: pd.DataFrame) -> pd.Series:
-    """somaSide (if L/R), else rootSide, else a `_L`/`_R` type suffix."""
+# Sensory cells: soma in the optic lobe. Descending neurons: laterality of the
+# descending tract (rootSide) — somaSide often clusters on one side of the CNS.
+_SENSORY_SIDE_PRIORITY = ("somaSide", "rootSide", "suffix")
+_MOTOR_SIDE_PRIORITY = ("rootSide", "somaSide", "suffix")
+
+
+def _effective_side_series(
+    annotations: pd.DataFrame,
+    priority=None,
+) -> pd.Series:
+    """Resolve L/R from the first source in ``priority`` that is L or R."""
+    order = tuple(priority) if priority is not None else _SENSORY_SIDE_PRIORITY
     sides = pd.Series(["?"] * len(annotations), index=annotations.index)
-    if "somaSide" in annotations.columns:
-        soma = annotations["somaSide"].map(_canonical_side_label)
-        sides = soma.where(soma.isin(["L", "R"]), sides)
-    if "rootSide" in annotations.columns:
-        root = annotations["rootSide"].map(_canonical_side_label)
+    for src in order:
+        if src == "suffix":
+            cand = _type_suffix_sides(annotations)
+        elif src in annotations.columns:
+            cand = annotations[src].map(_canonical_side_label)
+        else:
+            continue
         missing = ~sides.isin(["L", "R"])
-        sides = sides.where(~missing, root)
-    suffix = _type_suffix_sides(annotations)
-    missing = ~sides.isin(["L", "R"])
-    return sides.where(~missing, suffix)
+        sides = sides.where(~missing, cand)
+    return sides
 
 
-def _get_side_mask(annotations: pd.DataFrame, side: str) -> pd.Series:
+def _get_side_mask(
+    annotations: pd.DataFrame,
+    side: str,
+    priority=None,
+) -> pd.Series:
     """Get boolean mask for neurons on specified side (L/R)."""
     want = _canonical_side_label(side)
     if want not in ("L", "R"):
         return pd.Series([False] * len(annotations), index=annotations.index)
-    return _effective_side_series(annotations) == want
+    return _effective_side_series(annotations, priority=priority) == want
 
 
 def _fill_unlabeled_sides(
@@ -475,6 +489,12 @@ def select_input_neurons_for_optic_flow(
     return _bodies_to_indices(matching_body_ids, body_id_to_idx)
 
 
+# Ipsilateral looming detectors. LPLC2 → DNp01; LC4/LPLC1/LPLC4 → DNp03
+# (LPLC2 has essentially no synapses onto DNp03 in MaleCNS).
+LOOMING_TYPE_PATTERN = r"^(?:LPLC[124]|LC4)$"
+LOOMING_TYPE_NAMES = ("LPLC1", "LPLC2", "LPLC4", "LC4")
+
+
 def select_input_neurons_for_looming(
     annotations: pd.DataFrame,
     body_ids: np.ndarray,
@@ -482,7 +502,7 @@ def select_input_neurons_for_looming(
     side: Optional[str] = None,
 ) -> np.ndarray:
     """
-    Select LPLC2 + LC4 neurons for looming input.
+    Select ipsilateral looming detectors: LPLC1, LPLC2, LPLC4, and LC4.
     
     Args:
         annotations: Annotation DataFrame
@@ -491,16 +511,38 @@ def select_input_neurons_for_looming(
         side: "L" or "R", or None for both sides
     
     Returns:
-        Array of neuron indices for LPLC2 + LC4 on specified side
+        Array of neuron indices for looming cells on specified side
     """
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
-    loom_mask = _annotation_type_mask(valid_annotations, r"^(?:LPLC2|LC4)$")
+    loom_mask = _annotation_type_mask(valid_annotations, LOOMING_TYPE_PATTERN)
     if side is None:
         matching_body_ids = valid_annotations.loc[loom_mask, "bodyId"].values
         return _bodies_to_indices(matching_body_ids, body_id_to_idx)
     side_mask = _get_side_mask(valid_annotations, side)
     matching_body_ids = valid_annotations.loc[loom_mask & side_mask, "bodyId"].values
     return _bodies_to_indices(matching_body_ids, body_id_to_idx)
+
+
+def looming_type_composition(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    indices: np.ndarray,
+) -> Dict[str, int]:
+    """Count LPLC1/LPLC2/LPLC4/LC4 among mapped looming indices."""
+    counts = {name: 0 for name in LOOMING_TYPE_NAMES}
+    if annotations is None or indices is None:
+        return counts
+    body_ids = np.asarray(body_ids)
+    idx = np.asarray(indices, dtype=np.int32)
+    idx = idx[(idx >= 0) & (idx < body_ids.size)]
+    if idx.size == 0:
+        return counts
+    selected = set(int(b) for b in body_ids[idx])
+    valid = annotations[annotations["bodyId"].isin(selected)].copy()
+    for name in LOOMING_TYPE_NAMES:
+        mask = _annotation_type_mask(valid, rf"^{name}$")
+        counts[name] = int(mask.sum())
+    return counts
 
 
 def select_output_neurons_for_motor(
@@ -516,6 +558,7 @@ def select_output_neurons_for_motor(
     - DNp03: looming-evoked flight saccades (yaw away from threat)
     - DNg02: thrust/altitude
     - DNa01/DNa02: yaw (left-right difference)
+    - DNa15 / DNb01: downstream saccade-network outputs of DNp03
     - DNb: additional motor pathways
     
     Args:
@@ -525,7 +568,8 @@ def select_output_neurons_for_motor(
     
     Returns:
         Dict with keys "DNp01", "DNp03", "DNg02", "DNa01", "DNa02", "DNb"
-        plus side splits "DNg02_L/R", "DNa01_L/R", "DNa02_L/R", "DNp03_L/R" when sides exist.
+        plus side splits "DNg02_L/R", "DNa01_L/R", "DNa02_L/R", "DNp03_L/R",
+        "DNa15_L/R", "DNb01_L/R" when sides exist.
     """
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
 
@@ -537,7 +581,7 @@ def select_output_neurons_for_motor(
 
     def _select_side(pattern: str, side: str) -> np.ndarray:
         mask = _annotation_type_mask(valid_annotations, pattern) & _get_side_mask(
-            valid_annotations, side
+            valid_annotations, side, priority=_MOTOR_SIDE_PRIORITY
         )
         return _bodies_to_indices(
             valid_annotations.loc[mask, "bodyId"].values, body_id_to_idx
@@ -549,21 +593,29 @@ def select_output_neurons_for_motor(
         "DNg02": _select(r"^DNg02"),
         "DNa01": _select(r"^DNa01(?:$|[^A-Za-z0-9])"),
         "DNa02": _select(r"^DNa02(?:$|[^A-Za-z0-9])"),
+        "DNa15": _select(r"^DNa15(?:$|[^A-Za-z0-9])"),
         "DNb": _select(r"^DNb\d"),
+        "DNb01": _select(r"^DNb01(?:$|[^A-Za-z0-9])"),
         "DNg02_L": _select_side(r"^DNg02", "L"),
         "DNg02_R": _select_side(r"^DNg02", "R"),
         "DNa01_L": _select_side(r"^DNa01(?:$|[^A-Za-z0-9])", "L"),
         "DNa01_R": _select_side(r"^DNa01(?:$|[^A-Za-z0-9])", "R"),
         "DNa02_L": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "L"),
         "DNa02_R": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "R"),
+        "DNa15_L": _select_side(r"^DNa15(?:$|[^A-Za-z0-9])", "L"),
+        "DNa15_R": _select_side(r"^DNa15(?:$|[^A-Za-z0-9])", "R"),
         "DNp03_L": _select_side(r"^DNp03(?:$|[^A-Za-z0-9])", "L"),
         "DNp03_R": _select_side(r"^DNp03(?:$|[^A-Za-z0-9])", "R"),
+        "DNb01_L": _select_side(r"^DNb01(?:$|[^A-Za-z0-9])", "L"),
+        "DNb01_R": _select_side(r"^DNb01(?:$|[^A-Za-z0-9])", "R"),
     }
     for pooled, left_key, right_key in (
         ("DNp03", "DNp03_L", "DNp03_R"),
         ("DNa02", "DNa02_L", "DNa02_R"),
         ("DNg02", "DNg02_L", "DNg02_R"),
         ("DNa01", "DNa01_L", "DNa01_R"),
+        ("DNa15", "DNa15_L", "DNa15_R"),
+        ("DNb01", "DNb01_L", "DNb01_R"),
     ):
         left, right = _fill_unlabeled_sides(
             result[pooled], result[left_key], result[right_key]
@@ -571,6 +623,33 @@ def select_output_neurons_for_motor(
         result[left_key] = left
         result[right_key] = right
     return result
+
+
+def describe_side_assignment(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+    indices: np.ndarray,
+) -> List[Dict]:
+    """Return index, bodyId, somaSide, rootSide for mapped cells (debug laterality)."""
+    body_ids = np.asarray(body_ids)
+    rows = []
+    for i in np.asarray(indices, dtype=np.int32):
+        i = int(i)
+        bid = int(body_ids[i]) if 0 <= i < body_ids.size else None
+        soma = root = "?"
+        if bid is not None and annotations is not None and "bodyId" in annotations.columns:
+            hit = annotations.loc[annotations["bodyId"] == bid]
+            if len(hit):
+                rec = hit.iloc[0]
+                if "somaSide" in hit.columns:
+                    soma = str(rec["somaSide"])
+                if "rootSide" in hit.columns:
+                    root = str(rec["rootSide"])
+        rows.append(
+            {"index": i, "bodyId": bid, "somaSide": soma, "rootSide": root}
+        )
+    return rows
 
 
 # Columns that would carry MaleCNS optic-lobe hex / column coordinates if present.

@@ -303,9 +303,13 @@ def _boost_one_hop_path(
 
 DEFAULT_LOOMING_PATH_GAIN = 2.0
 DEFAULT_LOOMING_REST_INCOMING_SCALE = 1.0
-# Largest scale in 0.2–0.5 that still lets DNp01 cross under flight-like
-# I→LPLC2/LC4 suppression (0.5 = keep half the inhibition; smaller = more release).
-DEFAULT_LOOMING_INHIBITION_SCALE = 0.5
+# Near the silent/ceiling transition (0.7–0.8). Combined with matched looming
+# current and spike-frequency adaptation; 0.5 pins DNp01 at the rate ceiling.
+DEFAULT_LOOMING_INHIBITION_SCALE = 0.75
+# Divisive SFA: activated / (1 + gain * slow_rate). Subtractive SFA with
+# recurrent gain > 1 oscillates (off-ceiling, then rebound to 50 Hz).
+DEFAULT_ADAPT_GAIN = 0.15
+DEFAULT_ADAPT_TAU = 0.20
 
 
 def scale_inhibition_onto_targets(
@@ -316,8 +320,8 @@ def scale_inhibition_onto_targets(
     """Multiply *negative* incoming weights onto ``targets`` by ``scale``.
 
     Excitatory synapses and all non-target columns are left unchanged. Used to
-    partially release LPLC2/LC4 from flight-like network inhibition so DNp01
-    can fire from the brain; it is not a global E/I rewrite.
+    sit near the I→LPLC2/LC4 transition so DNp01 can fire from the brain; it
+    is not a global E/I rewrite.
     """
     if adjacency.nnz == 0 or len(targets) == 0 or float(scale) == 1.0:
         return adjacency.tocsr()
@@ -405,7 +409,7 @@ def calibrate_looming_to_dnp01(
     ``incoming_gain`` defaults to 1 (do not amplify all incoming — that pinned DNp01
     at the rate ceiling). Pass ``incoming_gain>1`` or ``rest_incoming_scale<1`` only
     for ablation.
-    ``looming_inhibition_scale`` (default 0.5) multiplies *inhibitory* synapses
+    ``looming_inhibition_scale`` (default 0.75) multiplies *inhibitory* synapses
     whose postsynaptic cell is LPLC2/LC4; excitatory and all other cells are
     untouched.
     """
@@ -632,6 +636,132 @@ def diagnose_looming_to_dnp01(
     return report
 
 
+def typical_incoming_current(
+    adjacency: sparse.csr_matrix,
+    targets: np.ndarray,
+    reference_rate: float = 0.8,
+) -> float:
+    """Median |incoming weight| × reference rate onto ``targets`` (already-scaled adj)."""
+    if adjacency.nnz == 0 or len(targets) == 0:
+        return 0.0
+    adj = adjacency.tocsc()
+    vals = []
+    for t in np.unique(np.asarray(targets, dtype=np.int32)):
+        t = int(t)
+        if t < 0 or t >= adj.shape[1]:
+            continue
+        start, end = int(adj.indptr[t]), int(adj.indptr[t + 1])
+        if start == end:
+            continue
+        vals.append(float(np.abs(adj.data[start:end]).sum()) * float(reference_rate))
+    return float(np.median(vals)) if vals else 0.0
+
+
+def diagnose_flight_looming(
+    controller,
+    brain,
+    n_warmup: int = 40,
+    n_rest: int = 20,
+    n_pulse: int = 8,
+    n_recover: int = 30,
+    looming_pulse: float = 1.0,
+    other_current: float = 0.8,
+    closed_loop_margin: float = 0.05,
+) -> Dict[str, float]:
+    """Closed-loop diagnose using the same onset+decay encoding as flight.
+
+    Other sensory populations sit at ``other_current`` (~0.8). Looming is
+    encoded by the controller (onset + decay, matched synaptic current).
+    Requires ``crossed>0`` and DNp01 rest below 50% of the rate ceiling.
+    """
+    loom = np.concatenate([
+        np.asarray(controller.input_mapping.get("looming_left", []), dtype=np.int32),
+        np.asarray(controller.input_mapping.get("looming_right", []), dtype=np.int32),
+    ])
+    dnp = np.asarray(controller.output_mapping.get("DNp01", []), dtype=np.int32)
+    d03 = np.asarray(controller.output_mapping.get("DNp03", []), dtype=np.int32)
+    d03_l = np.asarray(controller.output_mapping.get("DNp03_L", []), dtype=np.int32)
+    d03_r = np.asarray(controller.output_mapping.get("DNp03_R", []), dtype=np.int32)
+    max_rate = float(getattr(brain, "max_rate", 50.0))
+    if hasattr(brain, "enable_adaptation"):
+        if loom.size:
+            brain.enable_adaptation(loom)
+        if dnp.size:
+            brain.enable_adaptation(dnp)
+        if d03.size:
+            brain.enable_adaptation(d03)
+    if hasattr(controller, "match_looming_input_to_synapses"):
+        controller.match_looming_input_to_synapses(brain)
+
+    def _step(left, right):
+        controller.set_flight_like_input(
+            brain, looming_left=left, looming_right=right, other=other_current
+        )
+        return brain.step()
+
+    for _ in range(max(int(n_warmup), 1)):
+        rates = _step(0.0, 0.0)
+        if hasattr(controller, "record_resting_rates"):
+            controller.record_resting_rates(rates)
+    if hasattr(controller, "finalize_warmup"):
+        controller.finalize_warmup()
+    cal = {"skipped_ceiling": False}
+    if hasattr(controller, "apply_giant_fiber_calibration"):
+        out = controller.apply_giant_fiber_calibration(brain)
+        if isinstance(out, dict):
+            cal = out
+
+    rest_hist, loom_rest, d03l_rest, d03r_rest = [], [], [], []
+    for _ in range(max(int(n_rest), 1)):
+        rates = _step(0.0, 0.0)
+        rest_hist.append(_mean_rate(rates, dnp))
+        loom_rest.append(float(rates[loom].mean()) if loom.size else 0.0)
+        d03l_rest.append(_mean_rate(rates, d03_l))
+        d03r_rest.append(_mean_rate(rates, d03_r))
+    rest = float(np.median(rest_hist[len(rest_hist) // 2 :])) if rest_hist else 0.0
+    loom_r = float(np.median(loom_rest[len(loom_rest) // 2 :])) if loom_rest else 0.0
+
+    if hasattr(controller, "reset_looming_encoder"):
+        controller.reset_looming_encoder()
+    pulse_dnp, pulse_loom, pulse_d03l, pulse_d03r = [], [], [], []
+    for _ in range(max(int(n_pulse), 1)):
+        rates = _step(float(looming_pulse), float(looming_pulse))
+        pulse_dnp.append(_mean_rate(rates, dnp))
+        pulse_loom.append(float(rates[loom].mean()) if loom.size else 0.0)
+        pulse_d03l.append(_mean_rate(rates, d03_l))
+        pulse_d03r.append(_mean_rate(rates, d03_r))
+    driven = float(np.max(pulse_dnp)) if pulse_dnp else 0.0
+    loom_peak = float(np.max(pulse_loom)) if pulse_loom else 0.0
+
+    recover = []
+    for _ in range(max(int(n_recover), 1)):
+        rates = _step(0.0, 0.0)
+        recover.append(_mean_rate(rates, dnp))
+    monitor = np.asarray(rest_hist + recover, dtype=float)
+    ceiling_frac = float(np.mean(monitor >= 0.98 * max_rate)) if monitor.size else 0.0
+
+    rest_l = float(np.median(d03l_rest[-max(3, len(d03l_rest) // 3) :])) if d03l_rest else 0.0
+    rest_r = float(np.median(d03r_rest[-max(3, len(d03r_rest) // 3) :])) if d03r_rest else 0.0
+    return {
+        "dnp01_rest": rest,
+        "dnp01_closed_loop_rest": rest,
+        "dnp01_closed_loop_driven": driven,
+        "dnp01_closed_loop_late_driven": float(np.median(pulse_dnp[-max(1, len(pulse_dnp) // 2) :])) if pulse_dnp else 0.0,
+        "dnp01_closed_loop_crossed": float(driven > rest + float(closed_loop_margin)),
+        "dnp01_rest_below_half_ceiling": float(rest < 0.5 * max_rate),
+        "dnp01_ceiling_frac": ceiling_frac,
+        "looming_pulse_delta": float(loom_peak - loom_r),
+        "looming_rest": loom_r,
+        "looming_pulse": loom_peak,
+        "dnp03_left_rest": rest_l,
+        "dnp03_right_rest": rest_r,
+        "dnp03_left_driven": float(np.max(pulse_d03l)) if pulse_d03l else 0.0,
+        "dnp03_right_driven": float(np.max(pulse_d03r)) if pulse_d03r else 0.0,
+        "skipped_ceiling": float(bool(cal.get("skipped_ceiling"))),
+        "looming_current_scale": float(getattr(controller, "looming_current_scale", 1.0)),
+    }
+
+
 class RateSimulator:
     """
     Simplified firing-rate model (faster alternative to LIF).
@@ -682,6 +812,24 @@ class RateSimulator:
         # Per-neuron subtractive threshold / bias (warmup calibration for giant fiber).
         self.bias = np.zeros(self.n_neurons, dtype=np.float64)
         self.threshold = np.zeros(self.n_neurons, dtype=np.float64)
+        # Spike-frequency adaptation (subtractive current from recent rate).
+        self.adapt = np.zeros(self.n_neurons, dtype=np.float64)
+        self.adapt_gain = np.zeros(self.n_neurons, dtype=np.float64)
+        self.adapt_decay = np.ones(self.n_neurons, dtype=np.float64)
+
+    def enable_adaptation(
+        self,
+        indices: np.ndarray,
+        gain: float = DEFAULT_ADAPT_GAIN,
+        tau: float = DEFAULT_ADAPT_TAU,
+    ) -> None:
+        """Enable divisive spike-frequency adaptation on ``indices``."""
+        idx = np.asarray(indices, dtype=np.int32)
+        idx = idx[(idx >= 0) & (idx < self.n_neurons)]
+        if idx.size == 0:
+            return
+        self.adapt_gain[idx] = float(gain)
+        self.adapt_decay[idx] = float(np.exp(-self.dt / max(float(tau), 1e-6)))
 
     def apply_rest_thresholds(
         self,
@@ -735,17 +883,24 @@ class RateSimulator:
         # Synaptic input
         syn_input = self.adj.T @ self.rates
         
-        # Total input (bias / threshold from warmup keep giant-fiber rest low)
+        # Total input (bias / threshold from warmup keep giant-fiber rest low).
         total_input = syn_input + self.external_input + self.bias
         
-        # Activation
+        # Activation, then divisive spike-frequency adaptation so a cell cannot
+        # remain pinned at the ceiling (subtractive SFA oscillates with rec>1).
         activated = self._activation_fn(total_input - self.threshold)
+        denom = 1.0 + self.adapt_gain * self.adapt
+        activated = activated / np.maximum(denom, 1e-6)
         
         # Temporal dynamics (exponential moving average)
         self.rates = self.rates * self.decay + activated * (1 - self.decay)
         
         # Clip to max rate to prevent saturation
         self.rates = np.clip(self.rates, 0, self.max_rate)
+        self.adapt = (
+            self.adapt * self.adapt_decay
+            + (1.0 - self.adapt_decay) * self.rates
+        )
         
         return self.rates
     
@@ -761,3 +916,4 @@ class RateSimulator:
         """Reset state."""
         self.rates.fill(0.0)
         self.external_input.fill(0.0)
+        self.adapt.fill(0.0)

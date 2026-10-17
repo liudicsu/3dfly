@@ -17,10 +17,14 @@ from threedfly.connectome.simulator import (
     DEFAULT_LOOMING_PATH_GAIN,
     DEFAULT_LOOMING_REST_INCOMING_SCALE,
     DEFAULT_LOOMING_INHIBITION_SCALE,
+    DEFAULT_ADAPT_GAIN,
+    DEFAULT_ADAPT_TAU,
     calibrate_looming_to_dnp01,
     count_directed_hops,
     diagnose_lplc2_inhibition,
 )
+
+DEFAULT_MAX_COLLISIONS = 250
 from threedfly.sim import FlyEnvironment
 from threedfly.vision import (
     StereoVision,
@@ -43,7 +47,7 @@ def run_simulation(
     save_output_dir: str = "output",
     simulator_type: str = "rate",
     seed: int = 42,
-    max_collisions: int = 50,
+    max_collisions: int = DEFAULT_MAX_COLLISIONS,
     enable_soft_recovery: bool = True,
     warmup_steps: int = 800,
     apply_ei_signs: bool = True,
@@ -189,6 +193,23 @@ def run_simulation(
             f"rest_incoming_scale={rest_scale}, "
             f"looming_inhibition_scale={inhib_scale} (I→LPLC2/LC4 only)"
         )
+        if hasattr(brain, "enable_adaptation"):
+            brain.enable_adaptation(
+                loom_idx, gain=DEFAULT_ADAPT_GAIN, tau=DEFAULT_ADAPT_TAU
+            )
+            if dnp_idx is not None and len(dnp_idx):
+                brain.enable_adaptation(
+                    dnp_idx, gain=DEFAULT_ADAPT_GAIN, tau=DEFAULT_ADAPT_TAU
+                )
+            if dnp03_idx is not None and len(dnp03_idx):
+                brain.enable_adaptation(
+                    dnp03_idx, gain=DEFAULT_ADAPT_GAIN, tau=DEFAULT_ADAPT_TAU
+                )
+            print(
+                f"  Spike-frequency adaptation on looming detectors and DNp01/DNp03: "
+                f"gain={DEFAULT_ADAPT_GAIN}, tau={DEFAULT_ADAPT_TAU}s"
+            )
+        controller.match_looming_input_to_synapses(brain)
         if controller.use_engineered_looming_residual:
             print("  Engineered looming-residual escape is ON (ablation)")
         else:

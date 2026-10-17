@@ -212,14 +212,20 @@ def inspect_types(subgraph_path):
 
 
 @main.command("diagnose-looming")
-@click.argument("subgraph_path", type=click.Path(exists=True))
+@click.argument("subgraph_path", required=False, type=click.Path(exists=True))
+@click.option(
+    "--connectome",
+    type=click.Path(exists=True),
+    default=None,
+    help="Connectome/subgraph path (e.g. data/full_connectome.npz).",
+)
 @click.option("--no-ei", is_flag=True, help="Skip neurotransmitter E/I signs")
 @click.option("--looming", type=float, default=1.0, help="Injected looming current")
 @click.option(
     "--looming-inhibition-scale",
     type=float,
     default=None,
-    help="Scale I→LPLC2/LC4 synapses only (default 0.5).",
+    help="Scale I→LPLC2/LC4 synapses only (default 0.75).",
 )
 @click.option(
     "--inhibition-json",
@@ -227,8 +233,8 @@ def inspect_types(subgraph_path):
     default="lplc2_inhibition.json",
     help="Write top inhibitory presynaptic types onto LPLC2/LC4 as JSON.",
 )
-def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, inhibition_json):
-    """Inject strong synthetic looming into LPLC2/LC4 and print DNp01/DNp03 vs rest."""
+def diagnose_looming(subgraph_path, connectome, no_ei, looming, looming_inhibition_scale, inhibition_json):
+    """Diagnose DNp01 with the same onset+decay encoding used in flight."""
     import json
     import numpy as np
     from threedfly.connectome import ConnectomeLoader
@@ -242,12 +248,16 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
         calibrate_looming_to_dnp01,
         diagnose_lplc2_inhibition,
         diagnose_looming_to_dnp01,
+        diagnose_flight_looming,
         count_directed_hops,
         DEFAULT_LOOMING_INHIBITION_SCALE,
     )
     from threedfly.control.controller import BiologicalFlightController
 
-    subgraph = ConnectomeLoader.load_subgraph(Path(subgraph_path))
+    path = connectome or subgraph_path
+    if not path:
+        raise click.UsageError("Provide a subgraph path or --connectome data/full_connectome.npz")
+    subgraph = ConnectomeLoader.load_subgraph(Path(path))
     annotations = subgraph.get("annotations")
     if annotations is None:
         click.echo("✗ Subgraph has no annotations.", err=True)
@@ -299,8 +309,8 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
         else float(looming_inhibition_scale)
     )
     click.echo(
-        f"Flight-like other sensory n={other_idx.size} at 0.8; "
-        f"looming baseline 0.3 + pulse; I→LPLC2/LC4 scale={inhib_scale}"
+        f"Flight encoding diagnose: other sensory n={other_idx.size} at 0.8; "
+        f"onset+decay looming; I→LPLC2/LC4 scale={inhib_scale}"
     )
     report = diagnose_looming_to_dnp01(
         adjacency=adj,
@@ -315,10 +325,13 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
         baseline_current=0.3,
         looming_inhibition_scale=inhib_scale,
     )
-    calibrated = calibrate_looming_to_dnp01(
-        adj, loom, dnp, dnp03_indices=dnp03, looming_inhibition_scale=inhib_scale
+    sim = RateSimulator(adj, dt=0.010, syn_weight_scale=0.1, max_rate=50.0)
+    sim.adj = calibrate_looming_to_dnp01(
+        sim.adj, loom, dnp, dnp03_indices=dnp03, looming_inhibition_scale=inhib_scale
     )
-    sim = RateSimulator(calibrated, dt=0.010, syn_weight_scale=0.1, max_rate=50.0)
+    flight = diagnose_flight_looming(
+        controller, sim, n_warmup=40, n_rest=20, n_pulse=8, looming_pulse=float(looming)
+    )
     idx, val = [], []
     if other_idx.size:
         idx.extend(other_idx.tolist())
@@ -331,7 +344,7 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
             sim.set_input(np.asarray(val, dtype=np.float32), neuron_indices=np.asarray(idx, dtype=np.int32))
         sim.step()
     inhib = diagnose_lplc2_inhibition(
-        calibrated,
+        sim.adj,
         loom,
         sim.rates,
         annotations=annotations,
@@ -363,16 +376,29 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
     )
     click.echo("DNp01 rose above rest." if report["rose"] else "DNp01 did NOT rise above rest.")
     click.echo(
-        f"Closed-loop flight-like tonic-then-pulse: rest={report['dnp01_closed_loop_rest']:.4g}  "
+        f"Closed-loop (injected current): rest={report['dnp01_closed_loop_rest']:.4g}  "
         f"driven={report['dnp01_closed_loop_driven']:.4g}  "
         f"late={report['dnp01_closed_loop_late_driven']:.4g}  "
         f"crossed={int(report['dnp01_closed_loop_crossed'])}  "
         f"inhib_scale={report.get('looming_inhibition_scale', inhib_scale)}"
     )
-    if report["dnp01_closed_loop_crossed"]:
-        click.echo("DNp01 crossed rest+margin after tonic warm-up.")
+    click.echo(
+        f"Flight encoding: rest={flight['dnp01_rest']:.4g}  "
+        f"pulse={flight['dnp01_closed_loop_driven']:.4g}  "
+        f"crossed={int(flight['dnp01_closed_loop_crossed'])}  "
+        f"rest_below_half_ceiling={int(flight['dnp01_rest_below_half_ceiling'])}  "
+        f"LPLC2 Δ={flight['looming_pulse_delta']:.3g} Hz  "
+        f"ceiling_frac={flight['dnp01_ceiling_frac']:.2f}  "
+        f"current_scale={flight['looming_current_scale']:.3g}"
+    )
+    click.echo(
+        f"DNp03 rest L={flight['dnp03_left_rest']:.4g} R={flight['dnp03_right_rest']:.4g}  "
+        f"pulse L={flight['dnp03_left_driven']:.4g} R={flight['dnp03_right_driven']:.4g}"
+    )
+    if flight["dnp01_closed_loop_crossed"] and flight["dnp01_rest_below_half_ceiling"]:
+        click.echo("DNp01 crossed rest+margin with rest below 50% of ceiling.")
     else:
-        click.echo("DNp01 did NOT cross rest+margin after tonic warm-up.")
+        click.echo("DNp01 did NOT pass flight-encoding diagnose (crossed and rest<50% ceiling).")
 
 
 @main.command()
@@ -381,6 +407,12 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
     type=click.Path(exists=True),
     default="data/demo_subgraph.npz",
     help="Path to subgraph file"
+)
+@click.option(
+    "--connectome",
+    type=click.Path(exists=True),
+    default=None,
+    help="Alias for --subgraph (e.g. data/full_connectome.npz).",
 )
 @click.option(
     "--steps",
@@ -420,8 +452,8 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
 @click.option(
     "--max-collisions",
     type=int,
-    default=50,
-    help="Maximum collisions before stopping (0 = unlimited)"
+    default=250,
+    help="Maximum collisions before stopping (0 = unlimited; default 250 so 2000-step runs finish)"
 )
 @click.option(
     "--no-soft-recovery",
@@ -450,11 +482,13 @@ def diagnose_looming(subgraph_path, no_ei, looming, looming_inhibition_scale, in
     "--looming-inhibition-scale",
     type=float,
     default=None,
-    help="Scale inhibitory synapses onto LPLC2/LC4 only (default 0.5).",
+    help="Scale inhibitory synapses onto LPLC2/LC4 only (default 0.75).",
 )
-def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale, looming_inhibition_scale):
+def run(subgraph, connectome, steps, viz_mode, headless, save_output, simulator_type, seed, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale, looming_inhibition_scale):
     """Run 3dfly exploration simulation (static visualization)."""
     from threedfly.runner import run_simulation
+
+    subgraph = connectome or subgraph
     
     if headless:
         viz_mode = "none"
@@ -500,6 +534,12 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
     help="Path to subgraph file"
 )
 @click.option(
+    "--connectome",
+    type=click.Path(exists=True),
+    default=None,
+    help="Alias for --subgraph (e.g. data/full_connectome.npz).",
+)
+@click.option(
     "--steps",
     type=int,
     default=5000,
@@ -538,8 +578,8 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
 @click.option(
     "--max-collisions",
     type=int,
-    default=100,
-    help="Maximum collisions before stopping (0 = unlimited)"
+    default=250,
+    help="Maximum collisions before stopping (0 = unlimited; default 250 so 2000-step runs finish)"
 )
 @click.option(
     "--no-soft-recovery",
@@ -568,9 +608,9 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
     "--looming-inhibition-scale",
     type=float,
     default=None,
-    help="Scale inhibitory synapses onto LPLC2/LC4 only (default 0.5).",
+    help="Scale inhibitory synapses onto LPLC2/LC4 only (default 0.75).",
 )
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale, looming_inhibition_scale):
+def run_interactive(subgraph, connectome, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, engineered_looming_residual, looming_path_gain, looming_rest_incoming_scale, looming_inhibition_scale):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -582,6 +622,7 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
     Open your browser to http://localhost:8080 after starting.
     """
     from threedfly.runner_interactive import run_interactive_simulation
+    subgraph = connectome or subgraph
     
     try:
         run_interactive_simulation(

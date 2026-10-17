@@ -20,9 +20,12 @@ def _write_synthetic_connectome(tmp_path: Path) -> Path:
         ["R1"] * 6
         + ["T4a"] * 4
         + ["T5a"] * 4
+        + ["LPLC1"] * 2
         + ["LPLC2"] * 2
+        + ["LPLC4"] * 2
         + ["LC4"] * 2
         + ["DNp01"] * 2
+        + ["DNp03"] * 2
         + ["DNg02_a"] * 6
         + ["DNa01"] * 2
         + ["DNa02"] * 2
