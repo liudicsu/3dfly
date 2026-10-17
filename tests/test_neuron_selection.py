@@ -329,5 +329,37 @@ def test_select_input_neurons_for_looming():
     assert set(right_indices) == {1, 3}
 
 
+def test_select_output_neurons_for_motor():
+    """Test DN selection for motor readout."""
+    from threedfly.connectome.neuron_selection import select_output_neurons_for_motor
+    
+    annotations = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "type": ["DNp01", "DNp01", "DNg02_a", "DNg02_b", "DNa01", "DNa02", 
+                 "DNb01", "DNb02", "other"],
+        "celltype": ["DNp01", "DNp01", "DNg02_a", "DNg02_b", "DNa01", "DNa02",
+                     "DNb01", "DNb02", "other"],
+    })
+    
+    body_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
+    
+    motor_neurons = select_output_neurons_for_motor(
+        annotations, body_ids, body_id_to_idx
+    )
+    
+    assert "DNp01" in motor_neurons
+    assert "DNg02" in motor_neurons
+    assert "DNa01" in motor_neurons
+    assert "DNa02" in motor_neurons
+    assert "DNb" in motor_neurons
+    
+    assert len(motor_neurons["DNp01"]) == 2
+    assert len(motor_neurons["DNg02"]) == 2
+    assert len(motor_neurons["DNa01"]) == 1
+    assert len(motor_neurons["DNa02"]) == 1
+    assert len(motor_neurons["DNb"]) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

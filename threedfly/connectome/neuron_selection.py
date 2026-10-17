@@ -411,3 +411,74 @@ def select_input_neurons_for_looming(
                        if bid in body_id_to_idx], dtype=np.int32)
     
     return indices
+
+
+def select_output_neurons_for_motor(
+    annotations: pd.DataFrame,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int]
+) -> Dict[str, np.ndarray]:
+    """
+    Select descending neurons for motor readout.
+    
+    Maps specific DN types to flight behaviors:
+    - DNp01: escape/sharp avoidance
+    - DNg02: thrust/altitude
+    - DNa01/DNa02: yaw (left-right difference)
+    - DNb: additional motor pathways
+    
+    Args:
+        annotations: Annotation DataFrame
+        body_ids: Body IDs in connectome
+        body_id_to_idx: Body ID to index mapping
+    
+    Returns:
+        Dict with keys "DNp01", "DNg02", "DNa01", "DNa02", "DNb"
+        Each value is array of neuron indices
+    """
+    valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
+    type_col = "celltype" if "celltype" in valid_annotations.columns else "type"
+    
+    result = {}
+    
+    # DNp01 - escape/sharp avoidance
+    dnp01_mask = valid_annotations[type_col].astype(str).str.contains(
+        r"DNp01", case=False, na=False, regex=True
+    )
+    dnp01_bodies = valid_annotations.loc[dnp01_mask, "bodyId"].values
+    result["DNp01"] = np.array([body_id_to_idx[bid] for bid in dnp01_bodies
+                                if bid in body_id_to_idx], dtype=np.int32)
+    
+    # DNg02 - thrust/altitude (all variants a-g)
+    dng02_mask = valid_annotations[type_col].astype(str).str.contains(
+        r"DNg02", case=False, na=False, regex=True
+    )
+    dng02_bodies = valid_annotations.loc[dng02_mask, "bodyId"].values
+    result["DNg02"] = np.array([body_id_to_idx[bid] for bid in dng02_bodies
+                                if bid in body_id_to_idx], dtype=np.int32)
+    
+    # DNa01 - yaw component
+    dna01_mask = valid_annotations[type_col].astype(str).str.contains(
+        r"DNa01", case=False, na=False, regex=True
+    )
+    dna01_bodies = valid_annotations.loc[dna01_mask, "bodyId"].values
+    result["DNa01"] = np.array([body_id_to_idx[bid] for bid in dna01_bodies
+                                if bid in body_id_to_idx], dtype=np.int32)
+    
+    # DNa02 - yaw component
+    dna02_mask = valid_annotations[type_col].astype(str).str.contains(
+        r"DNa02", case=False, na=False, regex=True
+    )
+    dna02_bodies = valid_annotations.loc[dna02_mask, "bodyId"].values
+    result["DNa02"] = np.array([body_id_to_idx[bid] for bid in dna02_bodies
+                                if bid in body_id_to_idx], dtype=np.int32)
+    
+    # DNb - additional motor pathways (DNb01-06)
+    dnb_mask = valid_annotations[type_col].astype(str).str.contains(
+        r"DNb\d", case=False, na=False, regex=True
+    )
+    dnb_bodies = valid_annotations.loc[dnb_mask, "bodyId"].values
+    result["DNb"] = np.array([body_id_to_idx[bid] for bid in dnb_bodies
+                              if bid in body_id_to_idx], dtype=np.int32)
+    
+    return result
