@@ -5,6 +5,7 @@ Single command (verification machine with connectome + flyvis):
 
     python scripts/brain_acceptance.py
     python scripts/brain_acceptance.py --quick   # short movies, unofficial metrics
+    python scripts/brain_acceptance.py --rho-mode subgraph  # local ρ→0.9 (not research)
 
 Writes ``output/m1/acceptance.json`` and a trace plot. Prints T1–T7 plus
 ms/step (brain-only and flyvis). Skips nothing here — missing data is an error
@@ -165,9 +166,13 @@ def main(argv=None) -> int:
     )
     p.add_argument(
         "--rho-mode",
-        choices=("subgraph", "full_reference"),
-        default="subgraph",
-        help="S2 scale by ρ(W_sub) (default, unit-tested to 0.9) or the r3 full-matrix reference 4085.83",
+        choices=("full_reference", "subgraph"),
+        default="full_reference",
+        help=(
+            "S2 scale: full_reference (default, 0.9/4085.83, matches r3 even on "
+            "subgraphs) or subgraph (rescale the slice itself to ρ=0.9; stronger "
+            "recurrence, saturates HS)"
+        ),
     )
     args = p.parse_args(argv)
 

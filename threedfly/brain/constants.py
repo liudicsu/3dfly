@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 # Full signed MaleCNS matrix spectral radius from research_r3/r3sim.py.
-# Documented reference only; subgraphs recompute rho and scale to TARGET_RHO.
+# Default S2 scale is TARGET_RHO / this value even on subgraphs (r3sim does the
+# same). Pass rho=None / --rho-mode subgraph to recompute ρ on the slice.
 RHO_FULL_SIGNED_REFERENCE = 4085.83
 TARGET_RHO = 0.9
 

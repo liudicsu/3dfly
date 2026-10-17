@@ -16,6 +16,7 @@ from threedfly.brain.constants import (
     G_INH_DEFAULT,
     G_INH_TARGETS,
     RATE_CAP,
+    RHO_FULL_SIGNED_REFERENCE,
     SHUFFLE_SEED,
     TARGET_RHO,
     TAU,
@@ -92,7 +93,15 @@ def scale_to_rho(W: sp.spmatrix, target_rho: float = TARGET_RHO) -> tuple[sp.csr
 
 
 class RateCore:
-    """Leaky rate network: r ← a r + (1−a) clip(W_m r + bias + G r, 0, cap)."""
+    """Leaky rate network: r ← a r + (1−a) clip(W_m r + bias + G r, 0, cap).
+
+    S2 scaling matches research_r3/r3sim.py: ``W_m = W * (target_rho / ρ)``.
+    Default ``rho`` is the full signed MaleCNS radius
+    (``RHO_FULL_SIGNED_REFERENCE``); r3 uses that same denominator on
+    subgraphs. Pass ``rho=None`` to recompute ρ on the matrix being simulated
+    (``--rho-mode subgraph``). On coreTplus that is ~3× stronger recurrence
+    than research and saturates HS at the rate cap.
+    """
 
     def __init__(
         self,
@@ -109,7 +118,7 @@ class RateCore:
         dt: float = DT,
         cap: float = RATE_CAP,
         scipy_threads: int = 1,
-        rho: Optional[float] = None,
+        rho: Optional[float] = RHO_FULL_SIGNED_REFERENCE,
     ):
         configure_threads(scipy_threads=scipy_threads)
         self.typ = np.asarray(types, dtype=object)

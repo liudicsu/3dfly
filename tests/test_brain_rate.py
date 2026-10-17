@@ -7,17 +7,29 @@ import pytest
 import scipy.sparse as sp
 
 from threedfly.brain.connectome_matrix import spectral_radius
+from threedfly.brain.constants import RHO_FULL_SIGNED_REFERENCE, TARGET_RHO
 from threedfly.brain.rate_core import RateCore, apply_inhibitory_gain, degree_preserving_shuffle
 from tests.brain_fakes import random_rate_graph, tiny_signed_connectome
 
 
-def test_spectral_radius_after_scaling_is_0_9():
+def test_default_scale_is_full_reference():
     W = sp.csr_matrix(np.array([[0.0, 2.0], [2.0, 0.0]], dtype=np.float32))
     types = np.array(["A", "B"], dtype=object)
     sides = np.array(["L", "R"], dtype=object)
     core = RateCore(W, types, sides, g_inh=1.0, g_gap=0.0, dng02_bias=0.0)
+    assert core.scale == pytest.approx(TARGET_RHO / RHO_FULL_SIGNED_REFERENCE)
+    assert core.rho_unscaled == pytest.approx(RHO_FULL_SIGNED_REFERENCE)
+    # r3 applies 0.9/4085.83 even on a slice; effective subgraph rho stays well below 1.
+    assert spectral_radius(core.W_scaled) < 1.0
+
+
+def test_subgraph_mode_scales_local_rho_to_target():
+    W = sp.csr_matrix(np.array([[0.0, 2.0], [2.0, 0.0]], dtype=np.float32))
+    types = np.array(["A", "B"], dtype=object)
+    sides = np.array(["L", "R"], dtype=object)
+    core = RateCore(W, types, sides, g_inh=1.0, g_gap=0.0, dng02_bias=0.0, rho=None)
     rho = spectral_radius(core.W_scaled)
-    assert rho == pytest.approx(0.9, abs=0.01)
+    assert rho == pytest.approx(TARGET_RHO, abs=0.01)
     assert core.rho_unscaled == pytest.approx(2.0, abs=0.01)
 
 
@@ -107,6 +119,7 @@ def test_synthetic_dynamics_drive_downstream():
         g_inh=1.0,
         g_gap=0.0,
         target_rho=0.9,
+        rho=None,
     )
     for _ in range(40):
         r = core.step(clamp_idx=[0], clamp_val=[10.0])
@@ -123,5 +136,4 @@ def test_shuffle_preserves_nnz_and_changes_structure():
     assert not np.allclose(sh.toarray(), W.toarray())
     core = RateCore.from_connectome(conn, g_inh=8.0, g_gap=0.0, shuffle=True)
     assert core.shuffle is True
-    rho = spectral_radius(core.W_scaled)
-    assert rho == pytest.approx(0.9, abs=0.05) or core.rho_unscaled == 0.0
+    assert core.scale == pytest.approx(TARGET_RHO / RHO_FULL_SIGNED_REFERENCE)
