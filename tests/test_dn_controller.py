@@ -419,6 +419,33 @@ def test_peak_lc4_tiebreak_when_integrated_laterality_is_weak():
     assert c._threat_side(DNReadout()) == "R"
 
 
+def test_laterality_does_not_lock_on_first_sample():
+    """Self-motion / early yaw can flip one frame; lock needs a consistent run."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=8)
+    rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.40, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    right = DNReadout(dnp01_L=2.05, dnp03_L=0.40, dnp03_R=1.20, lc4_L=1.0, lc4_R=2.2, dng02_amp=5.0)
+    c.compute(right)
+    assert c._loom_threat == ""
+    left = DNReadout(dnp01_L=2.10, dnp03_L=1.30, dnp03_R=0.40, lc4_L=2.2, lc4_R=1.0, dng02_amp=5.0)
+    for _ in range(5):
+        c.compute(left)
+    assert c._loom_threat == "L"
+
+
+def test_course_steer_frozen_during_dnp01_climb():
+    """DNa02/HS must not yaw into a loom before DNp01 fires."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=8)
+    rest = DNReadout(dnp01_L=1.80, dna02_L=0.2, dna02_R=0.2, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    climb = DNReadout(dnp01_L=2.00, dna02_L=8.0, dna02_R=0.0, dng02_amp=5.0)
+    c.compute(climb)
+    assert c.last_rise >= 0.08
+    assert c.last_yaw_terms.get("course_frozen") == pytest.approx(1.0)
+    assert c.last_yaw_terms.get("dna02") == pytest.approx(0.0)
+    assert c.last_yaw_terms.get("hse") == pytest.approx(0.0)
+
+
 def test_brief_slope_bump_does_not_latch_through_slow_open_climb():
     """Open wander can have one steep 4-step window; that must not stay armed."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)

@@ -17,15 +17,27 @@ from threedfly.brain.stimuli import hex_degrees
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
-    """Sample gray/first-channel image at UV in [0, 1]. Local copy (no cv2)."""
+    """Bilinear-sample gray/first-channel image at UV in [0, 1]."""
     if image.ndim == 3:
         gray = image.mean(axis=2)
     else:
         gray = image
     h, w = gray.shape[:2]
-    xs = np.clip((uv[:, 0] * (w - 1)).astype(np.int32), 0, w - 1)
-    ys = np.clip((uv[:, 1] * (h - 1)).astype(np.int32), 0, h - 1)
-    samples = gray[ys, xs].astype(np.float32)
+    xf = np.clip(np.asarray(uv[:, 0], dtype=np.float32) * (w - 1), 0.0, float(w - 1))
+    yf = np.clip(np.asarray(uv[:, 1], dtype=np.float32) * (h - 1), 0.0, float(h - 1))
+    x0 = np.floor(xf).astype(np.int32)
+    y0 = np.floor(yf).astype(np.int32)
+    x1 = np.clip(x0 + 1, 0, w - 1)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+    wx = xf - x0.astype(np.float32)
+    wy = yf - y0.astype(np.float32)
+    g = np.asarray(gray, dtype=np.float32)
+    samples = (
+        g[y0, x0] * (1.0 - wx) * (1.0 - wy)
+        + g[y0, x1] * wx * (1.0 - wy)
+        + g[y1, x0] * (1.0 - wx) * wy
+        + g[y1, x1] * wx * wy
+    )
     peak = 255.0 if float(samples.max() if samples.size else 0.0) > 1.5 else 1.0
     return np.clip(samples / peak, 0.0, 1.0)
 
@@ -68,8 +80,8 @@ def stereo_to_hex(
     Right camera: X is sagittally mirrored and Y is flipped so look stays
     +X. That is a horizontal remap in the image, not a vertical one.
     Open-loop L vs mirrored-R objects: a **U-flip** on the right hex
-    (no V-flip) makes LC4/DNp01 L↔R match within ~20%; V-flip alone
-    left a right-side object driving left-side cells nearly as hard.
+    (no V-flip) plus bilinear sampling keeps LC4/DNp01 L↔R within ~20%
+    on the official 45° approach. V-flip alone drives the wrong side.
     """
     if uv is None:
         uv = box_eye_uv()

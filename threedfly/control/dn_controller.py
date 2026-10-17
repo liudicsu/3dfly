@@ -66,10 +66,12 @@ class DNFlightController:
         self._steep_climb = False
         self._steep_hist: List[bool] = []
         self._loom_threat = ""
+        self._lat_sign_hist: List[int] = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
         self._peak_lc4_L = 0.0
         self._peak_lc4_R = 0.0
+        self.last_lock_step: Optional[int] = None
         self.last_yaw_terms: Dict[str, float] = {}
 
     def bind_hover(self, hover_action: float) -> None:
@@ -102,10 +104,12 @@ class DNFlightController:
         self._steep_climb = False
         self._steep_hist = []
         self._loom_threat = ""
+        self._lat_sign_hist = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
         self._peak_lc4_L = 0.0
         self._peak_lc4_R = 0.0
+        self.last_lock_step = None
         self.last_yaw_terms = {}
 
     def capture_baseline(self, readout: DNReadout, dnp01_rest: Optional[float] = None) -> None:
@@ -125,10 +129,12 @@ class DNFlightController:
         self._steep_climb = False
         self._steep_hist = []
         self._loom_threat = ""
+        self._lat_sign_hist = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
         self._peak_lc4_L = 0.0
         self._peak_lc4_R = 0.0
+        self.last_lock_step = None
         if self.params.use_engineered_eye_laterality:
             eye = float(readout.eye_L) - float(readout.eye_R)
             if abs(eye) >= float(self.params.eye_threat_min):
@@ -191,10 +197,17 @@ class DNFlightController:
 
     def _steer_yaw(self, ro: DNReadout) -> float:
         t = self._steer_terms(ro)
+        # Course terms (DNa02/DNp15/HS) can yaw the fly INTO a side loom
+        # before DNp01 fires, flipping laterality. Freeze them on a climb.
+        if self.last_rise >= 0.08:
+            t["dna02"] = 0.0
+            t["dnp15"] = 0.0
+            t["hse"] = 0.0
         yaw = t["dna02"] + t["dnp15"] + t["hse"] + t["dnp03"] + t["vpn_loom"] + t["eye"]
         if abs(yaw) < float(getattr(self.params, "steer_deadzone", 0.0)):
             yaw = 0.0
         t["steer"] = float(yaw)
+        t["course_frozen"] = 1.0 if self.last_rise >= 0.08 else 0.0
         self.last_yaw_terms = t
         return float(yaw)
 
@@ -253,21 +266,14 @@ class DNFlightController:
         n = max(1, int(getattr(p, "threat_integrate_steps", 8)))
         if self.last_rise < float(p.dnp01_rearm_delta_hz):
             self._lat_hist = []
+            self._lat_sign_hist = []
             self._peak_lc4_L = 0.0
             self._peak_lc4_R = 0.0
             self._loom_threat = ""
+            self.last_lock_step = None
         if self.last_rise >= 0.08:
             self._peak_lc4_L = max(self._peak_lc4_L, max(0.0, float(ro.lc4_L)))
             self._peak_lc4_R = max(self._peak_lc4_R, max(0.0, float(ro.lc4_R)))
-            lat_min = float(p.dnp01_loom_lat_min)
-            # Lock the first decisive L−R while the object is still lateral.
-            # Last-8 mean can flip once a 120° eye pair goes binocular.
-            if (
-                not self._loom_threat
-                and abs(now) >= lat_min
-                and self.last_rise >= 0.5 * float(p.dnp01_escape_delta_hz)
-            ):
-                self._loom_threat = "L" if now > 0.0 else "R"
         w = max(float(self.last_rise), 0.0) if self.last_rise >= 0.08 else 0.0
         self._lat_hist.append((now, w))
         if len(self._lat_hist) > n:
@@ -278,6 +284,31 @@ class DNFlightController:
         else:
             integ = float(np.mean([lat for lat, _ in self._lat_hist])) if self._lat_hist else now
         self.last_lat_integrated = integ
+        if self.last_rise >= 0.08:
+            sgn = 1 if now > 1e-6 else (-1 if now < -1e-6 else 0)
+            self._lat_sign_hist.append(int(sgn))
+            keep = max(4, int(getattr(p, "threat_lock_consistent", 4)))
+            if len(self._lat_sign_hist) > keep + 2:
+                self._lat_sign_hist.pop(0)
+            n_lock = max(1, int(getattr(p, "threat_lock_consistent", 4)))
+            tail = self._lat_sign_hist[-n_lock:]
+            consistent = (
+                len(tail) >= n_lock
+                and tail[0] != 0
+                and all(s == tail[0] for s in tail)
+            )
+            lock_rise = float(getattr(p, "threat_lock_rise_hz", 0.16))
+            lat_min = float(p.dnp01_loom_lat_min)
+            # Rise-weighted integ + a run of the same sign. First-sample
+            # lock was self-motion / yaw-into-object, not the loom.
+            if (
+                not self._loom_threat
+                and consistent
+                and self.last_rise >= lock_rise
+                and abs(integ) >= lat_min
+            ):
+                self._loom_threat = "L" if integ > 0.0 else "R"
+                self.last_lock_step = int(self.steps)
         return integ
 
     def _threat_side(self, ro: DNReadout) -> str:

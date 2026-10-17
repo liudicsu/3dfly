@@ -17,6 +17,10 @@ BIN_M = 0.5
 PR16_WALLS = 81
 PR16_STEPS = 2000
 PR16_WALLS_PER_100 = 100.0 * PR16_WALLS / PR16_STEPS  # 4.05
+# Must match mjcf loom_geom sphere radius.
+LOOM_RADIUS_M = 0.58
+# |body azimuth| at rise onset. ≥ this is a side loom; below is frontal GF.
+LATERAL_AZ_DEG = 30.0
 
 
 def xy_extent(traj: np.ndarray) -> tuple[float, float]:
@@ -48,6 +52,37 @@ def walls_per_100(n_contacts: int, n_steps: int) -> float:
 
 def wrap_heading_delta(h1: float, h0: float) -> float:
     return float(np.arctan2(np.sin(h1 - h0), np.cos(h1 - h0)))
+
+
+def body_azimuth_deg(obj_xy, fly_xy, heading_rad: float) -> float:
+    """Object bearing in the body frame (deg). +azimuth = left (+Y)."""
+    rel = np.asarray(obj_xy, dtype=float)[:2] - np.asarray(fly_xy, dtype=float)[:2]
+    world = float(np.arctan2(rel[1], rel[0]))
+    return float(np.degrees(wrap_heading_delta(world, float(heading_rad))))
+
+
+def angular_size_deg(distance: float, radius: float = LOOM_RADIUS_M) -> float:
+    d = max(float(distance), 1e-6)
+    return float(2.0 * np.degrees(np.arctan(float(radius) / d)))
+
+
+def loom_geometry(obj_xyz, fly_xyz, heading_rad: float, radius: float = LOOM_RADIUS_M) -> dict:
+    obj = np.asarray(obj_xyz, dtype=float)
+    fly = np.asarray(fly_xyz, dtype=float)
+    dist = float(np.linalg.norm(obj[:2] - fly[:2]))
+    az = body_azimuth_deg(obj[:2], fly[:2], heading_rad)
+    return {
+        "azimuth_deg": az,
+        "distance_m": dist,
+        "angular_size_deg": angular_size_deg(dist, radius),
+        "class": "lateral" if abs(az) >= LATERAL_AZ_DEG else "frontal",
+    }
+
+
+def classify_loom(azimuth_deg: Optional[float], lateral_deg: float = LATERAL_AZ_DEG) -> str:
+    if azimuth_deg is None or not np.isfinite(float(azimuth_deg)):
+        return "unknown"
+    return "lateral" if abs(float(azimuth_deg)) >= float(lateral_deg) else "frontal"
 
 
 def escape_turned_away(
@@ -112,5 +147,70 @@ def direction_correct_frac(
     for e in evs:
         step = int(getattr(e, "step", 0))
         if escape_turned_away(headings, step, threat_side, window=window):
+            ok += 1
+    return float(ok) / float(len(evs))
+
+
+def escape_turned_into(
+    headings: Sequence[float],
+    event_step: int,
+    threat_side: str,
+    window: int = 8,
+    min_abs: float = 0.02,
+) -> bool:
+    """True if heading after the burst turns toward the looming side."""
+    h = np.asarray(list(headings), dtype=float)
+    if h.size == 0:
+        return False
+    i0 = int(np.clip(event_step, 0, h.size - 1))
+    i1 = int(np.clip(event_step + window, 0, h.size - 1))
+    d = wrap_heading_delta(float(h[i1]), float(h[i0]))
+    if threat_side == "L":
+        return d > min_abs
+    if threat_side == "R":
+        return d < -min_abs
+    return False
+
+
+def geometry_aware_event_ok(
+    headings: Sequence[float],
+    event_step: int,
+    threat_side: str,
+    azimuth_onset_deg: Optional[float],
+    window: int = 8,
+) -> bool:
+    """Lateral: must turn away. Frontal: escape without turning into the object."""
+    cls = classify_loom(azimuth_onset_deg)
+    into = escape_turned_into(headings, event_step, threat_side, window=window)
+    if cls == "frontal":
+        return not into
+    return escape_turned_away(headings, event_step, threat_side, window=window)
+
+
+def geometry_aware_frac(
+    headings: Sequence[float],
+    events: Iterable,
+    threat_side: str,
+    azimuth_onset_deg: Optional[float],
+    escaped: bool,
+    braked: bool = False,
+    window: int = 8,
+) -> float:
+    """Scenario score. Lateral no-escape is 0; frontal no-escape passes if braked."""
+    cls = classify_loom(azimuth_onset_deg)
+    evs = []
+    for raw in events:
+        e = _as_event(raw)
+        if getattr(e, "engineered", False):
+            continue
+        evs.append(e)
+    if not evs:
+        if cls == "frontal" and braked:
+            return 1.0
+        return 0.0 if threat_side else float("nan")
+    ok = 0
+    for e in evs:
+        step = int(getattr(e, "step", 0))
+        if geometry_aware_event_ok(headings, step, threat_side, azimuth_onset_deg, window=window):
             ok += 1
     return float(ok) / float(len(evs))

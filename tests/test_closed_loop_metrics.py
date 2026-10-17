@@ -10,9 +10,13 @@ import pytest
 
 from threedfly.control.closed_loop_metrics import (
     PR16_WALLS_PER_100,
+    body_azimuth_deg,
+    classify_loom,
     coverage,
     direction_correct_frac,
     escape_turned_away,
+    geometry_aware_event_ok,
+    geometry_aware_frac,
     walls_per_100,
     wrap_heading_delta,
     xy_extent,
@@ -78,6 +82,35 @@ def test_wrap_heading_delta_across_pi():
     assert wrap_heading_delta(-3.0, 3.0) == pytest.approx(-6.0 + 2 * np.pi, abs=1e-6)
 
 
+def test_body_azimuth_left_is_positive():
+    assert body_azimuth_deg((0.0, 1.0), (0.0, 0.0), 0.0) == pytest.approx(90.0)
+    assert body_azimuth_deg((1.0, 0.0), (0.0, 0.0), 0.0) == pytest.approx(0.0)
+    assert body_azimuth_deg((0.0, -1.0), (0.0, 0.0), 0.0) == pytest.approx(-90.0)
+
+
+def test_classify_loom_uses_30deg_lateral():
+    assert classify_loom(29.9) == "frontal"
+    assert classify_loom(30.0) == "lateral"
+    assert classify_loom(-45.0) == "lateral"
+    assert classify_loom(None) == "unknown"
+
+
+def test_geometry_aware_frontal_must_not_turn_into():
+    straight = [0.0, 0.0, 0.0, 0.0]
+    into_left = [0.0, 0.10, 0.20, 0.30]
+    away_left = [0.0, -0.10, -0.20, -0.30]
+    assert geometry_aware_event_ok(straight, 0, "L", azimuth_onset_deg=10.0)
+    assert not geometry_aware_event_ok(into_left, 0, "L", azimuth_onset_deg=10.0)
+    assert geometry_aware_event_ok(away_left, 0, "L", azimuth_onset_deg=45.0)
+    assert not geometry_aware_event_ok(straight, 0, "L", azimuth_onset_deg=45.0)
+
+
+def test_geometry_aware_frac_frontal_brake_without_escape():
+    assert geometry_aware_frac([], [], "L", 15.0, escaped=False, braked=True) == pytest.approx(1.0)
+    assert geometry_aware_frac([], [], "L", 45.0, escaped=False, braked=True) == pytest.approx(0.0)
+    assert geometry_aware_frac([], [], "L", 45.0, escaped=False, braked=False) == pytest.approx(0.0)
+
+
 def test_acceptance_script_metric_code_runs_on_numpy2():
     """Execute the acceptance script's metric helpers (ndarray.ptp is gone on NumPy 2)."""
     path = ROOT / "scripts" / "closed_loop_acceptance.py"
@@ -131,7 +164,7 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert set(vars_l) == {"far1.4x", "slow0.7x", "offset_x+0.8", "stride_hold"}
     assert vars_l["far1.4x"]["loom_start"][1] > loom_l["loom_start"][1]
     assert vars_r["offset_x+0.8"]["loom_start"][0] > loom_r["loom_start"][0]
-    assert vars_l["stride_hold"]["stride"] == 3
+    assert vars_l["stride_hold"]["stride"] == 2
     vd = mod._variant_direction(
         {
             "side_loom_left": {"escape_direction_correct": 1.0},
@@ -143,3 +176,25 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert vd["n"] == 3
     assert vd["mean"] == pytest.approx(2.0 / 3.0)
     assert vd["pass"] is False
+    vg = mod._variant_geometry_aware(
+        {
+            "side_loom_left": {
+                "escape_direction_correct": 1.0,
+                "geometry_aware_correct": 1.0,
+                "loom_class": "lateral",
+                "azimuth_onset_deg": 45.0,
+                "brain_escapes": 1,
+            },
+            "loomR_far1.4x": {
+                "escape_direction_correct": 0.0,
+                "geometry_aware_correct": 1.0,
+                "loom_class": "frontal",
+                "azimuth_onset_deg": 12.0,
+                "brain_escapes": 1,
+            },
+            "room": {"geometry_aware_correct": None},
+        }
+    )
+    assert vg["n"] == 2
+    assert vg["mean"] == pytest.approx(1.0)
+    assert vg["pass"] is True

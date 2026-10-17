@@ -36,7 +36,10 @@ from threedfly.control.closed_loop_metrics import (
     ROOM_XY,
     coverage,
     direction_correct_frac,
+    geometry_aware_frac,
+    loom_geometry,
     walls_per_100,
+    wrap_heading_delta,
     xy_extent,
 )
 from threedfly.control.dn_controller import DNFlightController
@@ -124,7 +127,7 @@ def loom_variants(side: str) -> list:
             "tag": "stride_hold",
             "loom_start": (sx, sy, sz),
             "loom_vel": (vx, vy, vz),
-            "stride": 3,
+            "stride": 2,
         },
     ]
 
@@ -179,6 +182,11 @@ def _run_scenario(
     ms_total = []
     wall = 0
     yaw_terms = []
+    rise_geometry = []
+    rise_onset = None
+    geo_lock = None
+    geo_fire = None
+    n_esc_seen = 0
     t_wall = time.perf_counter()
     left_img, right_img = env.get_eye_images()
     n_pre = int(ctl.params.prewarm_steps if prewarm is None else prewarm)
@@ -203,10 +211,12 @@ def _run_scenario(
         action = ctl.compute(res.readout)
         left_img, right_img, info = env.step(action, wing_strokes=ctl.last_wing_strokes)
         pos = np.asarray(info["position"], dtype=float)
+        heading = heading_from_quaternion(info["orientation"])
         traj.append(pos)
-        headings.append(heading_from_quaternion(info["orientation"]))
+        headings.append(heading)
         dnp01.append(max(res.readout.dnp01_L, res.readout.dnp01_R))
-        rises.append(float(ctl.last_rise))
+        rise_now = float(ctl.last_rise)
+        rises.append(rise_now)
         ms_brain.append(res.ms.get("brain", 0.0))
         ms_flyvis.append(res.ms.get("flyvis", 0.0))
         ms_total.append(res.ms.get("total", 0.0))
@@ -214,6 +224,35 @@ def _run_scenario(
         terms["x"] = float(pos[0])
         terms["y"] = float(pos[1])
         terms["near_wall"] = 1.0 if max(abs(pos[0]), abs(pos[1])) > 3.2 else 0.0
+        geo = loom_geometry(loom_pos, pos, heading) if loom_pos is not None else None
+        if geo is not None:
+            terms["azimuth_deg"] = float(geo["azimuth_deg"])
+            terms["angular_size_deg"] = float(geo["angular_size_deg"])
+            if rise_onset is None and rise_now >= 0.08:
+                rise_onset = {"step": int(step), **{k: geo[k] for k in geo}}
+            if geo_lock is None and ctl.last_lock_step is not None:
+                geo_lock = {
+                    "step": int(step),
+                    "threat": ctl._loom_threat,
+                    **{k: geo[k] for k in geo},
+                }
+            if ctl.brain_escape_count > n_esc_seen:
+                geo_fire = {"step": int(step), **{k: geo[k] for k in geo}}
+                n_esc_seen = int(ctl.brain_escape_count)
+            if rise_now >= 0.08:
+                rise_geometry.append(
+                    {
+                        "step": int(step),
+                        "azimuth_deg": float(geo["azimuth_deg"]),
+                        "angular_size_deg": float(geo["angular_size_deg"]),
+                        "distance_m": float(geo["distance_m"]),
+                        "class": geo["class"],
+                        "rise": float(rise_now),
+                        "lat": float(ctl.last_lat_integrated),
+                        "threat": ctl._loom_threat or "",
+                        "course_frozen": float(terms.get("course_frozen", 0.0)),
+                    }
+                )
         yaw_terms.append(terms)
         if env.check_collision():
             wall += 1
@@ -233,8 +272,48 @@ def _run_scenario(
         if threat_side
         else float("nan")
     )
+    brakes = [float(t.get("loom_brake", 0.0)) for t in yaw_terms]
+    braked = bool(brakes) and float(np.max(brakes)) >= 0.35
+    az_on = None if rise_onset is None else float(rise_onset["azimuth_deg"])
+    geo_ok = (
+        geometry_aware_frac(
+            headings_arr,
+            ctl.escape_events,
+            threat_side,
+            az_on,
+            escaped=int(ctl.brain_escape_count) > 0,
+            braked=braked,
+        )
+        if threat_side
+        else float("nan")
+    )
+    pre_toward = False
+    if threat_side and rise_onset is not None and headings_arr.size:
+        i0 = int(np.clip(rise_onset["step"], 0, headings_arr.size - 1))
+        i1 = int(ctl.escape_events[0].step) if ctl.escape_events else min(i0 + 8, headings_arr.size - 1)
+        i1 = int(np.clip(i1, 0, headings_arr.size - 1))
+        dhead = wrap_heading_delta(float(headings_arr[i1]), float(headings_arr[i0]))
+        if threat_side == "L":
+            pre_toward = dhead > 0.02
+        elif threat_side == "R":
+            pre_toward = dhead < -0.02
     dx, dy = xy_extent(traj)
     yaw_summary = _yaw_term_summary(yaw_terms)
+    events = []
+    for e in ctl.escape_events:
+        rec = {
+            "step": e.step,
+            "dnp01": e.dnp01,
+            "threat_side": e.threat_side,
+            "yaw": e.yaw,
+            "engineered": e.engineered,
+        }
+        g = next((r for r in rise_geometry if int(r["step"]) == int(e.step)), None)
+        if g is not None:
+            rec["azimuth_deg"] = g["azimuth_deg"]
+            rec["angular_size_deg"] = g["angular_size_deg"]
+            rec["loom_class"] = g["class"]
+        events.append(rec)
     return {
         "name": name,
         "steps": int(n_steps),
@@ -244,6 +323,17 @@ def _run_scenario(
         "engineered_escapes": int(ctl.engineered_escape_count),
         "dnp01_latch_frac": float(ctl.dnp01_latch_frac),
         "escape_direction_correct": None if np.isnan(dir_ok) else float(dir_ok),
+        "geometry_aware_correct": None if np.isnan(geo_ok) else float(geo_ok),
+        "loom_class": None if rise_onset is None else rise_onset["class"],
+        "azimuth_onset_deg": az_on,
+        "angular_size_onset_deg": None if rise_onset is None else float(rise_onset["angular_size_deg"]),
+        "azimuth_lock_deg": None if geo_lock is None else float(geo_lock["azimuth_deg"]),
+        "angular_size_lock_deg": None if geo_lock is None else float(geo_lock["angular_size_deg"]),
+        "azimuth_fire_deg": None if geo_fire is None else float(geo_fire["azimuth_deg"]),
+        "angular_size_fire_deg": None if geo_fire is None else float(geo_fire["angular_size_deg"]),
+        "threat_locked": None if geo_lock is None else geo_lock.get("threat"),
+        "pre_escape_yaw_toward": bool(pre_toward),
+        "braked": bool(braked),
         "false_escapes": int(ctl.brain_escape_count) if name == "open_space" else 0,
         "ms_per_step_brain": float(np.median(ms_brain)) if ms_brain else 0.0,
         "ms_per_step_flyvis": float(np.median(ms_flyvis)) if ms_flyvis else 0.0,
@@ -260,25 +350,21 @@ def _run_scenario(
         "dnp01_rise_max": float(np.max(rises)) if rises else 0.0,
         "yaw_terms": yaw_summary,
         "would_fire": int(ctl.would_fire_count),
-        "escape_events": [
-            {
-                "step": e.step,
-                "dnp01": e.dnp01,
-                "threat_side": e.threat_side,
-                "yaw": e.yaw,
-                "engineered": e.engineered,
-            }
-            for e in ctl.escape_events
-        ],
+        "rise_geometry": rise_geometry,
+        "escape_events": events,
     }
 
 
+def _is_loom_variant(name: str) -> bool:
+    return name.startswith("side_loom_") or name.startswith("loomL_") or name.startswith("loomR_")
+
+
 def _variant_direction(scenarios: dict) -> dict:
-    """≥80% away across official + offset/speed/stride L/R variants."""
+    """Raw ≥80% away across official + offset/speed/stride L/R variants."""
     dirs = []
     per = {}
     for name, sc in scenarios.items():
-        if not (name.startswith("side_loom_") or name.startswith("loomL_") or name.startswith("loomR_")):
+        if not _is_loom_variant(name):
             continue
         d = sc.get("escape_direction_correct")
         per[name] = d
@@ -286,6 +372,39 @@ def _variant_direction(scenarios: dict) -> dict:
             dirs.append(float(d))
     return {
         "per_scenario": per,
+        "mean": float(np.mean(dirs)) if dirs else None,
+        "n": int(len(dirs)),
+        "pass": bool(dirs) and float(np.mean(dirs)) >= 0.80,
+    }
+
+
+def _variant_geometry_aware(scenarios: dict) -> dict:
+    """Geometry-aware variant score. Lateral no-escape is 0; do not relabel."""
+    dirs = []
+    per = {}
+    details = {}
+    for name, sc in scenarios.items():
+        if not _is_loom_variant(name):
+            continue
+        d = sc.get("geometry_aware_correct")
+        per[name] = d
+        details[name] = {
+            "raw": sc.get("escape_direction_correct"),
+            "geometry_aware": d,
+            "loom_class": sc.get("loom_class"),
+            "azimuth_onset_deg": sc.get("azimuth_onset_deg"),
+            "angular_size_onset_deg": sc.get("angular_size_onset_deg"),
+            "azimuth_lock_deg": sc.get("azimuth_lock_deg"),
+            "azimuth_fire_deg": sc.get("azimuth_fire_deg"),
+            "brain_escapes": sc.get("brain_escapes"),
+            "threat_locked": sc.get("threat_locked"),
+            "pre_escape_yaw_toward": sc.get("pre_escape_yaw_toward"),
+        }
+        if d is not None:
+            dirs.append(float(d))
+    return {
+        "per_scenario": per,
+        "details": details,
         "mean": float(np.mean(dirs)) if dirs else None,
         "n": int(len(dirs)),
         "pass": bool(dirs) and float(np.mean(dirs)) >= 0.80,
@@ -543,6 +662,12 @@ def main(argv=None) -> int:
             "side_R_escapes": side_r["brain_escapes"],
             "side_L_direction_correct": side_l["escape_direction_correct"],
             "side_R_direction_correct": side_r["escape_direction_correct"],
+            "side_L_geometry_aware": side_l.get("geometry_aware_correct"),
+            "side_R_geometry_aware": side_r.get("geometry_aware_correct"),
+            "side_L_loom_class": side_l.get("loom_class"),
+            "side_R_loom_class": side_r.get("loom_class"),
+            "side_L_azimuth_onset_deg": side_l.get("azimuth_onset_deg"),
+            "side_R_azimuth_onset_deg": side_r.get("azimuth_onset_deg"),
             "side_L_rise_max": side_l.get("dnp01_rise_max"),
             "side_R_rise_max": side_r.get("dnp01_rise_max"),
             "open_false_escapes": open_sc["brain_escapes"],
@@ -555,6 +680,7 @@ def main(argv=None) -> int:
             "side_L_would_fire": side_l.get("would_fire"),
             "side_R_would_fire": side_r.get("would_fire"),
             "variant_direction_correct": _variant_direction(scenarios),
+            "variant_geometry_aware": _variant_geometry_aware(scenarios),
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
             "ms_per_step_mean": room.get("ms_per_step_brain_flyvis_mean"),
             "flyvis_stride": int(params.flyvis_stride),
@@ -567,8 +693,46 @@ def main(argv=None) -> int:
     }
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print(json.dumps(metrics["summary"], indent=2))
+    _print_variant_tables(metrics["summary"])
     print(f"wrote {out / 'metrics.json'}", flush=True)
     return 0
+
+
+def _print_variant_tables(summary: dict) -> None:
+    raw = summary.get("variant_direction_correct") or {}
+    geo = summary.get("variant_geometry_aware") or {}
+    details = geo.get("details") or {}
+    names = list(details) or list(raw.get("per_scenario") or {})
+    if not names:
+        return
+    print("\nRaw direction (must turn away from scenario side):", flush=True)
+    print(f"{'scenario':<28} {'raw':>6} {'geo':>6} {'class':>8} {'az0':>7} {'esc':>4} {'lock':>4} {'toward':>6}", flush=True)
+    for name in names:
+        d = details.get(name, {})
+        r = d.get("raw", (raw.get("per_scenario") or {}).get(name))
+        g = d.get("geometry_aware")
+        print(
+            f"{name:<28} {_fmt(r):>6} {_fmt(g):>6} {str(d.get('loom_class') or '-'):>8} "
+            f"{_fmt(d.get('azimuth_onset_deg')):>7} {str(d.get('brain_escapes')):>4} "
+            f"{str(d.get('threat_locked') or '-'):>4} {str(d.get('pre_escape_yaw_toward')):>6}",
+            flush=True,
+        )
+    print(
+        f"raw mean={raw.get('mean')} pass={raw.get('pass')} | "
+        f"geometry-aware mean={geo.get('mean')} pass={geo.get('pass')}",
+        flush=True,
+    )
+
+
+def _fmt(v) -> str:
+    if v is None:
+        return "-"
+    if isinstance(v, bool):
+        return "Y" if v else "n"
+    try:
+        return f"{float(v):.2f}"
+    except (TypeError, ValueError):
+        return str(v)
 
 
 if __name__ == "__main__":

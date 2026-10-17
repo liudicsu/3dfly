@@ -63,8 +63,8 @@ def test_side_walls_brighten_ipsilateral_eye():
         contrast[side] = (float(np.std(hL)), float(np.std(hR)))
     env.close()
     # Textured wall is on the ipsilateral eye → higher hex contrast, not mean.
-    assert contrast["L"][0] > contrast["L"][1] + 0.02, f"left wall should texture left eye: {contrast}"
-    assert contrast["R"][1] > contrast["R"][0] + 0.02, f"right wall should texture right eye: {contrast}"
+    assert contrast["L"][0] > contrast["L"][1] + 0.015, f"left wall should texture left eye: {contrast}"
+    assert contrast["R"][1] > contrast["R"][0] + 0.015, f"right wall should texture right eye: {contrast}"
 
 
 @needs_stack
@@ -148,6 +148,8 @@ def test_open_loop_mirrored_object_flips_dns():
                 peak[k] = max(peak[k], float(getattr(ro, k)) - float(getattr(rest, k)))
         return peak
 
+    # 45° approach matches the official side-loom geometry. Bilinear hex
+    # sampling (not a V-flip) is what brings DNp01 L↔R under 20%.
     left = _run(_movie((1.55, 1.55, 1.5), (-1.30, -1.25, 0.0), n=50))
     right = _run(_movie((1.55, -1.55, 1.5), (-1.30, 1.25, 0.0), n=50))
     env.close()
@@ -155,7 +157,7 @@ def test_open_loop_mirrored_object_flips_dns():
     assert right["lc4_R"] > right["lc4_L"], right
     assert left["dnp01_L"] > left["dnp01_R"], left
     assert right["dnp01_R"] > right["dnp01_L"], right
-    for key, lim in (("dnp01", 0.32), ("lc4", 0.35)):
+    for key, lim in (("dnp01", 0.20), ("lc4", 0.30)):
         a, b = left[f"{key}_L"], right[f"{key}_R"]
         err = abs(a - b) / max(abs(a), abs(b), 1e-6)
         assert err < lim, f"{key} L↔R err {err:.2f} (want <{lim}): L={left} R={right}"

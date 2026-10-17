@@ -35,4 +35,6 @@ def test_escape_threshold_sits_between_m1_rotation_and_loom():
     assert p.dnp01_loom_lat_min > 0.0
     assert p.dnp01_slope_min > 0.0
     assert p.threat_integrate_steps >= 8
+    assert p.threat_lock_consistent >= 3
+    assert p.threat_lock_rise_hz >= 0.10
     assert "0.20" in p.notes["escape"] or "laterality" in p.notes["escape"]

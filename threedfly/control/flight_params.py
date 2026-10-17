@@ -51,6 +51,9 @@ class FlightParams:
     dnp01_slope_min: float = 0.012
     # Threat from the mean L−R over the rise, not the fire instant.
     threat_integrate_steps: int = 10
+    # Do not lock side on the first noisy sample (self-motion / early yaw).
+    threat_lock_consistent: int = 4
+    threat_lock_rise_hz: float = 0.16
     # Slow rest: eats the 16-step settle climb, keeps a 1 s compact loom.
     dnp01_rest_tau_steps: float = 100.0
     dnp01_freeze_rest: bool = True
@@ -149,9 +152,10 @@ class FlightParams:
     notes: Dict[str, str] = field(default_factory=lambda: {
         "escape": (
             "DNp01 rise ≥ 0.20 Hz over frozen post-settle rest AND recent "
-            "slope ≥ 0.012 Hz/step AND integrated DNp03/LC4 laterality "
-            "(first-decisive lock + peak LC4); one ≥80-step past-peak "
-            "prewarm; right-eye hex U-flip; one stride"
+            "slope ≥ 0.012 Hz/step AND rise-weighted DNp03/LC4 laterality "
+            "(consistent-sign lock, not first sample); course DNa02/HS "
+            "frozen during the climb so we do not yaw into the object; "
+            "one ≥80-step past-peak prewarm; right-eye hex U-flip; stride 2"
         ),
         "dnp03": (
             "DNp03 + LC4/LPLC ipsilateral L−R after per-side baseline → "
@@ -165,6 +169,10 @@ class FlightParams:
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",
         "camera": "40° outward cant, 120° FOV; right-eye hex U-flip (X-mirror)",
+        "geometry": (
+            "Lateral |az|≥30° at rise onset must turn away; frontal GF "
+            "must escape/brake without turning into the object"
+        ),
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })
 
