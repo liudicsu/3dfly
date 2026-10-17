@@ -8,9 +8,15 @@ import sys
 
 from threedfly.connectome import ConnectomeLoader, BrainSimulator
 from threedfly.connectome.simulator import RateSimulator
+from threedfly.connectome.neuron_selection import (
+    load_neurotransmitter_data,
+    build_transmitter_sign_vector,
+)
 from threedfly.sim import FlyEnvironment
 from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
+from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
+from threedfly.control.controller import BiologicalFlightController
 from threedfly.viz import InteractiveVisualizer
 
 
@@ -24,6 +30,8 @@ def run_interactive_simulation(
     port: int = 8080,
     max_collisions: int = 100,
     enable_soft_recovery: bool = True,
+    warmup_steps: int = 800,
+    apply_ei_signs: bool = True,
 ):
     """
     Run interactive 3dfly simulation with unified web interface.
@@ -60,14 +68,33 @@ def run_interactive_simulation(
     subgraph = ConnectomeLoader.load_subgraph(Path(subgraph_path))
     n_neurons = subgraph["n_neurons"]
     adjacency = subgraph["adjacency"]
+    annotations = subgraph.get("annotations")
+    body_ids = subgraph.get("body_ids")
+    body_id_to_idx = subgraph.get("body_id_to_idx")
+    use_biological = annotations is not None and body_ids is not None and body_id_to_idx is not None
     print(f"  ✓ Loaded {n_neurons} neurons")
+
+    nt_data = None
+    transmitter_signs = None
+    if use_biological:
+        nt_path = "data/connectome-raw/body-neurotransmitters-male-cns-v1.0.feather"
+        nt_data = load_neurotransmitter_data(nt_path)
+        if nt_data is not None:
+            print(f"  ✓ Neurotransmitter table ({len(nt_data)} entries)")
+            transmitter_signs = build_transmitter_sign_vector(
+                n_neurons, body_ids, body_id_to_idx, nt_data
+            )
     
     print("\n[2/7] Initializing brain simulator ({})...".format(simulator_type))
+    ei_kwargs = {}
+    if apply_ei_signs and transmitter_signs is not None:
+        ei_kwargs = {"apply_ei_signs": True, "transmitter_signs": transmitter_signs}
+        print("  ✓ Applying E/I signs (sparse.diags @ adj)")
     if simulator_type == "lif":
-        brain = BrainSimulator(adjacency, dt=0.001)
+        brain = BrainSimulator(adjacency, dt=0.001, **ei_kwargs)
         brain_dt = 0.001
     else:
-        brain = RateSimulator(adjacency, dt=0.010)
+        brain = RateSimulator(adjacency, dt=0.010, **ei_kwargs)
         brain_dt = 0.010
     print(f"  ✓ Brain ready (dt={brain_dt}s)")
     
@@ -93,7 +120,18 @@ def run_interactive_simulation(
     print("  ✓ Brain depth estimator ready")
     
     print("\n[6/8] Setting up control and exploration...")
-    controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
+    if use_biological:
+        print("  Using biological neuron mappings from annotations")
+        controller = BiologicalFlightController(
+            n_neurons=n_neurons,
+            annotations=annotations,
+            body_ids=body_ids,
+            body_id_to_idx=body_id_to_idx,
+            nt_data=nt_data,
+            warmup_steps=warmup_steps,
+        )
+    else:
+        controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
     explorer = ExplorationPolicy(exploration_weight=0.8)  # Increased from 0.5 for stronger exploration
     print("  ✓ Control system ready")
     
@@ -115,8 +153,48 @@ def run_interactive_simulation(
     
     # Simulation parameters
     sim_dt = 0.02  # 20ms per step
-    brain_steps_per_sim = int(sim_dt / brain_dt)
+    brain_steps_per_sim = max(1, int(round(sim_dt / brain_dt)))
     viz_update_interval = 3  # Update viz every N steps (more frequent for smoother point cloud)
+
+    def run_warmup(left_img, right_img):
+        if not use_biological or controller.warmup_steps <= 0:
+            return left_img, right_img
+        print(f"\n[Warmup] Up to {controller.warmup_steps} grounded brain steps...")
+        brain.reset()
+        controller.warmup_complete = False
+        controller._warmup_count = 0
+        controller.warmup_history = {}
+        controller.escape_timer = 0
+        for warmup_step in range(controller.warmup_steps):
+            visual_features = stereo.get_visual_features(left_img, right_img)
+            fly_velocity = env.get_fly_velocity()
+            _, flow_info = brain_depth.prepare_flow_features_for_brain(
+                left_img, right_img, fly_velocity
+            )
+            controller.set_visual_input(
+                left_luminance=visual_features["left_ommatidia"].mean(),
+                right_luminance=visual_features["right_ommatidia"].mean(),
+                optic_flow_features=extract_t4_t5_flow_features(
+                    flow_info.get("flow_left"), flow_info.get("flow_right")
+                ),
+                looming_features={
+                    "left": visual_features["looming_features"][:4].mean(),
+                    "right": visual_features["looming_features"][4:].mean(),
+                },
+                brain=brain,
+            )
+            for _ in range(brain_steps_per_sim):
+                if simulator_type == "lif":
+                    brain.step()
+                    brain_activity = brain.get_firing_rates(window=50)
+                else:
+                    brain_activity = brain.step()
+            controller.record_resting_rates(brain_activity)
+            if controller.warmup_converged():
+                print(f"  Warmup converged at step {warmup_step + 1}")
+                break
+        controller.finalize_warmup()
+        return left_img, right_img
     
     # Initial state
     def reset_simulation():
@@ -125,6 +203,7 @@ def run_interactive_simulation(
         mapper.__init__(voxel_size=0.05)  # Reset mapper
         brain_depth.reset()  # Reset brain depth estimator
         viz.reset_trajectory()
+        left_img, right_img = run_warmup(left_img, right_img)
         return left_img, right_img, 0, 0  # step, collision_count
     
     left_img, right_img, step, collision_count = reset_simulation()
@@ -164,17 +243,29 @@ def run_interactive_simulation(
                 fly_velocity
             )
             
-            # Feed to brain: ommatidial samples + looming + FLOW FEATURES (motion parallax)
-            brain_input = np.concatenate([
-                visual_features["left_ommatidia"],
-                visual_features["right_ommatidia"],
-                visual_features["looming_features"],  # Obstacle proximity signals
-                flow_features  # *** NEW: Motion parallax/optic flow features ***
-            ])
-            
-            # Run brain for multiple timesteps (connectome processes flow features)
-            for _ in range(brain_steps_per_sim):
+            if use_biological:
+                controller.set_visual_input(
+                    left_luminance=visual_features["left_ommatidia"].mean(),
+                    right_luminance=visual_features["right_ommatidia"].mean(),
+                    optic_flow_features=extract_t4_t5_flow_features(
+                        flow_info.get("flow_left"), flow_info.get("flow_right")
+                    ),
+                    looming_features={
+                        "left": visual_features["looming_features"][:4].mean(),
+                        "right": visual_features["looming_features"][4:].mean(),
+                    },
+                    brain=brain,
+                )
+            else:
+                brain_input = np.concatenate([
+                    visual_features["left_ommatidia"],
+                    visual_features["right_ommatidia"],
+                    visual_features["looming_features"],
+                    flow_features
+                ])
                 brain.set_input(brain_input)
+            
+            for _ in range(brain_steps_per_sim):
                 if simulator_type == "lif":
                     brain.step()
                     brain_activity = brain.get_firing_rates(window=50)

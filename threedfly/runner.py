@@ -7,9 +7,13 @@ import time
 
 from threedfly.connectome import ConnectomeLoader, BrainSimulator
 from threedfly.connectome.simulator import RateSimulator
-from threedfly.connectome.neuron_selection import load_neurotransmitter_data
+from threedfly.connectome.neuron_selection import (
+    load_neurotransmitter_data,
+    build_transmitter_sign_vector,
+)
 from threedfly.sim import FlyEnvironment
 from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
+from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
 from threedfly.control.controller import BiologicalFlightController
 from threedfly.viz import Visualizer
@@ -24,6 +28,8 @@ def run_simulation(
     seed: int = 42,
     max_collisions: int = 50,
     enable_soft_recovery: bool = True,
+    warmup_steps: int = 800,
+    apply_ei_signs: bool = True,
 ):
     """
     Run complete 3dfly simulation.
@@ -37,6 +43,8 @@ def run_simulation(
         seed: Random seed
         max_collisions: Maximum collisions before stopping (0 = unlimited)
         enable_soft_recovery: Enable soft collision recovery (back off and continue)
+        warmup_steps: Max grounded brain steps before flight (biological mode)
+        apply_ei_signs: Apply neurotransmitter E/I signs when NT data is available
     """
     np.random.seed(seed)
     
@@ -48,14 +56,36 @@ def run_simulation(
     subgraph = ConnectomeLoader.load_subgraph(Path(subgraph_path))
     n_neurons = subgraph["n_neurons"]
     adjacency = subgraph["adjacency"]
+    annotations = subgraph.get("annotations")
+    body_ids = subgraph.get("body_ids")
+    body_id_to_idx = subgraph.get("body_id_to_idx")
+    use_biological = annotations is not None and body_ids is not None and body_id_to_idx is not None
+
+    nt_data = None
+    transmitter_signs = None
+    if use_biological:
+        nt_path = "data/connectome-raw/body-neurotransmitters-male-cns-v1.0.feather"
+        nt_data = load_neurotransmitter_data(nt_path)
+        if nt_data is not None:
+            print(f"  Loaded neurotransmitter data ({len(nt_data)} entries)")
+            transmitter_signs = build_transmitter_sign_vector(
+                n_neurons, body_ids, body_id_to_idx, nt_data
+            )
     
     print(f"\n[2/7] Initializing brain simulator ({simulator_type})...")
+    ei_kwargs = {}
+    if apply_ei_signs and transmitter_signs is not None:
+        ei_kwargs = {"apply_ei_signs": True, "transmitter_signs": transmitter_signs}
+        print("  Applying E/I signs from neurotransmitter table (sparse.diags @ adj)")
     if simulator_type == "lif":
-        brain = BrainSimulator(adjacency, dt=0.001)
+        brain = BrainSimulator(adjacency, dt=0.001, **ei_kwargs)
         brain_dt = 0.001
     else:
-        brain = RateSimulator(adjacency, dt=0.010)
+        brain = RateSimulator(adjacency, dt=0.010, **ei_kwargs)
         brain_dt = 0.010
+
+    sim_dt = 0.02  # 20ms per physics/control step
+    brain_steps_per_sim = max(1, int(round(sim_dt / brain_dt)))
     
     print("\n[3/7] Creating MuJoCo environment...")
     # Always render camera images for vision system (even in headless mode)
@@ -78,33 +108,16 @@ def run_simulation(
     
     print("\n[6/7] Setting up control and exploration...")
     
-    # Load annotations if available for biological mapping
-    annotations = None
-    body_ids = None
-    body_id_to_idx = None
-    use_biological = False
-    
-    if "annotations" in subgraph and "body_ids" in subgraph and "body_id_to_idx" in subgraph:
-        annotations = subgraph["annotations"]
-        body_ids = subgraph["body_ids"]
-        body_id_to_idx = subgraph["body_id_to_idx"]
+    if use_biological:
         print("  Using biological neuron mappings from annotations")
-        
-        # Try to load neurotransmitter data
-        nt_path = "data/connectome-raw/body-neurotransmitters-male-cns-v1.0.feather"
-        nt_data = load_neurotransmitter_data(nt_path)
-        if nt_data is not None:
-            print(f"  Loaded neurotransmitter data ({len(nt_data)} entries)")
-        
         controller = BiologicalFlightController(
             n_neurons=n_neurons,
             annotations=annotations,
             body_ids=body_ids,
             body_id_to_idx=body_id_to_idx,
             nt_data=nt_data,
-            warmup_steps=100,  # 100 grounded brain steps
+            warmup_steps=warmup_steps,
         )
-        use_biological = True
     else:
         print("  No annotations found, using legacy controller")
         controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
@@ -127,38 +140,42 @@ def run_simulation(
     # Reset environment
     left_img, right_img = env.reset(seed=seed)
     
-    # Warmup period for biological controller
+    # Warmup period for biological controller (brain_steps_per_sim is defined above)
     if use_biological and controller.warmup_steps > 0:
-        print(f"\n[Warmup] Running {controller.warmup_steps} grounded brain steps...")
+        print(f"\n[Warmup] Up to {controller.warmup_steps} grounded brain steps "
+              f"(min {controller.min_warmup_steps}, stop on convergence)...")
         for warmup_step in range(controller.warmup_steps):
             visual_features = stereo.get_visual_features(left_img, right_img)
-            
-            # Set biological input (simplified during warmup)
+            fly_velocity = env.get_fly_velocity()
+            _, flow_info = brain_depth.prepare_flow_features_for_brain(
+                left_img, right_img, fly_velocity
+            )
+            optic_flow_features = extract_t4_t5_flow_features(
+                flow_info.get("flow_left"), flow_info.get("flow_right")
+            )
             controller.set_visual_input(
                 left_luminance=visual_features["left_ommatidia"].mean(),
                 right_luminance=visual_features["right_ommatidia"].mean(),
-                optic_flow_features={},
-                looming_features={},
+                optic_flow_features=optic_flow_features,
+                looming_features={
+                    "left": visual_features["looming_features"][:4].mean(),
+                    "right": visual_features["looming_features"][4:].mean(),
+                },
                 brain=brain,
             )
-            
-            # Run brain
             for _ in range(brain_steps_per_sim):
                 if simulator_type == "lif":
                     brain.step()
                     brain_activity = brain.get_firing_rates(window=50)
                 else:
                     brain_activity = brain.step()
-            
-            # Record resting rates
             controller.record_resting_rates(brain_activity)
-        
+            if controller.warmup_converged():
+                print(f"  Warmup converged at step {warmup_step + 1}")
+                break
         controller.finalize_warmup()
-        print("[Warmup complete]\n")
     
     # Simulation loop
-    sim_dt = 0.02  # 20ms per step
-    brain_steps_per_sim = int(sim_dt / brain_dt)
     
     viz_update_interval = 10  # Update viz every N steps
     
@@ -181,11 +198,13 @@ def run_simulation(
         
         # Feed to brain
         if use_biological:
-            # Biological input mapping
+            optic_flow_features = extract_t4_t5_flow_features(
+                flow_info.get("flow_left"), flow_info.get("flow_right")
+            )
             controller.set_visual_input(
                 left_luminance=visual_features["left_ommatidia"].mean(),
                 right_luminance=visual_features["right_ommatidia"].mean(),
-                optic_flow_features={},  # Simplified - could extract from flow_features
+                optic_flow_features=optic_flow_features,
                 looming_features={
                     "left": visual_features["looming_features"][:4].mean(),
                     "right": visual_features["looming_features"][4:].mean(),

@@ -39,12 +39,13 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
   - Optic flow → T4a-d / T5a-d direction-selective neurons
   - Looming detection → LPLC2 + LC4 collision detectors
 - Tonic flight drive baseline (keeps fly airborne)
+- Actuator scaling so max lift exceeds body weight, plus haltere-like angular-rate damping for attitude stability
 - DN → motor readout:
-  - DNp01 → escape pitch
+  - DNp01 → escape (threshold event, not a continuous command)
   - DNg02 → thrust/altitude
-  - DNa01/02 difference → yaw control
+  - DNa01/02 difference → yaw control (falls back to DNa02 or DNg02 L–R)
   - DNb → roll
-- Safety limits (minimal collision recovery as last resort)
+- Safety limits (minimal collision recovery as last resort; logged, never a random teleport)
 
 **Scientific honesty:**
 This is a connectome-structured simulator with engineered sensory encoding and motor decoding. The synaptic graph is real; the input/output mappings are biologically inspired but not validated against fruit fly physiology. Neural dynamics use simplified rate models. This is exploratory research simulation, not a claim of neuron-for-neuron accuracy.
@@ -790,12 +791,13 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
   - 光流 → T4a-d / T5a-d 方向选择性神经元
   - 逼近检测 → LPLC2 + LC4 碰撞检测器
 - 强直性飞行驱动基线（保持果蝇在空中）
+- 执行器增益使最大升力超过体重；平衡棒式角速度阻尼用于姿态稳定（工程化，非连接组读取）
 - DN → 运动读取：
-  - DNp01 → 逃逸俯仰
+  - DNp01 → 逃逸（阈值事件，而非持续指令）
   - DNg02 → 推力/高度
-  - DNa01/02 差值 → 偏航控制
+  - DNa01/02 差值 → 偏航控制（DNa01 静默时回退到 DNa02 或 DNg02 左右差）
   - DNb → 滚转
-- 安全限制（最小化碰撞恢复作为最后手段）
+- 安全限制（最小化碰撞恢复作为最后手段；会记录日志，不做随机传送）
 
 **科学诚实性：**
 这是一个基于连接组结构的模拟器，具有工程化的感觉编码和运动解码。突触图是真实的；输入输出映射受生物学启发但未经果蝇生理学验证。神经动力学使用简化的速率模型。这是探索性研究模拟，而非神经元级精确度的声明。

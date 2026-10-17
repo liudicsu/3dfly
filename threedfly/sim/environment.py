@@ -50,9 +50,11 @@ class FlyEnvironment:
         else:
             self.renderer = None
         
-        # Control bounds
-        self.thrust_max = 0.01
-        self.torque_max = 0.001
+        # Control bounds in SI units (gainprm=1). Max lift ~3x body weight (~0.016 N).
+        self.thrust_max = 0.05
+        self.torque_max = 5e-6
+        # Engineered haltere-like angular-rate damping (not connectome-derived).
+        self.haltere_kd = 2e-6
         
         # State tracking
         self.time = 0.0
@@ -99,11 +101,18 @@ class FlyEnvironment:
         # Clip and apply control
         action = np.clip(action, -1.0, 1.0)
         
-        self.data.ctrl[0] = action[0] * self.thrust_max  # forward thrust
-        self.data.ctrl[1] = action[1] * self.thrust_max  # upward thrust
-        self.data.ctrl[2] = action[2] * self.torque_max  # roll
-        self.data.ctrl[3] = action[3] * self.torque_max  # pitch
-        self.data.ctrl[4] = action[4] * self.torque_max  # yaw
+        self.data.ctrl[0] = action[0] * self.thrust_max  # forward thrust (N)
+        self.data.ctrl[1] = action[1] * self.thrust_max  # upward thrust (N)
+        self.data.ctrl[2] = action[2] * self.torque_max  # roll (N·m)
+        self.data.ctrl[3] = action[3] * self.torque_max  # pitch (N·m)
+        self.data.ctrl[4] = action[4] * self.torque_max  # yaw (N·m)
+        
+        # Haltere-like attitude stabilisation: damp angular rate in body frame.
+        # Engineered safety/stability bridge, not a connectome readout.
+        angvel = self.data.qvel[3:6]
+        self.data.ctrl[2] -= self.haltere_kd * angvel[0]
+        self.data.ctrl[3] -= self.haltere_kd * angvel[1]
+        self.data.ctrl[4] -= self.haltere_kd * angvel[2]
         
         # Step physics
         mujoco.mj_step(self.model, self.data)
@@ -247,37 +256,36 @@ class FlyEnvironment:
         """
         pos = self.get_fly_position()
         
-        # Minimal repositioning
+        # Minimal deterministic nudge — never a random teleport
         recovery_offset = np.zeros(3)
         
         if pos[2] < 0.3:
-            # Ground: small upward nudge
-            recovery_offset[2] = 0.2
+            recovery_offset[2] = recovery_distance
         elif pos[2] > 2.3:
-            # Ceiling: small downward nudge
-            recovery_offset[2] = -0.2
+            recovery_offset[2] = -recovery_distance
         elif self.data.ncon > 0:
-            # Wall: minimal back-off along contact normal
             contact = self.data.contact[0]
             contact_normal = contact.frame[:3]
             if np.linalg.norm(contact_normal) > 0.1:
                 contact_normal = contact_normal / np.linalg.norm(contact_normal)
             recovery_offset = -contact_normal * recovery_distance
         
-        # Apply recovery
-        self.data.qpos[:3] = pos + recovery_offset
+        offset_norm = np.linalg.norm(recovery_offset)
+        if offset_norm > recovery_distance and offset_norm > 0:
+            recovery_offset = recovery_offset * (recovery_distance / offset_norm)
         
-        # Clamp to room bounds
+        print(
+            f"[collision-recovery] fired pos=({pos[0]:.3f},{pos[1]:.3f},{pos[2]:.3f}) "
+            f"offset=({recovery_offset[0]:.3f},{recovery_offset[1]:.3f},{recovery_offset[2]:.3f}) "
+            f"ncon={self.data.ncon}"
+        )
+        
+        self.data.qpos[:3] = pos + recovery_offset
         self.data.qpos[0] = np.clip(self.data.qpos[0], -1.9, 1.9)
         self.data.qpos[1] = np.clip(self.data.qpos[1], -1.9, 1.9)
         self.data.qpos[2] = np.clip(self.data.qpos[2], 0.3, 2.2)
-        
-        # Gentle velocity dampening (not aggressive)
         self.data.qvel[:3] *= 0.3
         
-        # Keep orientation (no randomization)
-        
-        # Forward simulation
         mujoco.mj_forward(self.model, self.data)
     
     def close(self):

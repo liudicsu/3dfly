@@ -248,6 +248,52 @@ def get_neuron_transmitters(
     return result
 
 
+DEFAULT_INHIBITORY_TRANSMITTERS = ("gaba", "glutamate", "histamine")
+
+
+def transmitter_to_sign(
+    transmitter: str,
+    inhibitory_transmitters=None,
+    default_sign: float = 1.0,
+) -> float:
+    """
+    Map a neurotransmitter name to a synaptic sign.
+
+    Default: acetylcholine and others/unclear → +1;
+    GABA, glutamate, histamine → -1. Inhibitory set is configurable.
+    """
+    inhibitory = {
+        str(name).lower().strip()
+        for name in (inhibitory_transmitters or DEFAULT_INHIBITORY_TRANSMITTERS)
+    }
+    name = str(transmitter).lower().strip()
+    if name in inhibitory:
+        return -1.0
+    return float(default_sign)
+
+
+def build_transmitter_sign_vector(
+    n_neurons: int,
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+    nt_data: Optional[pd.DataFrame],
+    inhibitory_transmitters=None,
+    default_sign: float = 1.0,
+) -> np.ndarray:
+    """Build length-n_neurons sign vector (+1/-1) from neurotransmitter tables."""
+    signs = np.full(n_neurons, default_sign, dtype=np.float32)
+    if nt_data is None:
+        return signs
+    transmitters = get_neuron_transmitters(body_ids, nt_data)
+    for bid, nt in transmitters.items():
+        idx = body_id_to_idx.get(int(bid))
+        if idx is not None:
+            signs[idx] = transmitter_to_sign(
+                nt, inhibitory_transmitters=inhibitory_transmitters, default_sign=default_sign
+            )
+    return signs
+
+
 def create_fixed_input_assignment(
     population_size: int,
     feature_size: int,
@@ -270,6 +316,27 @@ def create_fixed_input_assignment(
     if population_size == 0:
         return np.array([], dtype=np.int32)
     return rng.choice(population_size, size=feature_size, replace=True).astype(np.int32)
+
+
+def _annotation_type_mask(annotations: pd.DataFrame, pattern: str) -> pd.Series:
+    """Match `pattern` against celltype and/or type columns."""
+    mask = pd.Series(False, index=annotations.index)
+    for col in ("celltype", "type"):
+        if col in annotations.columns:
+            mask = mask | annotations[col].astype(str).str.contains(
+                pattern, case=False, na=False, regex=True
+            )
+    return mask
+
+
+def _bodies_to_indices(
+    body_ids: np.ndarray,
+    body_id_to_idx: Dict[int, int],
+) -> np.ndarray:
+    return np.array(
+        [body_id_to_idx[bid] for bid in body_ids if bid in body_id_to_idx],
+        dtype=np.int32,
+    )
 
 
 def _get_side_mask(annotations: pd.DataFrame, side: str) -> pd.Series:
@@ -308,27 +375,18 @@ def select_input_neurons_for_luminance(
     Returns:
         Array of neuron indices for R1-R6 on specified side
     """
-    # Find R1-R6 neurons
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
-    
-    # Search for R1-R6 in type or celltype columns
-    type_col = "celltype" if "celltype" in valid_annotations.columns else "type"
-    r_mask = valid_annotations[type_col].astype(str).str.contains(
-        r"^R[1-6]", case=False, na=False, regex=True
-    )
-    
-    # Filter by side
     side_mask = _get_side_mask(valid_annotations, side)
-    
-    # Combine masks
-    combined_mask = r_mask & side_mask
-    matching_body_ids = valid_annotations.loc[combined_mask, "bodyId"].values
-    
-    # Convert to indices
-    indices = np.array([body_id_to_idx[bid] for bid in matching_body_ids
-                       if bid in body_id_to_idx], dtype=np.int32)
-    
-    return indices
+    r_mask = _annotation_type_mask(valid_annotations, r"^(?:R[1-6]|R1-R6)(?:$|[^0-9A-Za-z])")
+    matching_body_ids = valid_annotations.loc[r_mask & side_mask, "bodyId"].values
+    indices = _bodies_to_indices(matching_body_ids, body_id_to_idx)
+    if indices.size > 0:
+        return indices
+
+    # Fallback: L1-L5 by somaSide/rootSide when R1-R6 are absent
+    l_mask = _annotation_type_mask(valid_annotations, r"^L[1-5](?:$|[^0-9A-Za-z])")
+    matching_body_ids = valid_annotations.loc[l_mask & side_mask, "bodyId"].values
+    return _bodies_to_indices(matching_body_ids, body_id_to_idx)
 
 
 def select_input_neurons_for_optic_flow(
@@ -336,41 +394,21 @@ def select_input_neurons_for_optic_flow(
     body_ids: np.ndarray,
     body_id_to_idx: Dict[int, int],
     subtype: str,
-    side: str
+    side: str,
+    cell_class: str = "T4",
 ) -> np.ndarray:
     """
-    Select T4/T5 neurons for optic flow input.
-    
-    Args:
-        annotations: Annotation DataFrame
-        body_ids: Body IDs in connectome
-        body_id_to_idx: Body ID to index mapping
-        subtype: "a", "b", "c", or "d"
-        side: "L" or "R"
-    
-    Returns:
-        Array of neuron indices for T4/T5 of specified subtype and side
+    Select T4 or T5 neurons for optic flow input.
+
+    T4 and T5 are selected separately with anchored regexes so T4a ≠ T5a.
     """
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
-    
-    # Search for T4/T5 + subtype
-    type_col = "celltype" if "celltype" in valid_annotations.columns else "type"
-    t_mask = valid_annotations[type_col].astype(str).str.contains(
-        f"T[45]{subtype}", case=False, na=False, regex=True
-    )
-    
-    # Filter by side
+    prefix = str(cell_class).upper()
+    pattern = rf"^{prefix}{subtype}(?:$|[^A-Za-z0-9])"
+    t_mask = _annotation_type_mask(valid_annotations, pattern)
     side_mask = _get_side_mask(valid_annotations, side)
-    
-    # Combine masks
-    combined_mask = t_mask & side_mask
-    matching_body_ids = valid_annotations.loc[combined_mask, "bodyId"].values
-    
-    # Convert to indices
-    indices = np.array([body_id_to_idx[bid] for bid in matching_body_ids
-                       if bid in body_id_to_idx], dtype=np.int32)
-    
-    return indices
+    matching_body_ids = valid_annotations.loc[t_mask & side_mask, "bodyId"].values
+    return _bodies_to_indices(matching_body_ids, body_id_to_idx)
 
 
 def select_input_neurons_for_looming(
@@ -392,25 +430,10 @@ def select_input_neurons_for_looming(
         Array of neuron indices for LPLC2 + LC4 on specified side
     """
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
-    
-    # Search for LPLC2 or LC4
-    type_col = "celltype" if "celltype" in valid_annotations.columns else "type"
-    loom_mask = valid_annotations[type_col].astype(str).str.contains(
-        r"(LPLC2|LC4)", case=False, na=False, regex=True
-    )
-    
-    # Filter by side
+    loom_mask = _annotation_type_mask(valid_annotations, r"^(?:LPLC2|LC4)$")
     side_mask = _get_side_mask(valid_annotations, side)
-    
-    # Combine masks
-    combined_mask = loom_mask & side_mask
-    matching_body_ids = valid_annotations.loc[combined_mask, "bodyId"].values
-    
-    # Convert to indices
-    indices = np.array([body_id_to_idx[bid] for bid in matching_body_ids
-                       if bid in body_id_to_idx], dtype=np.int32)
-    
-    return indices
+    matching_body_ids = valid_annotations.loc[loom_mask & side_mask, "bodyId"].values
+    return _bodies_to_indices(matching_body_ids, body_id_to_idx)
 
 
 def select_output_neurons_for_motor(
@@ -434,51 +457,35 @@ def select_output_neurons_for_motor(
     
     Returns:
         Dict with keys "DNp01", "DNg02", "DNa01", "DNa02", "DNb"
-        Each value is array of neuron indices
+        plus side splits "DNg02_L/R", "DNa01_L/R", "DNa02_L/R" when sides exist.
     """
     valid_annotations = annotations[annotations["bodyId"].isin(body_ids)].copy()
-    type_col = "celltype" if "celltype" in valid_annotations.columns else "type"
-    
-    result = {}
-    
-    # DNp01 - escape/sharp avoidance
-    dnp01_mask = valid_annotations[type_col].astype(str).str.contains(
-        r"DNp01", case=False, na=False, regex=True
-    )
-    dnp01_bodies = valid_annotations.loc[dnp01_mask, "bodyId"].values
-    result["DNp01"] = np.array([body_id_to_idx[bid] for bid in dnp01_bodies
-                                if bid in body_id_to_idx], dtype=np.int32)
-    
-    # DNg02 - thrust/altitude (all variants a-g)
-    dng02_mask = valid_annotations[type_col].astype(str).str.contains(
-        r"DNg02", case=False, na=False, regex=True
-    )
-    dng02_bodies = valid_annotations.loc[dng02_mask, "bodyId"].values
-    result["DNg02"] = np.array([body_id_to_idx[bid] for bid in dng02_bodies
-                                if bid in body_id_to_idx], dtype=np.int32)
-    
-    # DNa01 - yaw component
-    dna01_mask = valid_annotations[type_col].astype(str).str.contains(
-        r"DNa01", case=False, na=False, regex=True
-    )
-    dna01_bodies = valid_annotations.loc[dna01_mask, "bodyId"].values
-    result["DNa01"] = np.array([body_id_to_idx[bid] for bid in dna01_bodies
-                                if bid in body_id_to_idx], dtype=np.int32)
-    
-    # DNa02 - yaw component
-    dna02_mask = valid_annotations[type_col].astype(str).str.contains(
-        r"DNa02", case=False, na=False, regex=True
-    )
-    dna02_bodies = valid_annotations.loc[dna02_mask, "bodyId"].values
-    result["DNa02"] = np.array([body_id_to_idx[bid] for bid in dna02_bodies
-                                if bid in body_id_to_idx], dtype=np.int32)
-    
-    # DNb - additional motor pathways (DNb01-06)
-    dnb_mask = valid_annotations[type_col].astype(str).str.contains(
-        r"DNb\d", case=False, na=False, regex=True
-    )
-    dnb_bodies = valid_annotations.loc[dnb_mask, "bodyId"].values
-    result["DNb"] = np.array([body_id_to_idx[bid] for bid in dnb_bodies
-                              if bid in body_id_to_idx], dtype=np.int32)
-    
+
+    def _select(pattern: str) -> np.ndarray:
+        mask = _annotation_type_mask(valid_annotations, pattern)
+        return _bodies_to_indices(
+            valid_annotations.loc[mask, "bodyId"].values, body_id_to_idx
+        )
+
+    def _select_side(pattern: str, side: str) -> np.ndarray:
+        mask = _annotation_type_mask(valid_annotations, pattern) & _get_side_mask(
+            valid_annotations, side
+        )
+        return _bodies_to_indices(
+            valid_annotations.loc[mask, "bodyId"].values, body_id_to_idx
+        )
+
+    result = {
+        "DNp01": _select(r"^DNp01(?:$|[^A-Za-z0-9])"),
+        "DNg02": _select(r"^DNg02"),
+        "DNa01": _select(r"^DNa01(?:$|[^A-Za-z0-9])"),
+        "DNa02": _select(r"^DNa02(?:$|[^A-Za-z0-9])"),
+        "DNb": _select(r"^DNb\d"),
+        "DNg02_L": _select_side(r"^DNg02", "L"),
+        "DNg02_R": _select_side(r"^DNg02", "R"),
+        "DNa01_L": _select_side(r"^DNa01(?:$|[^A-Za-z0-9])", "L"),
+        "DNa01_R": _select_side(r"^DNa01(?:$|[^A-Za-z0-9])", "R"),
+        "DNa02_L": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "L"),
+        "DNa02_R": _select_side(r"^DNa02(?:$|[^A-Za-z0-9])", "R"),
+    }
     return result

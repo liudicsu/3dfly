@@ -287,17 +287,42 @@ def test_select_input_neurons_for_optic_flow():
     
     # Select T4a left
     indices = select_input_neurons_for_optic_flow(
-        annotations, body_ids, body_id_to_idx, subtype="a", side="L"
+        annotations, body_ids, body_id_to_idx, subtype="a", side="L", cell_class="T4"
     )
     assert len(indices) >= 1
     assert 0 in indices  # T4a, somaSide=L
+    assert 4 not in indices  # T5a must not match T4a
     
     # Select T5b right
     indices = select_input_neurons_for_optic_flow(
-        annotations, body_ids, body_id_to_idx, subtype="b", side="R"
+        annotations, body_ids, body_id_to_idx, subtype="b", side="R", cell_class="T5"
     )
     assert len(indices) >= 1
     assert 5 in indices  # T5b, somaSide=R
+
+
+def test_t4_and_t5_populations_are_distinct():
+    """T4a and T5a must not collapse into the same population."""
+    from threedfly.connectome.neuron_selection import select_input_neurons_for_optic_flow
+
+    annotations = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4],
+        "type": ["T4a", "T5a", "T4a", "T5a"],
+        "celltype": ["T4a", "T5a", "T4a", "T5a"],
+        "somaSide": ["L", "L", "R", "R"],
+    })
+    body_ids = np.array([1, 2, 3, 4])
+    body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
+
+    t4_left = select_input_neurons_for_optic_flow(
+        annotations, body_ids, body_id_to_idx, subtype="a", side="L", cell_class="T4"
+    )
+    t5_left = select_input_neurons_for_optic_flow(
+        annotations, body_ids, body_id_to_idx, subtype="a", side="L", cell_class="T5"
+    )
+    assert set(t4_left) == {0}
+    assert set(t5_left) == {1}
+    assert set(t4_left).isdisjoint(set(t5_left))
 
 
 def test_select_input_neurons_for_looming():
@@ -327,6 +352,38 @@ def test_select_input_neurons_for_looming():
     )
     assert len(right_indices) == 2  # LPLC2 + LC4 on right
     assert set(right_indices) == {1, 3}
+
+
+def test_looming_does_not_overmatch_similar_types():
+    """LPLC4 / LC40 / LC43 must not be selected as LPLC2+LC4."""
+    from threedfly.connectome.neuron_selection import select_input_neurons_for_looming
+
+    annotations = pd.DataFrame({
+        "bodyId": [1, 2, 3, 4, 5, 6, 7, 8],
+        "type": ["LPLC2", "LC4", "LPLC4", "LC40", "LC43", "LC41", "LC46b", "LC44"],
+        "celltype": ["LPLC2", "LC4", "LPLC4", "LC40", "LC43", "LC41", "LC46b", "LC44"],
+        "somaSide": ["L"] * 8,
+    })
+    body_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8])
+    body_id_to_idx = {bid: idx for idx, bid in enumerate(body_ids)}
+
+    left = select_input_neurons_for_looming(
+        annotations, body_ids, body_id_to_idx, side="L"
+    )
+    assert set(left) == {0, 1}
+
+
+def test_transmitter_to_sign_mapping():
+    """ACh +1; GABA/glutamate/histamine -1; others +1 (configurable)."""
+    from threedfly.connectome.neuron_selection import transmitter_to_sign
+
+    assert transmitter_to_sign("acetylcholine") == 1.0
+    assert transmitter_to_sign("GABA") == -1.0
+    assert transmitter_to_sign("glutamate") == -1.0
+    assert transmitter_to_sign("histamine") == -1.0
+    assert transmitter_to_sign("dopamine") == 1.0
+    assert transmitter_to_sign("unclear") == 1.0
+    assert transmitter_to_sign("glutamate", inhibitory_transmitters=("gaba",)) == 1.0
 
 
 def test_select_output_neurons_for_motor():

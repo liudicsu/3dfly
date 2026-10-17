@@ -2,7 +2,35 @@
 
 import numpy as np
 from scipy import sparse
-from typing import Optional, Dict
+from typing import Optional, Dict, Union
+
+
+def apply_ei_signs(
+    adjacency: sparse.csr_matrix,
+    transmitter_signs: Union[Dict[int, float], np.ndarray],
+) -> sparse.csr_matrix:
+    """
+    Apply excitatory/inhibitory signs to a CSR adjacency (pre × post).
+
+    Multiplies each presynaptic row by that neuron's sign using
+    ``sparse.diags(signs) @ adj`` (no per-row LIL loop).
+    """
+    n = adjacency.shape[0]
+    if isinstance(transmitter_signs, dict):
+        signs = np.ones(n, dtype=np.float32)
+        for idx, sign in transmitter_signs.items():
+            signs[int(idx)] = sign
+    else:
+        signs = np.asarray(transmitter_signs, dtype=np.float32)
+        if signs.shape[0] != n:
+            raise ValueError(
+                f"transmitter_signs length {signs.shape[0]} != n_neurons {n}"
+            )
+    return sparse.diags(signs, format="csr", dtype=adjacency.dtype) @ adjacency.tocsr()
+
+
+# Bind before class methods whose parameter is also named apply_ei_signs.
+_apply_ei_signs_impl = apply_ei_signs
 
 
 class BrainSimulator:
@@ -42,7 +70,7 @@ class BrainSimulator:
         """
         # Apply E/I signs if requested
         if apply_ei_signs and transmitter_signs is not None:
-            adjacency = self._apply_ei_signs(adjacency, transmitter_signs)
+            adjacency = _apply_ei_signs_impl(adjacency, transmitter_signs)
         
         self.adj = adjacency
         self.n_neurons = adjacency.shape[0]
@@ -71,33 +99,6 @@ class BrainSimulator:
             max_weight = np.abs(self.adj.data).max()
             if max_weight > 0:
                 self.adj = self.adj / max_weight * syn_weight_scale
-    
-    def _apply_ei_signs(
-        self,
-        adjacency: sparse.csr_matrix,
-        transmitter_signs: Dict[int, float]
-    ) -> sparse.csr_matrix:
-        """
-        Apply excitatory/inhibitory signs to adjacency matrix.
-        
-        Multiplies each row by the presynaptic neuron's transmitter sign.
-        
-        Args:
-            adjacency: Original adjacency (pre x post)
-            transmitter_signs: Dict mapping neuron_idx → sign (±1)
-        
-        Returns:
-            Modified adjacency with E/I signs applied
-        """
-        adj_modified = adjacency.copy().tolil()
-        
-        for pre_idx in range(adjacency.shape[0]):
-            sign = transmitter_signs.get(pre_idx, 1.0)
-            if sign != 1.0:
-                # Multiply row by sign
-                adj_modified[pre_idx, :] *= sign
-        
-        return adj_modified.tocsr()
     
     def set_input(self, input_vector: np.ndarray, neuron_indices: Optional[np.ndarray] = None):
         """
@@ -227,7 +228,7 @@ class RateSimulator:
         """
         # Apply E/I signs to adjacency if requested
         if apply_ei_signs and transmitter_signs is not None:
-            adjacency = self._apply_ei_signs(adjacency, transmitter_signs)
+            adjacency = _apply_ei_signs_impl(adjacency, transmitter_signs)
         
         self.adj = adjacency * syn_weight_scale
         self.n_neurons = adjacency.shape[0]
@@ -241,33 +242,6 @@ class RateSimulator:
         # State
         self.rates = np.zeros(self.n_neurons)  # Firing rates
         self.external_input = np.zeros(self.n_neurons)
-    
-    def _apply_ei_signs(
-        self,
-        adjacency: sparse.csr_matrix,
-        transmitter_signs: Dict[int, float]
-    ) -> sparse.csr_matrix:
-        """
-        Apply excitatory/inhibitory signs to adjacency matrix.
-        
-        Multiplies each row by the presynaptic neuron's transmitter sign.
-        
-        Args:
-            adjacency: Original adjacency (pre x post)
-            transmitter_signs: Dict mapping neuron_idx → sign (±1)
-        
-        Returns:
-            Modified adjacency with E/I signs applied
-        """
-        adj_modified = adjacency.copy().tolil()
-        
-        for pre_idx in range(adjacency.shape[0]):
-            sign = transmitter_signs.get(pre_idx, 1.0)
-            if sign != 1.0:
-                # Multiply row by sign
-                adj_modified[pre_idx, :] *= sign
-        
-        return adj_modified.tocsr()
     
     def _activation_fn(self, x: np.ndarray) -> np.ndarray:
         """Apply activation function."""

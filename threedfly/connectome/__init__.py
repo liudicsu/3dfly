@@ -11,6 +11,8 @@ from threedfly.connectome.neuron_selection import (
     get_neuron_selection_summary,
     load_neurotransmitter_data,
     get_neuron_transmitters,
+    transmitter_to_sign,
+    build_transmitter_sign_vector,
 )
 
 __all__ = [
@@ -25,4 +27,6 @@ __all__ = [
     "get_neuron_selection_summary",
     "load_neurotransmitter_data",
     "get_neuron_transmitters",
+    "transmitter_to_sign",
+    "build_transmitter_sign_vector",
 ]

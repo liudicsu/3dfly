@@ -237,6 +237,35 @@ def test_rate_simulator_ei_signs():
     assert sim_with_ei.adj[0, 2] > 0
 
 
+def test_inhibitory_presynaptic_row_is_negative():
+    """Presynaptic GABA/glutamate/histamine rows must flip sign."""
+    adjacency = sparse.csr_matrix([
+        [0, 0, 0],
+        [0, 0, 2.0],  # neuron 1 → 2
+        [0, 0, 0],
+    ], dtype=float)
+    transmitter_signs = {0: 1.0, 1: -1.0, 2: 1.0}
+    sim = RateSimulator(adjacency, apply_ei_signs=True, transmitter_signs=transmitter_signs)
+    assert sim.adj[1, 2] < 0
+
+
+def test_apply_ei_signs_is_vectorized_and_fast():
+    """sparse.diags @ adj must finish quickly on a large sparse graph."""
+    import time
+    from threedfly.connectome.simulator import apply_ei_signs
+
+    n = 20000
+    adj = sparse.random(n, n, density=0.0005, format="csr", dtype=np.float32)
+    signs = np.ones(n, dtype=np.float32)
+    signs[::3] = -1.0
+    t0 = time.perf_counter()
+    signed = apply_ei_signs(adj, signs)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0, f"apply_ei_signs took {elapsed:.2f}s, expected < 1s"
+    assert signed.shape == adj.shape
+    assert signed.nnz == adj.nnz
+
+
 def test_lif_simulator_ei_signs():
     """Test E/I sign application in LIF simulator."""
     adjacency = sparse.csr_matrix([

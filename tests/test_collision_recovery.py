@@ -42,6 +42,25 @@ def test_collision_recovery_dampens_velocity():
     env.close()
 
 
+def test_collision_recovery_does_not_teleport_randomly():
+    """Recovery is a small deterministic nudge, not a random teleport."""
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.data.qpos[:3] = np.array([0.4, -0.3, 1.4])
+    env.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    start = env.data.qpos[:3].copy()
+
+    env.recover_from_collision()
+    first = env.data.qpos[:3].copy()
+    env.data.qpos[:3] = start
+    env.recover_from_collision()
+    second = env.data.qpos[:3].copy()
+
+    assert np.allclose(first, second), "Recovery must be deterministic"
+    assert np.linalg.norm(first - start) <= 0.35, "Recovery must not teleport far"
+    env.close()
+
+
 def test_collision_recovery_keeps_orientation():
     """Test that minimal collision recovery keeps orientation (no randomization)."""
     env = FlyEnvironment(render_mode=None)
