@@ -54,6 +54,17 @@ def test_right_eye_looks_forward_not_backward():
     assert xml_R == pytest.approx(mjcf.eye_xyaxes("R"), abs=0.002)
 
 
+def test_walls_use_high_contrast_checker():
+    from threedfly.sim import mjcf as mjcf_mod
+
+    xml = mjcf_mod.FLY_MJCF
+    assert "wall_check" in xml
+    assert 'builtin="checker"' in xml
+    assert 'texrepeat="48 20"' in xml
+    # Flat beige rgba must not wash out the texture on the room walls.
+    assert "rgba=\"0.8 0.8 0.9 1\"" not in xml
+
+
 def test_hex_fovy_matches_camera():
     from threedfly.brain.eyes import EYE_FOVY_DEG
     from threedfly.sim import mjcf as mjcf_mod

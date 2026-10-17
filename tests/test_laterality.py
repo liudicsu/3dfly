@@ -50,16 +50,17 @@ def test_side_walls_brighten_ipsilateral_eye():
     _spec.loader.exec_module(_mod)
 
     env = FlyEnvironment(render_mode="rgb_array", camera_width=80, camera_height=60)
-    means = {}
+    contrast = {}
     for side in ("L", "R"):
         pose = _mod.lateral_loom_pose(side)
         env.reset(seed=0)
         env.set_pose(pose["pose"], yaw=pose["yaw"])
         hL, hR = stereo_to_hex(*env.get_eye_images())
-        means[side] = (float(hL.mean()), float(hR.mean()))
+        contrast[side] = (float(np.std(hL)), float(np.std(hR)))
     env.close()
-    assert means["L"][0] > means["L"][1] + 0.03, f"left wall should brighten left eye: {means}"
-    assert means["R"][1] > means["R"][0] + 0.03, f"right wall should brighten right eye: {means}"
+    # Textured wall is on the ipsilateral eye → higher hex contrast, not mean.
+    assert contrast["L"][0] > contrast["L"][1] + 0.02, f"left wall should texture left eye: {contrast}"
+    assert contrast["R"][1] > contrast["R"][0] + 0.02, f"right wall should texture right eye: {contrast}"
 
 
 @needs_stack

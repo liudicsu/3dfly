@@ -60,6 +60,7 @@ class DNFlightController:
         self._baseline_step: Optional[int] = None
         self._rise_hold = 0
         self._approach_threat = ""
+        self.last_yaw_terms: Dict[str, float] = {}
 
     def bind_hover(self, hover_action: float) -> None:
         self.params.hover_up = float(hover_action)
@@ -85,6 +86,7 @@ class DNFlightController:
         self._baseline_step = None
         self._rise_hold = 0
         self._approach_threat = ""
+        self.last_yaw_terms = {}
 
     def capture_baseline(self, readout: DNReadout, dnp01_rest: Optional[float] = None) -> None:
         """Snapshot per-side DN rest after brain/flyvis pre-warm."""
@@ -97,11 +99,11 @@ class DNFlightController:
         self._baseline_step = int(self.steps)
         self._rise_hold = 0
         self._escape_armed = True
-        eye = float(readout.eye_L) - float(readout.eye_R)
-        if abs(eye) >= float(self.params.eye_threat_min):
-            self._approach_threat = "L" if eye > 0.0 else "R"
-        else:
-            self._approach_threat = ""
+        self._approach_threat = ""
+        if self.params.use_engineered_eye_laterality:
+            eye = float(readout.eye_L) - float(readout.eye_R)
+            if abs(eye) >= float(self.params.eye_threat_min):
+                self._approach_threat = "L" if eye > 0.0 else "R"
 
     def _centered(self, ro: DNReadout) -> DNReadout:
         b = self._base
@@ -123,6 +125,10 @@ class DNFlightController:
             dng02_amp=float(ro.dng02_amp),
             lplc2_L=float(ro.lplc2_L) - float(b.lplc2_L),
             lplc2_R=float(ro.lplc2_R) - float(b.lplc2_R),
+            lplc1_L=float(ro.lplc1_L) - float(b.lplc1_L),
+            lplc1_R=float(ro.lplc1_R) - float(b.lplc1_R),
+            lc4_L=float(ro.lc4_L) - float(b.lc4_L),
+            lc4_R=float(ro.lc4_R) - float(b.lc4_R),
             eye_L=float(ro.eye_L) - float(b.eye_L),
             eye_R=float(ro.eye_R) - float(b.eye_R),
         )
@@ -134,42 +140,88 @@ class DNFlightController:
     def _norm_lr(self, left: float, right: float, scale: float, gain: float) -> float:
         return gain * _tanh((float(left) - float(right)) / max(float(scale), 1e-6))
 
-    def _steer_yaw(self, ro: DNReadout) -> float:
+    def _steer_terms(self, ro: DNReadout) -> Dict[str, float]:
+        """Per-source yaw before the escape burst. Official path has eye=0."""
         p = self.params
-        yaw = self._norm_lr(ro.dna02_L, ro.dna02_R, p.dna02_scale_hz, p.dna02_yaw_gain)
-        yaw += self._norm_lr(ro.dnp15_L, ro.dnp15_R, p.dnp15_scale_hz, p.dnp15_yaw_gain)
-        yaw -= self._norm_lr(ro.hse_L, ro.hse_R, p.hse_scale_hz, p.hse_yaw_damp)
-        yaw += self._dnp03_yaw(ro)
-        yaw += self._eye_yaw(ro)
+        dna02 = self._norm_lr(ro.dna02_L, ro.dna02_R, p.dna02_scale_hz, p.dna02_yaw_gain)
+        dnp15 = self._norm_lr(ro.dnp15_L, ro.dnp15_R, p.dnp15_scale_hz, p.dnp15_yaw_gain)
+        hse = -self._norm_lr(ro.hse_L, ro.hse_R, p.hse_scale_hz, p.hse_yaw_damp)
+        d03, vpn = self._loom_yaw_parts(ro)
+        eye = 0.0
+        if p.use_engineered_eye_laterality:
+            eye = self._eye_yaw()
+        return {
+            "dna02": float(dna02),
+            "dnp15": float(dnp15),
+            "hse": float(hse),
+            "dnp03": float(d03),
+            "vpn_loom": float(vpn),
+            "eye": float(eye),
+            "escape_kick": 0.0,
+        }
+
+    def _steer_yaw(self, ro: DNReadout) -> float:
+        t = self._steer_terms(ro)
+        yaw = t["dna02"] + t["dnp15"] + t["hse"] + t["dnp03"] + t["vpn_loom"] + t["eye"]
+        t["steer"] = float(yaw)
+        self.last_yaw_terms = t
         return float(yaw)
 
     def _raw_eye_lr(self) -> float:
         raw = self._last_readout
         return float(raw.eye_L) - float(raw.eye_R)
 
-    def _eye_yaw(self, ro: DNReadout) -> float:
-        """Brighter ipsilateral eye (raw, not baseline) → contralateral turn."""
+    def _eye_yaw(self) -> float:
+        """Opt-in pixel reflex. Off unless use_engineered_eye_laterality."""
         p = self.params
         return float(-p.eye_yaw_gain * _tanh(self._raw_eye_lr() / max(p.eye_scale, 1e-6)))
 
-    def _dnp03_yaw(self, ro: DNReadout) -> float:
+    def _loom_lr(self, ro: DNReadout) -> tuple[float, float]:
+        """(DNp03 L−R, VPN laterality). Positive = left-side loom.
+
+        DNp03 is ipsilateral (M1 hex-swap). On textured walls LC4/LPLC2
+        L−R is *contralateral* (left wall raises LC4_R), so VPN enters
+        as (R−L). Both terms are RateCore rates, not pixels.
+        """
         p = self.params
         left = max(0.0, float(ro.dnp03_L) - p.dnp03_deadzone_hz)
         right = max(0.0, float(ro.dnp03_R) - p.dnp03_deadzone_hz)
-        return float(p.dnp03_yaw_gain * _tanh((right - left) / max(p.dnp03_scale_hz, 1e-6)))
+        d03 = left - right
+        # VPN side is an absolute RateCore laterality. Subtracting the
+        # prewarm snapshot zeroes the wall-driven LC4 L−R (the signal).
+        raw = self._last_readout
+        vpn = (
+            float(p.lplc2_threat_gain) * (float(raw.lplc2_R) - float(raw.lplc2_L))
+            + float(p.lplc1_threat_gain) * (float(raw.lplc1_R) - float(raw.lplc1_L))
+            + float(p.lc4_threat_gain) * (float(raw.lc4_R) - float(raw.lc4_L))
+        )
+        return float(d03), float(vpn)
+
+    def _loom_yaw_parts(self, ro: DNReadout) -> tuple[float, float]:
+        p = self.params
+        d03, vpn = self._loom_lr(ro)
+        scale = max(p.dnp03_scale_hz, 1e-6)
+        # Ipsi loom → contralateral turn: +L → −yaw.
+        return (
+            float(p.dnp03_yaw_gain * _tanh((-d03) / scale)),
+            float(p.dnp03_yaw_gain * _tanh((-vpn) / scale)),
+        )
+
+    def _dnp03_yaw(self, ro: DNReadout) -> float:
+        d03, vpn = self._loom_yaw_parts(ro)
+        return float(d03 + vpn)
 
     def _loom_laterality(self, ro: DNReadout) -> float:
-        """Positive → left-side loom. DNp03 plus optic-lobe LPLC2."""
-        d03 = float(ro.dnp03_L) - float(ro.dnp03_R)
-        lplc = float(ro.lplc2_L) - float(ro.lplc2_R)
-        return d03 + float(self.params.lplc2_threat_gain) * lplc
+        d03, vpn = self._loom_lr(ro)
+        return d03 + vpn
 
     def _threat_side(self, ro: DNReadout) -> str:
-        if self._approach_threat:
-            return self._approach_threat
-        eye = self._raw_eye_lr()
-        if abs(eye) >= float(self.params.eye_threat_min):
-            return "L" if eye > 0.0 else "R"
+        if self.params.use_engineered_eye_laterality:
+            if self._approach_threat:
+                return self._approach_threat
+            eye = self._raw_eye_lr()
+            if abs(eye) >= float(self.params.eye_threat_min):
+                return "L" if eye > 0.0 else "R"
         d = self._loom_laterality(ro)
         if d > 1e-6:
             return "L"
@@ -289,12 +341,17 @@ class DNFlightController:
             thrust_forward = float(np.clip(thrust_forward + p.escape_forward, -1.0, 1.0))
             thrust_up = float(np.clip(thrust_up + p.escape_up, -1.0, 1.0))
             dodge = self._dnp03_yaw(ro)
+            kick = 0.0
             if self._last_threat == "L":
-                yaw = -float(p.escape_yaw_kick) + 0.25 * dodge
+                kick = -float(p.escape_yaw_kick)
+                yaw = kick + 0.25 * dodge
             elif self._last_threat == "R":
-                yaw = float(p.escape_yaw_kick) + 0.25 * dodge
+                kick = float(p.escape_yaw_kick)
+                yaw = kick + 0.25 * dodge
             else:
                 yaw = yaw + p.escape_yaw_boost * dodge
+            self.last_yaw_terms["escape_kick"] = float(kick)
+            self.last_yaw_terms["steer"] = float(yaw)
             if self.escape_events:
                 self.escape_events[-1].yaw = float(yaw)
             self.escape_timer -= 1
@@ -340,8 +397,10 @@ class DNFlightController:
             "dnp01_rise": float(self.last_rise),
             "dnp03_L": float(ro.dnp03_L),
             "dnp03_R": float(ro.dnp03_R),
-            "eye_L": float(ro.eye_L),
-            "eye_R": float(ro.eye_R),
+            "lplc2_L": float(ro.lplc2_L),
+            "lplc2_R": float(ro.lplc2_R),
+            "lc4_L": float(ro.lc4_L),
+            "lc4_R": float(ro.lc4_R),
             "dng02_amp": float(ro.dng02_amp),
             "dnp01_latch_frac": self.dnp01_latch_frac,
             "wing_stroke_left": float(self.last_wing_strokes[0]),

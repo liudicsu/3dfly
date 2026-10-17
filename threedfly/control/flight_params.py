@@ -59,22 +59,26 @@ class FlightParams:
     escape_forward: float = 0.30
     escape_up: float = 0.20
     escape_yaw_boost: float = 0.35
-    # Discrete contralateral kick from the DN threat side (DNp03+LPLC2).
-    # Continuous DNp03 alone is ~0.05 yaw when L/R are close; not enough to
-    # change heading before wall contact.
+    # Motor magnitude of a DNp01 burst. Sign comes from brain laterality
+    # (DNp03 / LPLC / LC4 L−R), never from pixel brightness.
     escape_yaw_kick: float = 0.55
     # Map DN yaw onto the existing L−R stroke actuator (not DNg02 L−R).
     # +yaw = left turn = more left stroke. Residual action[4] torque stays.
     yaw_stroke_gain: float = 0.45
 
-    # --- Looming dodge (DNp03 + optic-lobe LPLC2) ---
+    # --- Looming dodge (DNp03 + optic-lobe VPNs) ---
     dnp03_yaw_gain: float = 0.90
     dnp03_scale_hz: float = 0.50
     dnp03_deadzone_hz: float = 0.04
-    # LPLC2 fallback when the two eyes are balanced (compact dark loom).
-    lplc2_threat_gain: float = 0.20
-    # Room walls brighten the ipsilateral eye. After baseline, that Δ is the
-    # loom laterality DNp03 failed to carry for filled bright fields.
+    # LPLC2 / LPLC1 / LC4 RateCore L−R (raw: centering at a wall zeroes
+    # the wall-driven LC4 DC). Brain laterality, not a pixel reflex.
+    lplc2_threat_gain: float = 0.45
+    lplc1_threat_gain: float = 0.20
+    # LC4 L−R on textured walls is contralateral and larger than DNp03 DC.
+    lc4_threat_gain: float = 1.20
+    # Opt-in Python eye-mean reflex (OFF). Same class of shortcut as
+    # use_engineered_looming_residual — not the official path.
+    use_engineered_eye_laterality: bool = False
     eye_yaw_gain: float = 0.85
     eye_scale: float = 0.06
     eye_threat_min: float = 0.015
@@ -123,14 +127,14 @@ class FlightParams:
             "16-step prewarm so closing is a rise (80-step settle eats it); residual off"
         ),
         "dnp03": (
-            "compact dark loom → DNp03/LPLC2; room walls use ipsilateral "
-            "eye-mean rise (bright field) for threat + contralateral yaw; "
-            "30° outward / 120° FOV so the side wall is on-eye"
+            "DNp03 ipsilateral + LC4/LPLC contralateral L−R (textured-wall "
+            "RateCore sign) → contralateral turn; high-contrast wall checkers; "
+            "30° outward / 120° FOV"
         ),
         "dng02": "mean(L,R) amplitude; NO L−R yaw",
         "yaw_actuator": (
-            "DN yaw (DNa02+DNp15+DNp03−HSE) drives residual torque AND L−R "
-            "stroke (existing physics); DNg02 stays bilateral"
+            "DN yaw (DNa02+DNp15+DNp03+LC4/LPLC−HSE) drives residual torque "
+            "AND L−R stroke; DNg02 stays bilateral"
         ),
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",

@@ -252,8 +252,33 @@ def test_post_baseline_delay_skips_takeoff_transient():
     assert c.brain_escape_count == 1
 
 
-def test_baseline_eye_laterality_locks_approach_threat():
+def test_default_path_ignores_eye_brightness_for_threat_and_yaw():
+    """Official path: brighter right eye must not override DNp03_L threat."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp03_L=0.20, dnp03_R=0.20, eye_L=0.10, eye_R=0.10, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    assert c._approach_threat == ""
+    left_loom = DNReadout(
+        dnp01_L=3.2,
+        dnp03_L=1.30,
+        dnp03_R=0.20,
+        eye_L=0.08,
+        eye_R=0.30,
+        dng02_amp=5.0,
+    )
+    act = c.compute(left_loom)
+    assert c.escape_events[-1].threat_side == "L"
+    assert act[4] < -0.05
+    assert c.last_yaw_terms.get("eye", 0.0) == pytest.approx(0.0)
+
+
+def test_baseline_eye_laterality_locks_approach_threat():
+    c = _ctl(
+        dnp01_warmup_steps=0,
+        dnp01_post_baseline_steps=0,
+        dnp01_escape_hold_steps=1,
+        use_engineered_eye_laterality=True,
+    )
     rest = DNReadout(eye_L=0.22, eye_R=0.10, dnp03_L=0.2, dnp03_R=0.8, dng02_amp=5.0)
     c.capture_baseline(rest)
     assert c._approach_threat == "L"
@@ -271,8 +296,13 @@ def test_baseline_eye_laterality_locks_approach_threat():
 
 
 def test_brighter_ipsilateral_eye_overrides_dnp03_for_threat():
-    """Room walls are bright fields; DNp03 may stay L-biased, the eye mean must not."""
-    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    """Opt-in pixel reflex only when use_engineered_eye_laterality is on."""
+    c = _ctl(
+        dnp01_warmup_steps=0,
+        dnp01_post_baseline_steps=0,
+        dnp01_escape_hold_steps=1,
+        use_engineered_eye_laterality=True,
+    )
     rest = DNReadout(dnp03_L=0.50, dnp03_R=0.30, eye_L=0.15, eye_R=0.15, dng02_amp=5.0)
     c.capture_baseline(rest)
     c.compute(rest)
@@ -290,18 +320,18 @@ def test_brighter_ipsilateral_eye_overrides_dnp03_for_threat():
     assert act[4] > 0.05
 
 
-def test_lplc2_can_override_dnp03_dc_for_threat_side():
-    """Right-wall loom: DNp03 may stay L-biased; LPLC2_R must still label R."""
+def test_lc4_contralateral_laterality_sets_threat_against_dnp03_dc():
+    """Textured walls: LC4_L rises on a right wall (contra); that is threat R."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
-    rest = DNReadout(dnp03_L=0.40, dnp03_R=0.30, lplc2_L=1.0, lplc2_R=1.0, dng02_amp=5.0)
+    rest = DNReadout(dnp03_L=0.40, dnp03_R=0.30, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
     c.capture_baseline(rest)
     c.compute(rest)
     right_wall = DNReadout(
         dnp01_L=3.2,
         dnp03_L=0.55,
         dnp03_R=0.40,
-        lplc2_L=1.1,
-        lplc2_R=2.4,
+        lc4_L=2.6,
+        lc4_R=1.1,
         dng02_amp=5.0,
     )
     act = c.compute(right_wall)

@@ -114,6 +114,7 @@ def _run_scenario(
     ms_flyvis = []
     ms_total = []
     wall = 0
+    yaw_terms = []
     t_wall = time.perf_counter()
     left_img, right_img = env.get_eye_images()
     n_pre = int(ctl.params.prewarm_steps)
@@ -135,6 +136,11 @@ def _run_scenario(
         ms_brain.append(res.ms.get("brain", 0.0))
         ms_flyvis.append(res.ms.get("flyvis", 0.0))
         ms_total.append(res.ms.get("total", 0.0))
+        terms = dict(ctl.last_yaw_terms)
+        terms["x"] = float(pos[0])
+        terms["y"] = float(pos[1])
+        terms["near_wall"] = 1.0 if max(abs(pos[0]), abs(pos[1])) > 3.2 else 0.0
+        yaw_terms.append(terms)
         if env.check_collision():
             wall += 1
             env.recover_from_collision()
@@ -154,6 +160,7 @@ def _run_scenario(
         else float("nan")
     )
     dx, dy = xy_extent(traj)
+    yaw_summary = _yaw_term_summary(yaw_terms)
     return {
         "name": name,
         "steps": int(n_steps),
@@ -175,6 +182,7 @@ def _run_scenario(
         "headings": headings_arr,
         "dnp01": np.asarray(dnp01, dtype=float),
         "dnp01_rise": np.asarray(rises, dtype=float),
+        "yaw_terms": yaw_summary,
         "escape_events": [
             {
                 "step": e.step,
@@ -185,6 +193,32 @@ def _run_scenario(
             }
             for e in ctl.escape_events
         ],
+    }
+
+
+def _yaw_term_summary(rows: list) -> dict:
+    """Mean |yaw| per source, all steps and near-wall subset."""
+    keys = ("dna02", "dnp15", "hse", "dnp03", "vpn_loom", "eye", "escape_kick")
+    if not rows:
+        return {"all": {k: 0.0 for k in keys}, "near_wall": {k: 0.0 for k in keys}, "brain_share_near_wall": 0.0}
+
+    def _mean_abs(subset, key):
+        vals = [abs(float(r.get(key, 0.0))) for r in subset]
+        return float(np.mean(vals)) if vals else 0.0
+
+    near = [r for r in rows if r.get("near_wall", 0.0) >= 1.0]
+    all_m = {k: _mean_abs(rows, k) for k in keys}
+    near_m = {k: _mean_abs(near, k) for k in keys} if near else {k: 0.0 for k in keys}
+    brain = ("dna02", "dnp15", "hse", "dnp03", "vpn_loom")
+    bsum = sum(near_m[k] for k in brain)
+    engineered = near_m["eye"]
+    total = bsum + engineered + near_m["escape_kick"]
+    return {
+        "all": all_m,
+        "near_wall": near_m,
+        "near_wall_steps": int(len(near)),
+        "brain_share_near_wall": float(bsum / total) if total > 1e-9 else 1.0,
+        "eye_share_near_wall": float(engineered / total) if total > 1e-9 else 0.0,
     }
 
 
@@ -251,6 +285,11 @@ def main(argv=None) -> int:
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--quick", action="store_true", help="Short unofficial run")
     p.add_argument("--engineered-looming-residual", action="store_true")
+    p.add_argument(
+        "--engineered-eye-laterality",
+        action="store_true",
+        help="Opt-in pixel eye-mean threat/yaw (not the official brain-only path)",
+    )
     args = p.parse_args(argv)
 
     from threedfly.brain.core_bundle import core_bundle_available
@@ -274,7 +313,10 @@ def main(argv=None) -> int:
     if args.quick:
         print("--quick: unofficial short movies", flush=True)
 
-    params = FlightParams(use_engineered_looming_residual=args.engineered_looming_residual)
+    params = FlightParams(
+        use_engineered_looming_residual=args.engineered_looming_residual,
+        use_engineered_eye_laterality=args.engineered_eye_laterality,
+    )
     print("Building closed-loop brain…", flush=True)
     brain = ClosedLoopBrain.build(params=params, quick=args.quick)
     env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
@@ -362,6 +404,9 @@ def main(argv=None) -> int:
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
             "beats_pr16_walls": beats_pr16_walls(room["wall_contacts"], room["steps"]),
             "no_latch": room["dnp01_latch_frac"] < 0.05,
+            "use_engineered_eye_laterality": bool(params.use_engineered_eye_laterality),
+            "use_engineered_looming_residual": bool(params.use_engineered_looming_residual),
+            "room_yaw_terms": room.get("yaw_terms"),
         },
     }
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))

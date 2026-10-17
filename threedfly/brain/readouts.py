@@ -29,8 +29,11 @@ class DNReadout:
     dng02_amp: float = 0.0  # mean(L, R) wing-amplitude proxy; NO L−R yaw term
     lplc2_L: float = 0.0
     lplc2_R: float = 0.0
-    # Per-eye hex mean. Room walls are bright filled fields; DNp03 tracks
-    # compact dark looms (hex-swap) but not these, so laterality uses eyes.
+    lplc1_L: float = 0.0
+    lplc1_R: float = 0.0
+    lc4_L: float = 0.0
+    lc4_R: float = 0.0
+    # Hex means (diagnostics / opt-in engineered eye laterality only).
     eye_L: float = 0.0
     eye_R: float = 0.0
 
@@ -94,6 +97,7 @@ def build_readout_index(
         g[f"HSE|{s}"] = _select(typ, side, "HSE", s)
         g[f"DNg02|{s}"] = _select(typ, side, "DNg02", s, prefix=True)
         g[f"LPLC2|{s}"] = _select(typ, side, "LPLC2", s)
+        g[f"LPLC1|{s}"] = _select(typ, side, "LPLC1", s)
         g[f"LC4|{s}"] = _select(typ, side, "LC4", s)
         g[f"LPi43|{s}"] = _select(typ, side, "LPi43", s)
     return ReadoutIndex(groups=g)
@@ -119,6 +123,10 @@ def read_dns(rates: np.ndarray, index: ReadoutIndex) -> DNReadout:
         dng02_amp=0.5 * (L + R),
         lplc2_L=_mean(rates, index.groups.get("LPLC2|L", np.zeros(0, dtype=int))),
         lplc2_R=_mean(rates, index.groups.get("LPLC2|R", np.zeros(0, dtype=int))),
+        lplc1_L=_mean(rates, index.groups.get("LPLC1|L", np.zeros(0, dtype=int))),
+        lplc1_R=_mean(rates, index.groups.get("LPLC1|R", np.zeros(0, dtype=int))),
+        lc4_L=_mean(rates, index.groups.get("LC4|L", np.zeros(0, dtype=int))),
+        lc4_R=_mean(rates, index.groups.get("LC4|R", np.zeros(0, dtype=int))),
     )
 
 

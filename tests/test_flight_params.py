@@ -12,6 +12,7 @@ from threedfly.control.flight_params import (
 def test_residual_off_and_no_dng02_yaw_gain():
     p = FlightParams()
     assert p.use_engineered_looming_residual is False
+    assert p.use_engineered_eye_laterality is False
     d = p.as_dict()
     assert "dng02_yaw_gain" not in d
     assert "dnp03_active_hz" not in d

@@ -28,12 +28,17 @@ FLY_MJCF = """
   
   <asset>
     <texture name="grid" type="2d" builtin="checker" width="512" height="512" 
-             rgb1="0.2 0.3 0.4" rgb2="0.3 0.4 0.5"/>
-    <material name="grid_mat" texture="grid" texrepeat="10 10" reflectance="0.1"/>
+             rgb1="0.08 0.08 0.10" rgb2="0.75 0.72 0.65"/>
+    <material name="grid_mat" texture="grid" texrepeat="16 16" reflectance="0.08"/>
     
-    <texture name="wall" type="2d" builtin="flat" width="512" height="512"
-             rgb1="0.8 0.75 0.7"/>
-    <material name="wall_mat" texture="wall" reflectance="0.2"/>
+    <!-- High-contrast ~20 cm checkers: LPLC2/LC4/DNp03 need expanding
+         edges, not a flat beige field. texrepeat on a 10 m × 4 m face. -->
+    <texture name="wall_check" type="2d" builtin="checker" width="256" height="256"
+             rgb1="0.02 0.02 0.04" rgb2="0.95 0.93 0.88"/>
+    <material name="wall_mat" texture="wall_check" texrepeat="48 20" reflectance="0.04"/>
+    <texture name="obs_check" type="2d" builtin="checker" width="128" height="128"
+             rgb1="0.05 0.04 0.04" rgb2="0.85 0.25 0.18"/>
+    <material name="obs_mat" texture="obs_check" texrepeat="6 6" reflectance="0.04"/>
     
     <!-- flybody mesh assets (Apache-2.0). Scale: millimetres × 0.01 → metres (10× life-size). -->
     <mesh name="thorax_mesh" file="thorax_body.obj" scale=""" + f'"{_S}"' + """/>
@@ -59,27 +64,27 @@ FLY_MJCF = """
     
     <!-- Room walls -->
     <body name="wall_north" pos="5 0 2">
-      <geom type="box" size="0.1 5 2" material="wall_mat" rgba="0.8 0.8 0.9 1"/>
+      <geom type="box" size="0.1 5 2" material="wall_mat"/>
     </body>
     <body name="wall_south" pos="-5 0 2">
-      <geom type="box" size="0.1 5 2" material="wall_mat" rgba="0.8 0.9 0.8 1"/>
+      <geom type="box" size="0.1 5 2" material="wall_mat"/>
     </body>
     <body name="wall_east" pos="0 5 2">
-      <geom type="box" size="5 0.1 2" material="wall_mat" rgba="0.9 0.8 0.8 1"/>
+      <geom type="box" size="5 0.1 2" material="wall_mat"/>
     </body>
     <body name="wall_west" pos="0 -5 2">
-      <geom type="box" size="5 0.1 2" material="wall_mat" rgba="0.9 0.9 0.8 1"/>
+      <geom type="box" size="5 0.1 2" material="wall_mat"/>
     </body>
     
     <!-- Some obstacles for exploration -->
     <body name="obstacle_1" pos="2 2 0.5">
-      <geom type="box" size="0.3 0.3 0.5" rgba="0.6 0.3 0.2 1"/>
+      <geom type="box" size="0.3 0.3 0.5" material="obs_mat"/>
     </body>
     <body name="obstacle_2" pos="-2 -2 0.3">
-      <geom type="cylinder" size="0.2 0.3" rgba="0.3 0.5 0.3 1"/>
+      <geom type="cylinder" size="0.2 0.3" material="obs_mat"/>
     </body>
     <body name="obstacle_3" pos="-1 3 0.4">
-      <geom type="sphere" size="0.4" rgba="0.4 0.4 0.6 1"/>
+      <geom type="sphere" size="0.4" material="obs_mat"/>
     </body>
     
     <!-- Fruit fly: flybody topology (head / thorax / abdomen / wings / legs / halteres).

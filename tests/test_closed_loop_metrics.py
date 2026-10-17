@@ -103,6 +103,15 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert pose_r["vel"][1] < 0.0
     # Old scenario faced +Y (π/2) and drove into the frontal wall.
     assert abs(pose_l["yaw"] - np.pi / 2) > 0.7
+    yt = mod._yaw_term_summary(
+        [
+            {"dna02": 0.2, "dnp15": 0.0, "hse": -0.1, "dnp03": -0.4, "vpn_loom": -0.2, "eye": 0.0, "escape_kick": 0.0, "near_wall": 1.0},
+            {"dna02": 0.0, "dnp15": 0.0, "hse": 0.0, "dnp03": 0.0, "vpn_loom": 0.0, "eye": 0.8, "escape_kick": 0.0, "near_wall": 0.0},
+        ]
+    )
+    assert yt["near_wall_steps"] == 1
+    assert yt["eye_share_near_wall"] == pytest.approx(0.0)
+    assert yt["brain_share_near_wall"] > 0.9
     open_p = mod.open_space_pose()
     assert open_p["yaw"] == pytest.approx(0.0)
     assert open_p["max_steps"] >= 300
