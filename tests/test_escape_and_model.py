@@ -452,6 +452,30 @@ def test_diagnose_looming_reports_dnp01_dnp03_latency_and_selectivity():
     assert np.isfinite(report["dnp01_latency_steps"])
 
 
+def test_yaw_running_baseline_when_pair_dropped():
+    """Engineered slow L−R baseline: if a DN pair is dropped, remaining yaw is zero-mean at rest."""
+    n, controller = _bio_controller(warmup_steps=12)
+    rest = np.full(n, 1.0)
+    rest[controller.output_mapping["DNa02_L"]] = 33.5
+    rest[controller.output_mapping["DNa02_R"]] = 0.26
+    rest[controller.output_mapping["DNg02_L"]] = 4.0
+    rest[controller.output_mapping["DNg02_R"]] = 1.0
+    for _ in range(8):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    controller.prev_action[:] = 0.0
+    controller.alpha = 1.0
+    held = rest.copy()
+    held[controller.output_mapping["DNg02_L"]] = 8.0
+    yaws = []
+    for _ in range(80):
+        yaws.append(float(controller.compute_action(held)[4]))
+    assert abs(yaws[0]) > 0.05, "Remaining DNg02 L−R should initially turn"
+    assert abs(yaws[-1]) < abs(yaws[0]) * 0.5, (
+        f"Slow yaw baseline should cancel DC bias ({yaws[0]:.3f} → {yaws[-1]:.3f})"
+    )
+
+
 def test_diagnose_looming_closed_loop_tonic_then_ramp():
     """diagnose-looming must report whether DNp01 still crosses rest+margin after tonic warmup."""
     from threedfly.connectome.simulator import diagnose_looming_to_dnp01
@@ -569,3 +593,23 @@ def test_visual_wings_flap_in_phase_with_mirrored_hinges():
     assert left * right > 0
     left0, right0 = visual_wing_angles(0.0, 1.0, 1.0)
     assert abs(left0) < 1e-9 and abs(right0) < 1e-9
+
+
+def test_sector_ray_distances_are_diagnostic_only():
+    """MuJoCo sector rays exist for sanity checks and are not the brain's looming input."""
+    from threedfly.sim.environment import FlyEnvironment
+    from threedfly.vision import StereoVision
+
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    env.data.qpos[0:3] = [0.0, 0.0, 1.5]
+    import mujoco
+    mujoco.mj_forward(env.model, env.data)
+    left_d = env.sector_ray_distances("left")
+    right_d = env.sector_ray_distances("right")
+    env.close()
+    assert left_d.shape == (8,) and right_d.shape == (8,)
+    assert np.all(left_d > 0) and np.all(right_d > 0)
+    stereo = StereoVision()
+    assert not hasattr(stereo, "gt_ray_distances") or stereo.get_visual_features is not None

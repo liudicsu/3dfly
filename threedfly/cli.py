@@ -295,7 +295,7 @@ def diagnose_looming(subgraph_path, no_ei, looming):
     )
     click.echo("DNp01 rose above rest." if report["rose"] else "DNp01 did NOT rise above rest.")
     click.echo(
-        f"Closed-loop tonic-then-ramp: rest={report['dnp01_closed_loop_rest']:.4g}  "
+        f"Closed-loop tonic-then-pulse: rest={report['dnp01_closed_loop_rest']:.4g}  "
         f"driven={report['dnp01_closed_loop_driven']:.4g}  "
         f"late={report['dnp01_closed_loop_late_driven']:.4g}  "
         f"crossed={int(report['dnp01_closed_loop_crossed'])}"

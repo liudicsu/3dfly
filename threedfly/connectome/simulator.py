@@ -380,13 +380,14 @@ def diagnose_looming_to_dnp01(
     n_baseline: int = 40,
     baseline_current: float = 0.05,
     closed_loop_margin: float = 0.05,
+    n_pulse: int = 8,
 ) -> Dict[str, float]:
     """Inject current into LPLC2/LC4 and report DNp01/DNp03 rest, drive, latency, L/R selectivity.
 
     Also runs a closed-loop-like protocol: tonic ``baseline_current`` for
-    ``n_baseline`` steps, then a ramp to ``looming_current``. Reports whether
-    late DNp01 still crosses rest+margin after that warm-up (not just onset
-    from silence).
+    ``n_baseline`` steps, then a brief pulse of ``looming_current`` (LPLC2 is
+    phasic). Reports whether DNp01 crosses rest+margin after that warm-up,
+    not just the onset spike from silence.
     """
     hops = count_directed_hops(adjacency, looming_indices, dnp01_indices)
     dnp03 = np.asarray(
@@ -463,8 +464,8 @@ def diagnose_looming_to_dnp01(
         "rose": float(driven > rest + 0.05),
     }
 
-    # Closed-loop-like: hold tonic baseline, then ramp. Score late rates, not the
-    # onset spike from silence (which looks healthy even when the path adapts away).
+    # Closed-loop-like: tonic cruise, then a brief pulse (phasic LPLC2). Score
+    # the pulse after warm-up, not a long hold that the network can suppress.
     sim.reset()
     n_base = max(int(n_baseline), 1)
     baseline_hist = []
@@ -479,27 +480,26 @@ def diagnose_looming_to_dnp01(
     tail_b = max(3, n_base // 3)
     cl_rest = float(np.median(baseline_hist[-tail_b:])) if baseline_hist else 0.0
 
-    ramp_hist = []
     n_ramp = max(int(n_drive), 1)
+    n_on = max(1, min(int(n_pulse), n_ramp))
+    pulse_hist = []
     for i in range(n_ramp):
-        frac = float(i + 1) / float(n_ramp)
-        cur = float(baseline_current) + frac * (
-            float(looming_current) - float(baseline_current)
-        )
+        cur = float(looming_current) if i < n_on else float(baseline_current)
         if loom.size:
             sim.set_input(
                 np.full(loom.size, cur, dtype=np.float32), neuron_indices=loom
             )
         rates = sim.step()
-        ramp_hist.append(_mean_rate(rates, dnp))
-    tail_d = max(3, n_ramp // 3)
-    cl_driven = float(np.max(ramp_hist)) if ramp_hist else 0.0
-    cl_late = float(np.median(ramp_hist[-tail_d:])) if ramp_hist else 0.0
+        if i < n_on:
+            pulse_hist.append(_mean_rate(rates, dnp))
+    cl_driven = float(np.max(pulse_hist)) if pulse_hist else 0.0
+    tail_p = max(1, len(pulse_hist) // 2)
+    cl_late = float(np.median(pulse_hist[-tail_p:])) if pulse_hist else 0.0
     report["dnp01_closed_loop_rest"] = cl_rest
     report["dnp01_closed_loop_driven"] = cl_driven
     report["dnp01_closed_loop_late_driven"] = cl_late
     report["dnp01_closed_loop_crossed"] = float(
-        cl_late > cl_rest + float(closed_loop_margin)
+        cl_driven > cl_rest + float(closed_loop_margin)
     )
     return report
 

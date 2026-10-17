@@ -11,13 +11,17 @@ LOOMING_LEFT_SECTORS = (0, 1, 2, 3)
 LOOMING_RIGHT_SECTORS = (0, 7, 6, 5)
 
 
-def pack_looming_features(sectors) -> Dict[str, np.ndarray]:
-    """Pack the 8-sector proximity vector for retinotopic LPLC2/LC4 encoding."""
-    s = np.atleast_1d(np.asarray(sectors, dtype=np.float32)).ravel()
-    if s.size < LOOMING_N_SECTORS:
-        s = np.pad(s, (0, LOOMING_N_SECTORS - int(s.size)))
-    s = np.asarray(s[:LOOMING_N_SECTORS], dtype=np.float32)
-    return {"left": s.copy(), "right": s.copy(), "sectors": s}
+def pack_looming_features(left, right=None) -> Dict[str, np.ndarray]:
+    """Pack per-eye 8-sector expansion vectors for retinotopic LPLC2/LC4 encoding."""
+    def _vec(x):
+        s = np.atleast_1d(np.asarray(x, dtype=np.float32)).ravel()
+        if s.size < LOOMING_N_SECTORS:
+            s = np.pad(s, (0, LOOMING_N_SECTORS - int(s.size)))
+        return np.asarray(s[:LOOMING_N_SECTORS], dtype=np.float32)
+
+    left_v = _vec(left)
+    right_v = left_v.copy() if right is None else _vec(right)
+    return {"left": left_v, "right": right_v, "sectors": np.maximum(left_v, right_v)}
 
 
 class FlightController:
@@ -194,8 +198,11 @@ class BiologicalFlightController:
         self.flow_reference = 1.0
         self.haltere_reference = 2.0
         self.looming_reference = 1.0
-        self.looming_input_gain = 2.0
-        self.looming_onset_gain = 1.0
+        # Phasic LPLC2-like encoding: small tonic scale, strong onset kick.
+        self.looming_input_gain = 0.5
+        self.looming_onset_gain = 2.0
+        self.yaw_baseline_alpha = 0.05  # engineered slow L−R baseline (~1 s)
+        self._yaw_baseline = 0.0
         self.silent_side_hz = 1.0
         self.silent_side_rel = 0.05
         self._last_looming = 0.0
@@ -755,18 +762,31 @@ class BiologicalFlightController:
 
         yaw = 0.0
         n_pairs = 0
+        dropped = False
         if self._pair_usable("DNa02_L", "DNa02_R", brain_activity):
             yaw += 0.55 * self._pair_yaw("DNa02_L", "DNa02_R", brain_activity)
             n_pairs += 1
+        else:
+            dropped = True
         if self._pair_usable("DNg02_L", "DNg02_R", brain_activity):
             yaw += 0.45 * self._pair_yaw("DNg02_L", "DNg02_R", brain_activity)
             n_pairs += 1
+        else:
+            dropped = True
         if n_pairs == 0 and self._pair_usable("DNa01_L", "DNa01_R", brain_activity):
             yaw = 0.5 * self._pair_yaw("DNa01_L", "DNa01_R", brain_activity)
         if escaping:
             yaw = 0.8 * self._escape_yaw_sign + 0.2 * yaw
         elif self._pair_usable("DNp03_L", "DNp03_R", brain_activity):
             yaw += 0.35 * self._pair_yaw("DNp03_L", "DNp03_R", brain_activity)
+        else:
+            dropped = True
+        # Engineered: slow running baseline of the remaining L−R signal so a
+        # dropped silent-side pair cannot leave a DC yaw offset at rest.
+        a = float(self.yaw_baseline_alpha)
+        self._yaw_baseline = (1.0 - a) * self._yaw_baseline + a * float(yaw)
+        if dropped and not escaping:
+            yaw = float(yaw) - self._yaw_baseline
         
         # Assemble action. exploration_signal is intentionally unused here.
         action = np.array([thrust_forward, thrust_up, roll, pitch, yaw])

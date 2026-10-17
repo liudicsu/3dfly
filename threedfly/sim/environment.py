@@ -324,6 +324,39 @@ class FlyEnvironment:
             dtype=np.float64,
         )
     
+    def sector_ray_distances(self, side: str = "left", max_dist: float = 5.0) -> np.ndarray:
+        """MuJoCo ray distances per looming sector. Diagnostic only — not brain input."""
+        mujoco.mj_forward(self.model, self.data)
+        left_pose, right_pose = self.get_camera_poses()
+        pose = left_pose if side == "left" else right_pose
+        origin = np.ascontiguousarray(pose[:3, 3], dtype=np.float64)
+        rot = np.asarray(pose[:3, :3], dtype=np.float64)
+        origin = np.ascontiguousarray(
+            origin + rot @ np.array([0.003, 0.0, 0.0], dtype=np.float64)
+        )
+        angles = np.deg2rad([0.0, 45.0, 90.0, 135.0, 180.0, -135.0, -90.0, -45.0])
+        dists = np.full(8, float(max_dist), dtype=np.float64)
+        geomid = np.zeros(1, dtype=np.int32)
+        fly_geoms = self._fly_geom_ids
+        for i, yaw in enumerate(angles):
+            body_dir = np.array([np.cos(yaw), np.sin(yaw), 0.0], dtype=np.float64)
+            vec = np.ascontiguousarray(rot @ body_dir, dtype=np.float64)
+            geomid[0] = -1
+            dist = mujoco.mj_ray(
+                self.model,
+                self.data,
+                origin,
+                vec,
+                None,
+                1,
+                int(self._fly_body_id),
+                geomid,
+            )
+            gid = int(geomid[0])
+            if dist >= 0 and gid not in fly_geoms:
+                dists[i] = min(float(dist), float(max_dist))
+        return dists.astype(np.float32)
+
     def get_camera_poses(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get left and right camera poses in world coordinates.

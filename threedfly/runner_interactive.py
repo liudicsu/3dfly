@@ -19,7 +19,12 @@ from threedfly.connectome.simulator import (
     count_directed_hops,
 )
 from threedfly.sim import FlyEnvironment
-from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
+from threedfly.vision import (
+    StereoVision,
+    PointCloudMapper,
+    BrainDepthEstimator,
+    looming_approach_correlation,
+)
 from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
 from threedfly.control.controller import BiologicalFlightController, pack_looming_features
@@ -218,6 +223,7 @@ def run_interactive_simulation(
         controller.dnp03_turn_count = 0
         controller._dnp03_prev_active = False
         controller.dnp01_prev_z = 0.0
+        controller._yaw_baseline = 0.0
         controller.resting_pair_mean = {}
         controller.resting_pair_scale = {}
         for warmup_step in range(controller.warmup_steps):
@@ -233,7 +239,8 @@ def run_interactive_simulation(
                     flow_info.get("flow_left"), flow_info.get("flow_right")
                 ),
                 looming_features=pack_looming_features(
-                    visual_features["looming_features"]
+                    visual_features.get("looming_left", visual_features["looming_features"]),
+                    visual_features.get("looming_right", visual_features["looming_features"]),
                 ),
                 brain=brain,
                 angular_velocity=env.get_fly_angular_velocity(),
@@ -263,6 +270,9 @@ def run_interactive_simulation(
         return left_img, right_img, 0, 0  # step, collision_count
     
     left_img, right_img, step, collision_count = reset_simulation()
+    loom_series = []
+    approach_series = []
+    prev_gt_rays = None
     
     # Main simulation loop
     try:
@@ -274,6 +284,9 @@ def run_interactive_simulation(
             if controls["should_reset"]:
                 print("\n🔄 Resetting simulation...")
                 left_img, right_img, step, collision_count = reset_simulation()
+                loom_series = []
+                approach_series = []
+                prev_gt_rays = None
                 continue
             
             # Handle pause (unless stepping)
@@ -286,8 +299,16 @@ def run_interactive_simulation(
             
             # === Simulation Step ===
             
-            # Get visual input
+            # Get visual input (StereoBM comparison + per-eye expansion looming)
             visual_features = stereo.get_visual_features(left_img, right_img)
+            gt_rays = 0.5 * (
+                env.sector_ray_distances("left") + env.sector_ray_distances("right")
+            )
+            if prev_gt_rays is not None:
+                approach = np.maximum(prev_gt_rays - gt_rays, 0.0) / float(sim_dt)
+                loom_series.append(float(np.max(visual_features["looming_features"])))
+                approach_series.append(float(np.max(approach)))
+            prev_gt_rays = gt_rays
             
             # *** NEW: Get fly velocity for motion parallax ***
             fly_velocity = env.get_fly_velocity()
@@ -318,7 +339,8 @@ def run_interactive_simulation(
                         flow_info.get("flow_left"), flow_info.get("flow_right")
                     ),
                     looming_features=pack_looming_features(
-                        visual_features["looming_features"]
+                        visual_features.get("looming_left", visual_features["looming_features"]),
+                        visual_features.get("looming_right", visual_features["looming_features"]),
                     ),
                     brain=brain,
                     angular_velocity=env.get_fly_angular_velocity(),
@@ -486,6 +508,11 @@ def run_interactive_simulation(
         print(f"DNp01 escapes: brain-triggered={controller.brain_escape_count}, "
               f"engineered-residual={controller.engineered_escape_count}")
         print(f"DNp03 evasive turns: {controller.dnp03_turn_count}")
+        r_gt = looming_approach_correlation(loom_series, approach_series)
+        print(
+            f"Flow-looming vs GT approach correlation: {r_gt:.3f} "
+            "(diagnostic; MuJoCo rays are not fed to the brain)"
+        )
     print(f"\nPrimary (Brain Depth):")
     print(f"  Point cloud points: {map_stats['total_points']}")
     print(f"  Mean depth: {brain_depth_stats.get('mean_depth_history', 0):.2f}m")

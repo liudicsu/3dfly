@@ -2,13 +2,101 @@
 
 import numpy as np
 import cv2
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 from threedfly.vision.hex_eye import (
     N_OMMATIDIA_PER_EYE,
     hex_lattice_uv,
     sample_image_hex,
 )
+
+LOOMING_N_SECTORS = 8
+# Ignore sub-pixel Farneback jitter; expansion is scored with a percentile.
+_LOOMING_NOISE_FLOOR = 0.05
+_LOOMING_PERCENTILE = 75.0
+_LOOMING_SCALE = 2.0
+
+
+def _to_gray(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 3:
+        return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    return image
+
+
+def compute_farneback_flow(prev_gray: np.ndarray, curr_gray: np.ndarray) -> np.ndarray:
+    """Dense optical flow (prev → curr), pixels per frame."""
+    return cv2.calcOpticalFlowFarneback(
+        prev_gray,
+        curr_gray,
+        None,
+        pyr_scale=0.5,
+        levels=3,
+        winsize=15,
+        iterations=3,
+        poly_n=5,
+        poly_sigma=1.2,
+        flags=0,
+    )
+
+
+def sector_slices(h: int, w: int) -> List[tuple]:
+    """Image slices for the 8 looming sectors (same layout as the LPLC2 RFs)."""
+    return [
+        (slice(h // 3, 2 * h // 3), slice(w // 3, 2 * w // 3)),  # 0 forward
+        (slice(h // 4, 3 * h // 4), slice(0, w // 3)),  # 1 forward-left
+        (slice(None, None), slice(0, w // 4)),  # 2 left
+        (slice(0, h // 4), slice(0, w // 3)),  # 3 back-left
+        None,  # 4 back: top+bottom edges
+        (slice(0, h // 4), slice(2 * w // 3, None)),  # 5 back-right
+        (slice(None, None), slice(3 * w // 4, None)),  # 6 right
+        (slice(h // 4, 3 * h // 4), slice(2 * w // 3, None)),  # 7 forward-right
+    ]
+
+
+def expansion_map(flow: np.ndarray) -> np.ndarray:
+    """Positive divergence of the flow field (uniform translation → 0)."""
+    fx = flow[..., 0]
+    fy = flow[..., 1]
+    div = np.gradient(fx, axis=1) + np.gradient(fy, axis=0)
+    return np.maximum(div, 0.0).astype(np.float32)
+
+
+def compute_expansion_looming(flow: Optional[np.ndarray]) -> np.ndarray:
+    """Per-sector expansion in [0, 1]. 0 when nothing is approaching."""
+    out = np.zeros(LOOMING_N_SECTORS, dtype=np.float32)
+    if flow is None:
+        return out
+    exp = expansion_map(np.asarray(flow, dtype=np.float32))
+    h, w = exp.shape
+    slices = sector_slices(h, w)
+    for i, sl in enumerate(slices):
+        if i == 4:
+            region = np.concatenate([exp[: h // 4, :].ravel(), exp[3 * h // 4 :, :].ravel()])
+        else:
+            ys, xs = sl
+            region = exp[ys, xs].ravel()
+        valid = region[region >= _LOOMING_NOISE_FLOOR]
+        if valid.size < 8:
+            continue
+        p = float(np.percentile(valid, _LOOMING_PERCENTILE))
+        if p < _LOOMING_NOISE_FLOOR * 1.5:
+            continue
+        out[i] = float(np.clip(p / _LOOMING_SCALE, 0.0, 1.0))
+    return out
+
+
+def looming_approach_correlation(looming_strength, approach_rate) -> float:
+    """Pearson r between flow-based looming and GT closing speed (diagnostic)."""
+    a = np.asarray(looming_strength, dtype=np.float64).ravel()
+    b = np.asarray(approach_rate, dtype=np.float64).ravel()
+    n = min(a.size, b.size)
+    if n < 3:
+        return 0.0
+    a = a[:n]
+    b = b[:n]
+    if float(np.std(a)) < 1e-12 or float(np.std(b)) < 1e-12:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
 
 
 class StereoVision:
@@ -56,6 +144,8 @@ class StereoVision:
         # Hex-lattice ommatidial sampling (~750/eye, ~5 deg). Replaces the old 10×10 grid.
         self.n_ommatidia = N_OMMATIDIA_PER_EYE
         self.ommatidia_uv = hex_lattice_uv(n_ommatidia=self.n_ommatidia)
+        self.prev_left_gray = None
+        self.prev_right_gray = None
         
     def estimate_depth(
         self,
@@ -129,83 +219,24 @@ class StereoVision:
         
         return sample_image_hex(gray, self.ommatidia_uv)
     
+    def _update_eye_flow(self, image: np.ndarray, side: str) -> Optional[np.ndarray]:
+        gray = _to_gray(image)
+        prev_attr = "prev_left_gray" if side == "left" else "prev_right_gray"
+        prev = getattr(self, prev_attr)
+        if prev is None or prev.shape != gray.shape:
+            setattr(self, prev_attr, gray)
+            return None
+        flow = compute_farneback_flow(prev, gray)
+        setattr(self, prev_attr, gray)
+        return flow
+
     def compute_looming_features(
         self,
-        depth_map: np.ndarray,
-        confidence: np.ndarray,
+        flow: Optional[np.ndarray],
+        _confidence: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """
-        Compute looming/proximity features from depth map.
-        
-        Divides the visual field into sectors and computes proximity signals
-        for each sector. These features feed into the brain for obstacle avoidance.
-        
-        Args:
-            depth_map: Depth map (H, W)
-            confidence: Confidence map (H, W)
-        
-        Returns:
-            Looming features (n_sectors,) where higher values = closer obstacles
-        """
-        h, w = depth_map.shape
-        
-        # Divide into 8 sectors: forward, forward-left, left, back-left, 
-        # back, back-right, right, forward-right
-        n_sectors = 8
-        looming = np.zeros(n_sectors)
-        
-        # Define sector boundaries (roughly)
-        # Sector 0: forward (center)
-        # Sectors 1-3: left side
-        # Sector 4: back (edges)
-        # Sectors 5-7: right side
-        
-        for i in range(n_sectors):
-            angle = i * 2 * np.pi / n_sectors
-            
-            # Define sector region in image
-            if i == 0:  # Forward center
-                region = depth_map[h//3:2*h//3, w//3:2*w//3]
-                region_conf = confidence[h//3:2*h//3, w//3:2*w//3]
-            elif i == 1:  # Forward-left
-                region = depth_map[h//4:3*h//4, :w//3]
-                region_conf = confidence[h//4:3*h//4, :w//3]
-            elif i == 2:  # Left
-                region = depth_map[:, :w//4]
-                region_conf = confidence[:, :w//4]
-            elif i == 3:  # Back-left
-                region = depth_map[:h//4, :w//3]
-                region_conf = confidence[:h//4, :w//3]
-            elif i == 4:  # Back (top and bottom edges)
-                top = depth_map[:h//4, :]
-                bottom = depth_map[3*h//4:, :]
-                region = np.concatenate([top.flatten(), bottom.flatten()])
-                top_conf = confidence[:h//4, :]
-                bottom_conf = confidence[3*h//4:, :]
-                region_conf = np.concatenate([top_conf.flatten(), bottom_conf.flatten()])
-            elif i == 5:  # Back-right
-                region = depth_map[:h//4, 2*w//3:]
-                region_conf = confidence[:h//4, 2*w//3:]
-            elif i == 6:  # Right
-                region = depth_map[:, 3*w//4:]
-                region_conf = confidence[:, 3*w//4:]
-            else:  # i == 7, Forward-right
-                region = depth_map[h//4:3*h//4, 2*w//3:]
-                region_conf = confidence[h//4:3*h//4, 2*w//3:]
-            
-            # Compute proximity signal: inverse depth weighted by confidence
-            # Closer objects = higher signal
-            valid = (region_conf > 0.1) & (region > 0.01)
-            if valid.sum() > 0:
-                # Use minimum depth in sector (closest obstacle)
-                min_depth = np.min(region[valid])
-                # Convert to proximity (0 at far, 1 at very close)
-                proximity = np.clip(1.0 / (min_depth + 0.1), 0, 10) / 10
-                looming[i] = proximity
-            else:
-                looming[i] = 0.0
-        
-        return looming
+        """Per-sector expansion from one eye's optic flow (not StereoBM depth)."""
+        return compute_expansion_looming(flow)
     
     def get_visual_features(
         self,
@@ -223,7 +254,8 @@ class StereoVision:
             Dictionary with features:
                 - left_ommatidia: sampled left eye
                 - right_ommatidia: sampled right eye
-                - looming_features: proximity/looming signals (8 sectors)
+                - looming_features: max of per-eye expansion (8 sectors, viz)
+                - looming_left / looming_right: per-eye expansion from that eye's flow
                 - depth_estimate: mean depth
                 - depth_map: depth map (downsampled if downsample_factor > 1)
                 - confidence: confidence map (same size as depth_map)
@@ -233,11 +265,14 @@ class StereoVision:
         left_samples = self.ommatidial_sample(left_img)
         right_samples = self.ommatidial_sample(right_img)
         
-        # Depth estimate
+        # Depth estimate (comparison baseline only — not used for looming)
         depth_map, confidence = self.estimate_depth(left_img, right_img)
-        
-        # Looming/proximity features for obstacle avoidance
-        looming = self.compute_looming_features(depth_map, confidence)
+
+        flow_left = self._update_eye_flow(left_img, "left")
+        flow_right = self._update_eye_flow(right_img, "right")
+        looming_left = self.compute_looming_features(flow_left)
+        looming_right = self.compute_looming_features(flow_right)
+        looming = np.maximum(looming_left, looming_right)
         
         # Downsample RGB to match depth map if needed
         if self.downsample_factor > 1:
@@ -259,6 +294,8 @@ class StereoVision:
             "right_ommatidia": right_samples,
             "ommatidia_uv": self.ommatidia_uv,
             "looming_features": looming,
+            "looming_left": looming_left,
+            "looming_right": looming_right,
             "depth_estimate": mean_depth,
             "depth_map": depth_map,
             "confidence": confidence,

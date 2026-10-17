@@ -61,6 +61,104 @@ def test_visual_features():
     assert "depth_estimate" in features
     assert "depth_map" in features
     assert features["left_ommatidia"].shape == (stereo.n_ommatidia,)
+    assert "looming_left" in features and "looming_right" in features
+    assert features["looming_left"].shape == (8,)
+    assert features["looming_right"].shape == (8,)
+
+
+def _ring_frame(h, w, radius, width=7):
+    img = np.full((h, w, 3), 28, dtype=np.uint8)
+    yy, xx = np.ogrid[:h, :w]
+    r = np.sqrt((yy - h / 2.0) ** 2 + (xx - w / 2.0) ** 2)
+    img[np.abs(r - radius) < width] = 230
+    rng = np.random.RandomState(0)
+    noise = rng.randint(0, 12, (h, w, 1), dtype=np.uint8)
+    noise = np.maximum(noise, np.fliplr(noise))
+    img ^= np.repeat(noise, 3, axis=2)
+    return img
+
+
+def test_static_scene_looming_is_near_zero():
+    """No expansion → looming ~0, even if StereoBM would invent close depth."""
+    stereo = StereoVision()
+    img = _ring_frame(120, 160, radius=40)
+    stereo.get_visual_features(img, img)
+    feat = stereo.get_visual_features(img, img)
+    assert float(np.max(feat["looming_features"])) < 0.2
+    assert float(np.max(feat["looming_left"])) < 0.2
+    assert float(np.max(feat["looming_right"])) < 0.2
+
+
+def test_expansion_looming_not_saturated_and_covers_left_sectors():
+    """Per-eye expansion covers the left hemifield and does not pin at ~0.85."""
+    from threedfly.vision.stereo import compute_expansion_looming
+
+    h, w = 60, 80
+    yy, xx = np.indices((h, w))
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    flow = np.zeros((h, w, 2), dtype=np.float32)
+    flow[..., 0] = (xx - cx) * 0.08
+    flow[..., 1] = (yy - cy) * 0.08
+    loom = compute_expansion_looming(flow)
+    assert loom.shape == (8,)
+    assert float(loom.max()) <= 1.0 + 1e-6
+    assert float(loom.max()) < 0.95, "percentile expansion must not saturate like 1/(d+0.1)/10"
+    assert float(loom[0]) > 0.05
+    assert float(loom[1]) > 0.02 or float(loom[2]) > 0.02
+
+    trans = np.zeros((h, w, 2), dtype=np.float32)
+    trans[..., 0] = 2.0
+    loom_t = compute_expansion_looming(trans)
+    assert float(loom_t.max()) < 0.15
+
+
+def test_mirrored_scene_left_right_looming_symmetric():
+    """Left and right eyes must match on a left-right mirrored expanding scene."""
+    stereo = StereoVision()
+    h, w = 120, 160
+    f1 = _ring_frame(h, w, radius=28)
+    f2 = _ring_frame(h, w, radius=48)
+    stereo.get_visual_features(f1, np.fliplr(f1))
+    feat = stereo.get_visual_features(f2, np.fliplr(f2))
+    left, right = feat["looming_left"], feat["looming_right"]
+    # Mirror sectors: 0↔0, 1↔7, 2↔6, 3↔5, 4↔4
+    mirrored_right = np.array(
+        [right[0], right[7], right[6], right[5], right[4], right[3], right[2], right[1]],
+        dtype=np.float64,
+    )
+    assert float(np.max(np.abs(left - mirrored_right))) < 0.12, (
+        f"L/R looming not symmetric: left={left} mirrored_right={mirrored_right}"
+    )
+    assert float(left.max()) > 0.05 and float(right.max()) > 0.05
+
+
+def test_left_eye_expansion_drives_left_looming_without_stereo():
+    """Looming comes from each eye's own image, not StereoBM (left columns often invalid)."""
+    stereo = StereoVision()
+    h, w = 120, 160
+    blank = np.full((h, w, 3), 40, dtype=np.uint8)
+    blank ^= np.random.RandomState(1).randint(0, 8, blank.shape, dtype=np.uint8)
+    left1 = blank.copy()
+    left2 = blank.copy()
+    x = np.arange(w)
+    left1[:, np.abs(x - 25) < 8] = 220
+    left2[:, np.abs(x - 25) < 18] = 220
+    stereo.get_visual_features(left1, blank)
+    feat = stereo.get_visual_features(left2, blank)
+    # Left-of-image expansion should light left sectors, not only 0/4-7.
+    assert float(feat["looming_left"][1] + feat["looming_left"][2]) > 0.04
+    assert float(feat["looming_right"].max()) < float(feat["looming_left"].max()) + 0.05
+
+
+def test_approach_correlation_helper():
+    from threedfly.vision.stereo import looming_approach_correlation
+
+    r = looming_approach_correlation(
+        np.array([0.0, 0.2, 0.8, 0.9]),
+        np.array([0.0, 0.25, 0.7, 1.0]),
+    )
+    assert r > 0.9
+    assert looming_approach_correlation(np.array([1.0]), np.array([1.0])) == 0.0
 
 
 def test_point_cloud_mapper_init():
