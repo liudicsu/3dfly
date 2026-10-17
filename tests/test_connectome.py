@@ -211,5 +211,50 @@ def test_large_sparse_simulator():
     assert np.all(rates <= sim.max_rate)
 
 
+def test_rate_simulator_ei_signs():
+    """Test E/I sign application in rate simulator."""
+    # Create simple 3-neuron network: 0→1, 0→2
+    # 0 is excitatory (+1), 1 is inhibitory (-1), 2 is unclear (+1)
+    adjacency = sparse.csr_matrix([
+        [0, 1, 1],  # 0 → 1, 2
+        [0, 0, 0],
+        [0, 0, 0],
+    ], dtype=float)
+    
+    transmitter_signs = {0: 1.0, 1: -1.0, 2: 1.0}
+    
+    # Without E/I signs
+    sim_no_ei = RateSimulator(adjacency, apply_ei_signs=False, transmitter_signs=transmitter_signs)
+    # Should have positive weights
+    assert sim_no_ei.adj[0, 1] > 0
+    assert sim_no_ei.adj[0, 2] > 0
+    
+    # With E/I signs
+    sim_with_ei = RateSimulator(adjacency, apply_ei_signs=True, transmitter_signs=transmitter_signs)
+    # 0→1 should be positive (excitatory presynaptic)
+    # 0→2 should be positive (excitatory presynaptic)
+    assert sim_with_ei.adj[0, 1] > 0
+    assert sim_with_ei.adj[0, 2] > 0
+
+
+def test_lif_simulator_ei_signs():
+    """Test E/I sign application in LIF simulator."""
+    adjacency = sparse.csr_matrix([
+        [0, 1, 1],
+        [0, 0, 0],
+        [0, 0, 0],
+    ], dtype=float)
+    
+    transmitter_signs = {0: 1.0, 1: -1.0, 2: 1.0}
+    
+    # Without E/I signs
+    sim_no_ei = BrainSimulator(adjacency, apply_ei_signs=False, transmitter_signs=transmitter_signs)
+    assert sim_no_ei.adj[0, 1] > 0
+    
+    # With E/I signs
+    sim_with_ei = BrainSimulator(adjacency, apply_ei_signs=True, transmitter_signs=transmitter_signs)
+    assert sim_with_ei.adj[0, 1] > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

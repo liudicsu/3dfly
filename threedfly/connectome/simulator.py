@@ -22,6 +22,8 @@ class BrainSimulator:
         v_rest: float = 0.0,  # Resting potential
         refrac_period: float = 0.002,  # 2ms refractory period
         syn_weight_scale: float = 0.1,  # Scale synaptic weights
+        apply_ei_signs: bool = False,
+        transmitter_signs: Optional[Dict[int, float]] = None,
     ):
         """
         Initialize simulator.
@@ -35,7 +37,13 @@ class BrainSimulator:
             v_rest: Resting potential
             refrac_period: Refractory period (seconds)
             syn_weight_scale: Scaling factor for synaptic weights
+            apply_ei_signs: Whether to apply E/I signs based on neurotransmitters
+            transmitter_signs: Dict mapping neuron_idx → sign (±1)
         """
+        # Apply E/I signs if requested
+        if apply_ei_signs and transmitter_signs is not None:
+            adjacency = self._apply_ei_signs(adjacency, transmitter_signs)
+        
         self.adj = adjacency
         self.n_neurons = adjacency.shape[0]
         self.dt = dt
@@ -60,9 +68,36 @@ class BrainSimulator:
         
         # Normalize adjacency by max weight for stability
         if self.adj.nnz > 0:
-            max_weight = self.adj.data.max()
+            max_weight = np.abs(self.adj.data).max()
             if max_weight > 0:
                 self.adj = self.adj / max_weight * syn_weight_scale
+    
+    def _apply_ei_signs(
+        self,
+        adjacency: sparse.csr_matrix,
+        transmitter_signs: Dict[int, float]
+    ) -> sparse.csr_matrix:
+        """
+        Apply excitatory/inhibitory signs to adjacency matrix.
+        
+        Multiplies each row by the presynaptic neuron's transmitter sign.
+        
+        Args:
+            adjacency: Original adjacency (pre x post)
+            transmitter_signs: Dict mapping neuron_idx → sign (±1)
+        
+        Returns:
+            Modified adjacency with E/I signs applied
+        """
+        adj_modified = adjacency.copy().tolil()
+        
+        for pre_idx in range(adjacency.shape[0]):
+            sign = transmitter_signs.get(pre_idx, 1.0)
+            if sign != 1.0:
+                # Multiply row by sign
+                adj_modified[pre_idx, :] *= sign
+        
+        return adj_modified.tocsr()
     
     def set_input(self, input_vector: np.ndarray, neuron_indices: Optional[np.ndarray] = None):
         """
@@ -174,6 +209,8 @@ class RateSimulator:
         activation: str = "relu",  # relu, sigmoid, tanh
         syn_weight_scale: float = 0.1,  # Reduced from 0.5 to prevent saturation
         max_rate: float = 10.0,  # Maximum firing rate (Hz)
+        apply_ei_signs: bool = False,
+        transmitter_signs: Optional[Dict[int, float]] = None,
     ):
         """
         Initialize rate-based simulator.
@@ -185,7 +222,13 @@ class RateSimulator:
             activation: Activation function
             syn_weight_scale: Synaptic weight scaling
             max_rate: Maximum firing rate (prevents saturation)
+            apply_ei_signs: Whether to apply E/I signs based on neurotransmitters
+            transmitter_signs: Dict mapping neuron_idx → sign (±1)
         """
+        # Apply E/I signs to adjacency if requested
+        if apply_ei_signs and transmitter_signs is not None:
+            adjacency = self._apply_ei_signs(adjacency, transmitter_signs)
+        
         self.adj = adjacency * syn_weight_scale
         self.n_neurons = adjacency.shape[0]
         self.dt = dt
@@ -198,6 +241,33 @@ class RateSimulator:
         # State
         self.rates = np.zeros(self.n_neurons)  # Firing rates
         self.external_input = np.zeros(self.n_neurons)
+    
+    def _apply_ei_signs(
+        self,
+        adjacency: sparse.csr_matrix,
+        transmitter_signs: Dict[int, float]
+    ) -> sparse.csr_matrix:
+        """
+        Apply excitatory/inhibitory signs to adjacency matrix.
+        
+        Multiplies each row by the presynaptic neuron's transmitter sign.
+        
+        Args:
+            adjacency: Original adjacency (pre x post)
+            transmitter_signs: Dict mapping neuron_idx → sign (±1)
+        
+        Returns:
+            Modified adjacency with E/I signs applied
+        """
+        adj_modified = adjacency.copy().tolil()
+        
+        for pre_idx in range(adjacency.shape[0]):
+            sign = transmitter_signs.get(pre_idx, 1.0)
+            if sign != 1.0:
+                # Multiply row by sign
+                adj_modified[pre_idx, :] *= sign
+        
+        return adj_modified.tocsr()
     
     def _activation_fn(self, x: np.ndarray) -> np.ndarray:
         """Apply activation function."""
