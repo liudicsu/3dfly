@@ -94,12 +94,7 @@ class FlightController:
         
         # Combine into action (2D + altitude maintenance)
         action = np.array([thrust_forward, thrust_up, 0.0, 0.0, yaw])  # No roll/pitch
-        
-        # Add exploration signal if provided (favor horizontal movement)
-        if exploration_signal is not None:
-            action[0] += 0.8 * exploration_signal[0]  # Strong forward bias for XY coverage
-            action[4] += 1.0 * exploration_signal[1]  # Strong yaw for directional changes
-            action[1] += 0.0 * exploration_signal[2]  # Ignore vertical exploration bias
+        # exploration_signal is applied as visual input bias in the runner, not here.
         
         # Smooth action
         action = self.alpha * action + (1 - self.alpha) * self.prev_action
@@ -162,6 +157,10 @@ class BiologicalFlightController:
         self.min_warmup_steps = int(min(min_warmup_steps, self.warmup_steps)) if self.warmup_steps else 0
         self._warmup_count = 0
         self.create_fixed_input_assignment = create_fixed_input_assignment
+        # Rest lift equals weight (env.hover_action ≈ 0.32). Engineered, not a DN.
+        self.hover_action = 0.32
+        self.looming_input_gain = 8.0
+        self._last_looming = 0.0
         
         # Input mapping: visual features → neuron populations
         print("\n[Biological I/O Mapping]")
@@ -281,16 +280,23 @@ class BiologicalFlightController:
                 all_indices.extend(neurons)
                 all_values.extend(values[assignment].tolist())
         
-        # Looming → LPLC2 + LC4
+        # Looming → LPLC2 + LC4 (gain so current can reach DNp01 through signed weights)
+        self._last_looming = 0.0
         if "left" in looming_features and self.input_mapping["looming_left"].size > 0:
             neurons = self.input_mapping["looming_left"]
-            val = np.atleast_1d(looming_features["left"])[0] if np.isscalar(looming_features["left"]) else looming_features["left"].mean()
+            raw = np.atleast_1d(looming_features["left"])[0] if np.isscalar(looming_features["left"]) else looming_features["left"].mean()
+            raw = float(raw)
+            self._last_looming = max(self._last_looming, abs(raw))
+            val = raw * self.looming_input_gain
             all_indices.extend(neurons)
             all_values.extend([val] * len(neurons))
         
         if "right" in looming_features and self.input_mapping["looming_right"].size > 0:
             neurons = self.input_mapping["looming_right"]
-            val = np.atleast_1d(looming_features["right"])[0] if np.isscalar(looming_features["right"]) else looming_features["right"].mean()
+            raw = np.atleast_1d(looming_features["right"])[0] if np.isscalar(looming_features["right"]) else looming_features["right"].mean()
+            raw = float(raw)
+            self._last_looming = max(self._last_looming, abs(raw))
+            val = raw * self.looming_input_gain
             all_indices.extend(neurons)
             all_values.extend([val] * len(neurons))
         
@@ -338,7 +344,7 @@ class BiologicalFlightController:
             if tail.size == 0:
                 continue
             self.resting_rates[dn_type] = float(tail.mean())
-            self.resting_std[dn_type] = float(max(tail.std(ddof=0), 0.05))
+            self.resting_std[dn_type] = float(tail.std(ddof=0))
         
         self.warmup_complete = True
         
@@ -355,7 +361,7 @@ class BiologicalFlightController:
         if not self.warmup_complete:
             return float(np.tanh(rate))
         rest = self.resting_rates.get(dn_type, 0.0)
-        scale = max(self.resting_std.get(dn_type, 0.2), 0.1)
+        scale = max(self.resting_std.get(dn_type, 0.0), 0.25 * abs(rest), 0.5)
         return float(np.tanh((rate - rest) / scale))
 
     def _channel_usable(self, dn_type: str, brain_activity: np.ndarray, eps: float = 1e-6) -> bool:
@@ -375,14 +381,15 @@ class BiologicalFlightController:
         Compute flight action from DN activity.
         
         Maps specific DN types to motor commands:
-        - DNp01: escape → emergency pitch
-        - DNg02: thrust/altitude → forward + upward thrust
-        - DNa01/DNa02 difference → yaw
+        - DNp01: escape → emergency pitch (plus engineered looming residual)
+        - DNg02: thrust/altitude deviations around hover = weight
+        - DNa02 L−R and DNg02 L−R → yaw (bilateral, left/right symmetric)
         - DNb: baseline motor activity
         
         Args:
             brain_activity: Neural activity array
-            exploration_signal: Optional exploration bias
+            exploration_signal: Ignored here. Exploration biases visual input
+                in the runner; it must not override the biological action.
         
         Returns:
             Action: [thrust_forward, thrust_up, roll, pitch, yaw]
@@ -390,49 +397,33 @@ class BiologicalFlightController:
         dng = self._normalized_readout("DNg02", brain_activity)
         dnb = self._normalized_readout("DNb", brain_activity)
         dnp = self._normalized_readout("DNp01", brain_activity)
+        # Engineered residual: strong looming can still trigger escape if DNp01 is silent.
+        loom_assist = float(np.tanh(3.0 * (self._last_looming - 0.35)))
+        dnp_eff = max(dnp, loom_assist)
 
-        # Tonic engineered hover/cruise; DN terms are bounded tanh deviations.
-        thrust_forward = 0.45 + 0.25 * dng
-        thrust_up = 0.45 + 0.15 * dng
-        roll = 0.15 * dnb
+        # Rest lift = weight; DNg02 is a bounded deviation around hover.
+        thrust_forward = 0.35 + 0.25 * dng
+        thrust_up = self.hover_action + 0.15 * dng
+        roll = 0.12 * dnb
 
         # DNp01: event trigger on threshold crossing, not a continuous pitch command
-        if dnp > 0.55 and self.dnp01_prev_z <= 0.55:
+        if dnp_eff > 0.55 and self.dnp01_prev_z <= 0.55:
             self.escape_timer = self.escape_duration
-        self.dnp01_prev_z = dnp
+        self.dnp01_prev_z = dnp_eff
         pitch = 0.35 if self.escape_timer > 0 else 0.0
         if self.escape_timer > 0:
             self.escape_timer -= 1
 
-        yaw = 0.0
-        dna01_live = self._channel_usable("DNa01", brain_activity)
-        dna02_live = self._channel_usable("DNa02", brain_activity)
-        if dna01_live and dna02_live:
-            yaw = 0.4 * (
-                self._normalized_readout("DNa01", brain_activity)
-                - self._normalized_readout("DNa02", brain_activity)
-            )
-        elif dna02_live:
-            yaw_lr = self._normalized_readout("DNa02_L", brain_activity) - self._normalized_readout(
-                "DNa02_R", brain_activity
-            )
-            if abs(yaw_lr) > 1e-4:
-                yaw = 0.4 * yaw_lr
-            else:
-                yaw = 0.4 * self._normalized_readout("DNa02", brain_activity)
-        else:
-            yaw = 0.4 * (
-                self._normalized_readout("DNg02_L", brain_activity)
-                - self._normalized_readout("DNg02_R", brain_activity)
-            )
+        yaw = 0.45 * (
+            self._normalized_readout("DNa02_L", brain_activity)
+            - self._normalized_readout("DNa02_R", brain_activity)
+        ) + 0.35 * (
+            self._normalized_readout("DNg02_L", brain_activity)
+            - self._normalized_readout("DNg02_R", brain_activity)
+        )
         
-        # Assemble action
+        # Assemble action. exploration_signal is intentionally unused here.
         action = np.array([thrust_forward, thrust_up, roll, pitch, yaw])
-        
-        # Add exploration if provided (keep modest so actions do not rail)
-        if exploration_signal is not None:
-            action[0] += 0.2 * exploration_signal[0]
-            action[4] += 0.25 * exploration_signal[1]
         
         # Smooth
         action = self.alpha * action + (1 - self.alpha) * self.prev_action

@@ -175,6 +175,136 @@ def test_dnp01_is_event_trigger_not_continuous_pitch():
     assert np.mean(np.abs(pitches[-10:])) < 0.9
 
 
+def test_yaw_uses_bilateral_dna02_and_dng02():
+    """Yaw is L−R of DNa02 and DNg02, so left vs right drive opposite turns."""
+    from threedfly.control.controller import BiologicalFlightController
+
+    n, annotations, body_ids, body_id_to_idx = _synthetic_bio_annotations()
+    controller = BiologicalFlightController(
+        n_neurons=n,
+        annotations=annotations,
+        body_ids=body_ids,
+        body_id_to_idx=body_id_to_idx,
+        warmup_steps=10,
+    )
+    rest = np.full(n, 1.0)
+    for _ in range(6):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    controller.prev_action[:] = 0.0
+    controller.alpha = 1.0
+
+    left_high = rest.copy()
+    left_high[controller.output_mapping["DNa02_L"]] = 6.0
+    left_high[controller.output_mapping["DNg02_L"]] = 6.0
+    yaw_left = float(controller.compute_action(left_high)[4])
+
+    controller.prev_action[:] = 0.0
+    right_high = rest.copy()
+    right_high[controller.output_mapping["DNa02_R"]] = 6.0
+    right_high[controller.output_mapping["DNg02_R"]] = 6.0
+    yaw_right = float(controller.compute_action(right_high)[4])
+
+    assert yaw_left * yaw_right < 0, f"Expected opposite yaw, got {yaw_left:.3f} vs {yaw_right:.3f}"
+    assert abs(yaw_left) > 0.02 and abs(yaw_right) > 0.02
+
+
+def test_biological_controller_does_not_add_exploration_to_action():
+    """Exploration must bias sensory input, not override the DN action."""
+    from threedfly.control.controller import BiologicalFlightController
+
+    n, annotations, body_ids, body_id_to_idx = _synthetic_bio_annotations()
+    controller = BiologicalFlightController(
+        n_neurons=n,
+        annotations=annotations,
+        body_ids=body_ids,
+        body_id_to_idx=body_id_to_idx,
+        warmup_steps=8,
+    )
+    rest = np.full(n, 1.0)
+    for _ in range(5):
+        controller.record_resting_rates(rest)
+    controller.finalize_warmup()
+    controller.prev_action[:] = 0.0
+    controller.alpha = 1.0
+    bio = controller.compute_action(rest)
+    controller.prev_action[:] = 0.0
+    mixed = controller.compute_action(rest, exploration_signal=np.array([1.0, 1.0, 0.0]))
+    assert np.allclose(bio, mixed), "Biological action must ignore exploration_signal"
+
+
+def test_exploration_policy_biases_luminance_not_world_heading():
+    """Turn signal is a heading error in [-1, 1]; apply_visual_bias shifts L vs R."""
+    from threedfly.vision import PointCloudMapper
+
+    policy = ExplorationPolicy(exploration_weight=1.0, random_exploration_prob=0.0)
+    mapper = PointCloudMapper(voxel_size=0.1)
+    pos = np.array([0.0, 0.0, 1.5])
+    signal = policy.compute_exploration_signal(pos, mapper, current_heading=0.0)
+    assert signal.shape == (3,)
+    assert abs(signal[1]) <= 1.0 + 1e-6
+    left, right = policy.apply_visual_bias(0.2, 0.2, np.array([0.0, 0.8, 0.0]))
+    assert left > right
+    left2, right2 = policy.apply_visual_bias(0.2, 0.2, np.array([0.0, -0.8, 0.0]))
+    assert right2 > left2
+
+
+def test_strong_looming_raises_dnp01_above_rest():
+    """Strong synthetic looming into LPLC2/LC4 must raise DNp01 on a real-style pipeline."""
+    from scipy import sparse
+    from threedfly.connectome.simulator import RateSimulator
+    from threedfly.control.controller import BiologicalFlightController
+
+    n, annotations, body_ids, body_id_to_idx = _synthetic_bio_annotations()
+    controller = BiologicalFlightController(
+        n_neurons=n,
+        annotations=annotations,
+        body_ids=body_ids,
+        body_id_to_idx=body_id_to_idx,
+        warmup_steps=5,
+    )
+    adj = sparse.csr_matrix((n, n), dtype=np.float32).tolil()
+    dnp = controller.output_mapping["DNp01"]
+    loom = np.concatenate([
+        controller.input_mapping["looming_left"],
+        controller.input_mapping["looming_right"],
+    ])
+    assert len(dnp) > 0 and len(loom) > 0
+    for pre in loom:
+        for post in dnp:
+            adj[int(pre), int(post)] = 8.0
+    brain = RateSimulator(adj.tocsr(), dt=0.010, syn_weight_scale=0.5)
+
+    rest_rates = []
+    for _ in range(8):
+        controller.set_visual_input(
+            left_luminance=0.0,
+            right_luminance=0.0,
+            optic_flow_features={},
+            looming_features={"left": 0.0, "right": 0.0},
+            brain=brain,
+        )
+        rates = brain.step()
+        controller.record_resting_rates(rates)
+        rest_rates.append(float(rates[dnp].mean()))
+    controller.finalize_warmup()
+    rest = float(np.mean(rest_rates[-4:]))
+
+    driven = []
+    for _ in range(20):
+        controller.set_visual_input(
+            left_luminance=0.0,
+            right_luminance=0.0,
+            optic_flow_features={},
+            looming_features={"left": 4.0, "right": 4.0},
+            brain=brain,
+        )
+        rates = brain.step()
+        driven.append(float(rates[dnp].mean()))
+    peak = float(np.max(driven))
+    assert peak > rest + 0.15, f"DNp01 did not rise under looming (rest={rest:.4f} peak={peak:.4f})"
+
+
 def test_yaw_falls_back_when_dna01_silent():
     """If DNa01 is dead, yaw should use DNa02 or DNg02 left-right difference."""
     from threedfly.control.controller import BiologicalFlightController

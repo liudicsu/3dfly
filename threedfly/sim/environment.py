@@ -8,6 +8,18 @@ from pathlib import Path
 
 from threedfly.sim.mjcf import get_fly_mjcf
 
+# Engineered aero: linear+quadratic drag sized for ~1 m/s cruise, not a CFD model.
+DRAG_LINEAR = 0.008       # N·s/m
+DRAG_QUADRATIC = 0.014    # N·s²/m²
+# Weak engineered altitude hold around a mid-room hover height.
+HOVER_Z = 1.5
+ALTITUDE_HOLD_KP = 0.025  # N/m
+ALTITUDE_HOLD_KD = 0.012  # N·s/m
+# Room walls at ±5 m, height ≈ 4 m; clamp only for real penetrations.
+ROOM_XY_LIMIT = 4.85
+ROOM_Z_MIN = 0.25
+ROOM_Z_MAX = 3.70
+
 
 class FlyEnvironment:
     """
@@ -55,10 +67,46 @@ class FlyEnvironment:
         self.torque_max = 5e-6
         # Engineered haltere-like angular-rate damping (not connectome-derived).
         self.haltere_kd = 2e-6
+        self.drag_linear = DRAG_LINEAR
+        self.drag_quadratic = DRAG_QUADRATIC
+        self.hover_z = HOVER_Z
+        self.altitude_hold_kp = ALTITUDE_HOLD_KP
+        self.altitude_hold_kd = ALTITUDE_HOLD_KD
+        
+        self._fly_body_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, "fly"
+        )
+        self._fly_geom_ids = self._collect_fly_geom_ids()
         
         # State tracking
         self.time = 0.0
         self.step_count = 0
+
+    def _collect_fly_geom_ids(self) -> set:
+        """Geoms whose body is the fly or a descendant of the fly body."""
+        fly_bodies = set()
+        for bid in range(self.model.nbody):
+            b = bid
+            while b > 0:
+                if b == self._fly_body_id:
+                    fly_bodies.add(bid)
+                    break
+                parent = int(self.model.body_parentid[b])
+                if parent == b:
+                    break
+                b = parent
+        return {
+            gid
+            for gid in range(self.model.ngeom)
+            if int(self.model.geom_bodyid[gid]) in fly_bodies
+        }
+
+    @property
+    def hover_action(self) -> float:
+        """Normalized up-thrust that balances weight (lift = mg at rest)."""
+        mass = float(self.model.body_subtreemass[self._fly_body_id])
+        weight = mass * abs(float(self.model.opt.gravity[2]))
+        return float(np.clip(weight / max(self.thrust_max, 1e-12), 0.0, 1.0))
         
     def reset(self, seed: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -113,6 +161,30 @@ class FlyEnvironment:
         self.data.ctrl[2] -= self.haltere_kd * angvel[0]
         self.data.ctrl[3] -= self.haltere_kd * angvel[1]
         self.data.ctrl[4] -= self.haltere_kd * angvel[2]
+        
+        # Aerodynamic drag F = -b v - c |v| v, plus a weak engineered altitude hold.
+        # Applied at subtree COM (same point as thorax_ctrl) so drag does not tumble the fly.
+        vel = self.data.qvel[:3]
+        speed = float(np.linalg.norm(vel))
+        drag = -self.drag_linear * vel
+        if speed > 1e-8:
+            drag = drag - self.drag_quadratic * speed * vel
+        z_err = self.hover_z - float(self.data.qpos[2])
+        alt = self.altitude_hold_kp * z_err - self.altitude_hold_kd * float(vel[2])
+        force = np.array([drag[0], drag[1], drag[2] + alt], dtype=np.float64)
+        torque = np.zeros(3, dtype=np.float64)
+        point = self.data.subtree_com[self._fly_body_id].copy()
+        self.data.xfrc_applied[:] = 0.0
+        self.data.qfrc_applied[:] = 0.0
+        mujoco.mj_applyFT(
+            self.model,
+            self.data,
+            force,
+            torque,
+            point,
+            self._fly_body_id,
+            self.data.qfrc_applied,
+        )
         
         # Step physics
         mujoco.mj_step(self.model, self.data)
@@ -225,23 +297,23 @@ class FlyEnvironment:
         return R
     
     def check_collision(self) -> bool:
-        """Check if fly has collided with environment."""
-        # Simple check: z position too low or velocity too high
+        """True only for ground proximity or fly-vs-environment contacts.
+
+        Overspeed is not a collision (drag limits terminal speed instead).
+        Fly geoms are identified by body ancestry, not geom index 0 (the floor).
+        """
         pos = self.get_fly_position()
-        vel = self.get_fly_velocity()
-        
-        if pos[2] < 0.1:  # Too close to ground
+        if pos[2] < 0.1:
             return True
-        
-        if np.linalg.norm(vel) > 5.0:  # Too fast (unlikely for fly)
-            return True
-        
-        # Check contacts
+
+        fly_geoms = self._fly_geom_ids
         for i in range(self.data.ncon):
             contact = self.data.contact[i]
-            if contact.geom1 == 0 or contact.geom2 == 0:  # thorax geom
+            g1_fly = int(contact.geom1) in fly_geoms
+            g2_fly = int(contact.geom2) in fly_geoms
+            if g1_fly != g2_fly:
                 return True
-        
+
         return False
     
     def recover_from_collision(self, recovery_distance: float = 0.15) -> None:
@@ -259,12 +331,21 @@ class FlyEnvironment:
         # Minimal deterministic nudge — never a random teleport
         recovery_offset = np.zeros(3)
         
-        if pos[2] < 0.3:
+        if pos[2] < ROOM_Z_MIN:
             recovery_offset[2] = recovery_distance
-        elif pos[2] > 2.3:
+        elif pos[2] > ROOM_Z_MAX:
             recovery_offset[2] = -recovery_distance
         elif self.data.ncon > 0:
-            contact = self.data.contact[0]
+            contact = None
+            for i in range(self.data.ncon):
+                c = self.data.contact[i]
+                g1_fly = int(c.geom1) in self._fly_geom_ids
+                g2_fly = int(c.geom2) in self._fly_geom_ids
+                if g1_fly != g2_fly:
+                    contact = c
+                    break
+            if contact is None:
+                contact = self.data.contact[0]
             contact_normal = contact.frame[:3]
             if np.linalg.norm(contact_normal) > 0.1:
                 contact_normal = contact_normal / np.linalg.norm(contact_normal)
@@ -281,9 +362,10 @@ class FlyEnvironment:
         )
         
         self.data.qpos[:3] = pos + recovery_offset
-        self.data.qpos[0] = np.clip(self.data.qpos[0], -1.9, 1.9)
-        self.data.qpos[1] = np.clip(self.data.qpos[1], -1.9, 1.9)
-        self.data.qpos[2] = np.clip(self.data.qpos[2], 0.3, 2.2)
+        # Clamp only at actual room bounds minus a small margin, never an inner ±1.9 box.
+        self.data.qpos[0] = np.clip(self.data.qpos[0], -ROOM_XY_LIMIT, ROOM_XY_LIMIT)
+        self.data.qpos[1] = np.clip(self.data.qpos[1], -ROOM_XY_LIMIT, ROOM_XY_LIMIT)
+        self.data.qpos[2] = np.clip(self.data.qpos[2], ROOM_Z_MIN, ROOM_Z_MAX)
         self.data.qvel[:3] *= 0.3
         
         mujoco.mj_forward(self.model, self.data)

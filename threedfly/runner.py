@@ -16,6 +16,7 @@ from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
 from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
 from threedfly.control.controller import BiologicalFlightController
+from threedfly.control.exploration import heading_from_quaternion
 from threedfly.viz import Visualizer
 
 
@@ -122,7 +123,9 @@ def run_simulation(
         print("  No annotations found, using legacy controller")
         controller = FlightController(n_neurons, use_rate_model=(simulator_type == "rate"))
     
-    explorer = ExplorationPolicy(exploration_weight=1.5, random_exploration_prob=0.05)
+    explorer = ExplorationPolicy(exploration_weight=0.8, random_exploration_prob=0.05)
+    if use_biological:
+        controller.hover_action = env.hover_action
     
     print("\n[7/8] Initializing visualization...")
     if viz_mode != "none":
@@ -196,14 +199,26 @@ def run_simulation(
             fly_velocity
         )
         
+        # Exploration biases sensory input before the brain step; it does not override action.
+        fly_pos = env.get_fly_position()
+        heading = heading_from_quaternion(env.get_fly_orientation())
+        exploration_signal = explorer.compute_exploration_signal(
+            fly_pos, mapper, current_heading=heading
+        )
+
         # Feed to brain
         if use_biological:
             optic_flow_features = extract_t4_t5_flow_features(
                 flow_info.get("flow_left"), flow_info.get("flow_right")
             )
+            left_lum, right_lum = explorer.apply_visual_bias(
+                visual_features["left_ommatidia"].mean(),
+                visual_features["right_ommatidia"].mean(),
+                exploration_signal,
+            )
             controller.set_visual_input(
-                left_luminance=visual_features["left_ommatidia"].mean(),
-                right_luminance=visual_features["right_ommatidia"].mean(),
+                left_luminance=left_lum,
+                right_luminance=right_lum,
                 optic_flow_features=optic_flow_features,
                 looming_features={
                     "left": visual_features["looming_features"][:4].mean(),
@@ -256,12 +271,8 @@ def run_simulation(
             target_width=w
         )
         
-        # Get exploration signal
-        fly_pos = env.get_fly_position()
-        exploration_signal = explorer.compute_exploration_signal(fly_pos, mapper)
-        
-        # Compute control action
-        action = controller.compute_action(brain_activity, exploration_signal)
+        # Compute control action (biological path ignores exploration_signal)
+        action = controller.compute_action(brain_activity)
         
         # Step environment
         left_img, right_img, info = env.step(action)

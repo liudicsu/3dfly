@@ -4,6 +4,12 @@ import numpy as np
 from typing import Optional, Tuple
 
 
+def heading_from_quaternion(quat: np.ndarray) -> float:
+    """Yaw about +Z from a MuJoCo (w, x, y, z) quaternion."""
+    w, x, y, z = [float(v) for v in quat]
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+
 class ExplorationPolicy:
     """
     Curiosity-driven exploration using point cloud occupancy.
@@ -35,20 +41,26 @@ class ExplorationPolicy:
         self,
         current_position: np.ndarray,
         point_cloud_mapper,
+        current_heading: Optional[float] = None,
     ) -> np.ndarray:
         """
-        Compute exploration bias signal.
+        Compute exploration bias for *sensory input*, not motor override.
         
         Args:
             current_position: Current fly position (x, y, z)
             point_cloud_mapper: PointCloudMapper instance
+            current_heading: Body yaw (rad). Turn is heading error in [-1, 1],
+                never a world-frame heading used as a yaw command.
         
         Returns:
             Exploration signal [forward, turn, up]
         """
-        # Random exploration
+        # Random exploration (still an input bias, clipped)
         if np.random.rand() < self.random_prob:
-            return np.random.randn(3) * 0.5
+            rnd = np.random.randn(3) * 0.35
+            rnd[1] = float(np.clip(rnd[1], -1.0, 1.0))
+            rnd[2] = 0.0
+            return rnd
         
         # Sample exploration scores around current position
         scores = []
@@ -78,20 +90,30 @@ class ExplorationPolicy:
         direction_norm = np.linalg.norm(direction[:2])  # Horizontal distance
         
         if direction_norm > 0.1:
-            direction_unit = direction / direction_norm
+            desired = float(np.arctan2(direction[1], direction[0]))
         else:
-            # No strong preference, continue forward
-            direction_unit = np.array([1, 0, 0])
+            desired = float(current_heading or 0.0)
         
-        # Exploration signal (pure horizontal - MAXIMUM forward bias)
-        forward_signal = 2.0  # Maximum forward encouragement
-        turn_signal = np.arctan2(direction_unit[1], direction_unit[0])  # Desired heading
-        up_signal = 0.0  # Absolutely no vertical exploration
+        heading = 0.0 if current_heading is None else float(current_heading)
+        error = (desired - heading + np.pi) % (2.0 * np.pi) - np.pi
+        turn_signal = float(np.clip(error / (np.pi / 2.0), -1.0, 1.0))
         
-        signal = np.array([forward_signal, turn_signal, up_signal])
-        signal *= self.exploration_weight
-        
+        forward_signal = 0.3 * self.exploration_weight
+        signal = np.array([forward_signal, turn_signal, 0.0])
         return signal
+
+    def apply_visual_bias(
+        self,
+        left_luminance: float,
+        right_luminance: float,
+        signal: np.ndarray,
+        scale: float = 0.4,
+    ) -> Tuple[float, float]:
+        """Bias left vs right photoreceptor drive toward the unexplored side."""
+        turn = float(np.clip(signal[1], -1.0, 1.0))
+        left = float(left_luminance) + scale * max(turn, 0.0)
+        right = float(right_luminance) + scale * max(-turn, 0.0)
+        return left, right
     
     def get_frontier_directions(
         self,
