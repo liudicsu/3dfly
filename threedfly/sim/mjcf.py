@@ -99,15 +99,17 @@ FLY_MJCF = """
         <geom name="head_geom" type="mesh" mesh="head_mesh" 
               material="fly_body_mat" mass="0.0002" contype="0" conaffinity="0"/>
         
-        <camera name="left_eye" pos="0.003 0.006 0.002" 
-                xyaxes="0 -1 0  0.342 0 0.940"
-                fovy="90" mode="fixed"/>
-        <!-- Right X is mirrored (+Y). Y must also flip so X×Y stays ≈ −X
-             (MuJoCo looks along −Z). The old Y=(0.342,0,0.940) made the
-             right eye look backward and produced a fixed DNp03_L bias. -->
+        <!-- 120° FOV, 30° outward cant. A 90° forward FOV misses the ±Y
+             walls (bearing 90°) so DNp03 never saw a true side loom. -->
+        <camera name="left_eye" pos="0.003 0.006 0.002"
+                xyaxes="0.500 -0.866 0.000  0.296 0.171 0.940"
+                fovy="120" mode="fixed"/>
+        <!-- Right X is mirrored (+Y). Y must also flip so X×Y stays forward
+             (MuJoCo looks along −Z). That inverts the image; stereo_to_hex
+             mirrors V so flyvis still sees upright flow. -->
         <camera name="right_eye" pos="0.003 -0.006 0.002"
-                xyaxes="0 1 0  -0.342 0 -0.940"
-                fovy="90" mode="fixed"/>
+                xyaxes="0.500 0.866 0.000  -0.296 0.171 -0.940"
+                fovy="120" mode="fixed"/>
       </body>
       
       <!-- Wings: stroke hinge for visual flapping; aero force is applied in Python. -->
@@ -230,6 +232,41 @@ def get_fly_mjcf() -> str:
     """Get MJCF XML string for fly environment."""
     meshdir = str(ASSETS_DIR.absolute())
     return FLY_MJCF.format(meshdir=meshdir)
+
+
+# Match Drosophila-ish frontolateral coverage: each eye cants out 30°
+# (left toward +Y, right toward −Y) with a 20° downward tilt and 120° fovy.
+EYE_CANT_DEG = 30.0
+EYE_DOWN_DEG = 20.0
+EYE_FOVY_DEG = 120.0
+
+
+def eye_xyaxes(side: str, cant_deg: float = EYE_CANT_DEG, down_deg: float = EYE_DOWN_DEG):
+    """6-float MuJoCo xyaxes for an outward-canted eye.
+
+    Image-right is nasal on both sides. The right eye's Y axis is flipped so
+    look stays forward (the image is inverted; ``stereo_to_hex`` V-flips).
+    """
+    import numpy as np
+
+    if side not in ("L", "R"):
+        raise ValueError(f"side must be L or R, got {side!r}")
+    a = np.deg2rad(float(cant_deg))
+    d = np.deg2rad(float(down_deg))
+    look = np.array(
+        [np.cos(d) * np.cos(a), np.cos(d) * np.sin(a), -np.sin(d)],
+        dtype=float,
+    )
+    look = look / float(np.linalg.norm(look))
+    z = -look
+    x = np.cross(np.array([0.0, 0.0, 1.0]), z)
+    x = x / float(np.linalg.norm(x))
+    y = np.cross(z, x)
+    y = y / float(np.linalg.norm(y))
+    if side == "R":
+        x = np.array([x[0], -x[1], x[2]], dtype=float)
+        y = np.array([-y[0], y[1], -y[2]], dtype=float)
+    return [float(v) for v in np.concatenate([x, y])]
 
 
 def camera_look_direction(xyaxes) -> "object":

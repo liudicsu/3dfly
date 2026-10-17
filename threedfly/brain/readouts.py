@@ -27,6 +27,12 @@ class DNReadout:
     dng02_L: float = 0.0
     dng02_R: float = 0.0
     dng02_amp: float = 0.0  # mean(L, R) wing-amplitude proxy; NO L−R yaw term
+    lplc2_L: float = 0.0
+    lplc2_R: float = 0.0
+    # Per-eye hex mean. Room walls are bright filled fields; DNp03 tracks
+    # compact dark looms (hex-swap) but not these, so laterality uses eyes.
+    eye_L: float = 0.0
+    eye_R: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return self.__dict__.copy()
@@ -111,6 +117,8 @@ def read_dns(rates: np.ndarray, index: ReadoutIndex) -> DNReadout:
         dng02_L=L,
         dng02_R=R,
         dng02_amp=0.5 * (L + R),
+        lplc2_L=_mean(rates, index.groups.get("LPLC2|L", np.zeros(0, dtype=int))),
+        lplc2_R=_mean(rates, index.groups.get("LPLC2|R", np.zeros(0, dtype=int))),
     )
 
 

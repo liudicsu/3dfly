@@ -166,3 +166,36 @@ def test_set_pose_places_fly():
     assert pos[1] == pytest.approx(-2.0, abs=1e-6)
     assert pos[2] == pytest.approx(1.6, abs=1e-6)
     env.close()
+
+
+def test_positive_yaw_command_increases_heading():
+    """Body +Y is left; +action[4] / L>R stroke must increase heading."""
+    from threedfly.control.exploration import heading_from_quaternion
+
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.set_pose((0.0, 0.0, 1.5), yaw=0.0)
+    hover = env.hover_action
+    h0 = heading_from_quaternion(env.get_fly_orientation())
+    for _ in range(25):
+        env.step(np.array([0.0, hover, 0.0, 0.0, 1.0]))
+    h1 = heading_from_quaternion(env.get_fly_orientation())
+    env.close()
+    d = float(np.arctan2(np.sin(h1 - h0), np.cos(h1 - h0)))
+    assert d > 0.05, f"+yaw should increase heading (left), got Δ={d:.3f}"
+
+
+def test_left_minus_right_stroke_increases_heading():
+    from threedfly.control.exploration import heading_from_quaternion
+
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.set_pose((0.0, 0.0, 1.5), yaw=0.0)
+    hover = env.hover_action
+    h0 = heading_from_quaternion(env.get_fly_orientation())
+    for _ in range(25):
+        env.step(np.array([0.0, hover, 0.0, 0.0, 0.0]), wing_strokes=(0.85, 0.15))
+    h1 = heading_from_quaternion(env.get_fly_orientation())
+    env.close()
+    d = float(np.arctan2(np.sin(h1 - h0), np.cos(h1 - h0)))
+    assert d > 0.05, f"L>R stroke should increase heading, got Δ={d:.3f}"

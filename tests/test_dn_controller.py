@@ -85,6 +85,20 @@ def test_dng02_does_not_contribute_yaw():
     assert c.last_wing_strokes[0] == pytest.approx(c.last_wing_strokes[1])
 
 
+def test_dn_yaw_drives_differential_strokes_not_dng02():
+    """+yaw (left turn) → more left stroke. DNg02 only sets the mean."""
+    c = _ctl()
+    c.compute(DNReadout(dng02_amp=5.0))
+    left_turn = DNReadout(dnp03_L=0.10, dnp03_R=1.30, dng02_amp=5.0)
+    c.compute(left_turn)
+    assert c.last_wing_strokes[0] > c.last_wing_strokes[1] + 0.02
+    c.reset()
+    c.compute(DNReadout(dng02_amp=5.0))
+    right_turn = DNReadout(dnp03_L=1.30, dnp03_R=0.10, dng02_amp=5.0)
+    c.compute(right_turn)
+    assert c.last_wing_strokes[1] > c.last_wing_strokes[0] + 0.02
+
+
 def test_dna02_lr_steers_without_escape():
     c = _ctl()
     left = DNReadout(dna02_L=8.0, dna02_R=0.0, dng02_amp=5.0)
@@ -209,3 +223,106 @@ def test_per_side_baseline_removes_dc_bias():
     assert abs(yaw) < 0.05
     left_loom = DNReadout(dnp03_L=1.30, dnp03_R=0.35, dng02_amp=5.0, dnp01_L=1.8, dnp01_R=1.7)
     assert float(c.compute(left_loom)[4]) < -0.05
+
+
+def test_last8_rest_allows_loom_above_prewarm_peak():
+    """Last prewarm frame can be the DC peak; rest is the last-8 mean."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=2, dnp01_escape_hold_steps=2)
+    peak = DNReadout(dnp01_L=2.34, dnp01_R=2.10, dng02_amp=5.0)
+    c.capture_baseline(peak, dnp01_rest=2.04)
+    for _ in range(6):
+        c.compute(DNReadout(dnp01_L=2.40, dnp01_R=2.10, dng02_amp=5.0))
+    assert c.brain_escape_count == 0
+    loom = DNReadout(dnp01_L=2.70, dnp01_R=2.20, dnp03_L=1.2, dnp03_R=0.4, dng02_amp=5.0)
+    for _ in range(4):
+        c.compute(loom)
+    assert c.brain_escape_count == 1
+
+
+def test_post_baseline_delay_skips_takeoff_transient():
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=8, dnp01_escape_hold_steps=2)  # short delay for the unit test
+    rest = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    transient = DNReadout(dnp01_L=2.50, dnp01_R=1.90, dnp03_L=1.2, dnp03_R=0.3, dng02_amp=5.0)
+    for _ in range(7):
+        c.compute(transient)
+    assert c.brain_escape_count == 0
+    c.compute(transient)
+    c.compute(transient)
+    assert c.brain_escape_count == 1
+
+
+def test_baseline_eye_laterality_locks_approach_threat():
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(eye_L=0.22, eye_R=0.10, dnp03_L=0.2, dnp03_R=0.8, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    assert c._approach_threat == "L"
+    flipped = DNReadout(
+        dnp01_L=3.2,
+        eye_L=0.22,
+        eye_R=0.10,
+        dnp03_L=0.2,
+        dnp03_R=0.8,
+        dng02_amp=5.0,
+    )
+    act = c.compute(flipped)
+    assert c.escape_events[-1].threat_side == "L"
+    assert act[4] < -0.05
+
+
+def test_brighter_ipsilateral_eye_overrides_dnp03_for_threat():
+    """Room walls are bright fields; DNp03 may stay L-biased, the eye mean must not."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp03_L=0.50, dnp03_R=0.30, eye_L=0.15, eye_R=0.15, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    c.compute(rest)
+    right_wall = DNReadout(
+        dnp01_L=3.2,
+        dnp03_L=0.70,
+        dnp03_R=0.40,
+        eye_L=0.10,
+        eye_R=0.22,
+        dng02_amp=5.0,
+    )
+    act = c.compute(right_wall)
+    assert c.brain_escape_count == 1
+    assert c.escape_events[-1].threat_side == "R"
+    assert act[4] > 0.05
+
+
+def test_lplc2_can_override_dnp03_dc_for_threat_side():
+    """Right-wall loom: DNp03 may stay L-biased; LPLC2_R must still label R."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp03_L=0.40, dnp03_R=0.30, lplc2_L=1.0, lplc2_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    c.compute(rest)
+    right_wall = DNReadout(
+        dnp01_L=3.2,
+        dnp03_L=0.55,
+        dnp03_R=0.40,
+        lplc2_L=1.1,
+        lplc2_R=2.4,
+        dng02_amp=5.0,
+    )
+    act = c.compute(right_wall)
+    assert c.brain_escape_count == 1
+    assert c.escape_events[-1].threat_side == "R"
+    assert act[4] > 0.05
+
+
+def test_rising_edge_does_not_re_fire_while_dnp01_stays_high():
+    """r3: frozen rest + pinned wall kept rise ≥ 0.55 and fired every cooldown."""
+    c = _ctl(dnp01_warmup_steps=4)
+    cruise = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dng02_amp=5.0)
+    for _ in range(10):
+        c.compute(cruise)
+    assert c.brain_escape_count == 0
+    loom = DNReadout(dnp01_L=2.50, dnp01_R=1.90, dnp03_L=1.2, dnp03_R=0.3, dng02_amp=5.0)
+    for _ in range(40):
+        c.compute(loom)
+    assert c.brain_escape_count == 1
+    for _ in range(8):
+        c.compute(cruise)
+    assert c.brain_escape_count == 1
+    c.compute(loom)
+    assert c.brain_escape_count == 2

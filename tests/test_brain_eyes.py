@@ -43,6 +43,23 @@ def test_right_eye_looks_forward_not_backward():
     assert look_L[0] > 0.7, f"left eye should look +X, got {look_L}"
     assert look_R[0] > 0.7, f"right eye should look +X, got {look_R}"
     assert look_L[0] * look_R[0] > 0
+    # Outward cant: left toward +Y, right toward −Y, sagittal mirrors.
+    assert look_L[1] > 0.3, f"left eye should cant toward +Y, got {look_L}"
+    assert look_R[1] < -0.3, f"right eye should cant toward -Y, got {look_R}"
+    assert abs(look_L[1] + look_R[1]) < 0.05
+    assert "fovy=\"120\"" in mjcf.FLY_MJCF
+    xml_L = mjcf.parse_eye_xyaxes(mjcf.FLY_MJCF, "left_eye")
+    xml_R = mjcf.parse_eye_xyaxes(mjcf.FLY_MJCF, "right_eye")
+    assert xml_L == pytest.approx(mjcf.eye_xyaxes("L"), abs=0.002)
+    assert xml_R == pytest.approx(mjcf.eye_xyaxes("R"), abs=0.002)
+
+
+def test_hex_fovy_matches_camera():
+    from threedfly.brain.eyes import EYE_FOVY_DEG
+    from threedfly.sim import mjcf as mjcf_mod
+
+    assert EYE_FOVY_DEG == pytest.approx(mjcf_mod.EYE_FOVY_DEG)
+    assert EYE_FOVY_DEG == pytest.approx(120.0)
 
 
 def test_stereo_to_hex_pair():
@@ -52,3 +69,20 @@ def test_stereo_to_hex_pair():
     assert hL.shape == hR.shape == (N_HEX,)
     assert hL.mean() > 0.4
     assert hR.mean() == pytest.approx(0.0)
+
+
+def test_right_eye_hex_mirrors_v_for_inverted_camera():
+    """Right camera Y ≈ −Z; a top-of-image blob must map as if the image were upright."""
+    h = w = 64
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    img[: h // 4] = 255  # top rows
+    left = np.zeros_like(img)
+    hL, hR = stereo_to_hex(left, img)
+    uv = box_eye_uv()
+    # After V-flip, top-of-image (world-down on the inverted camera) lands
+    # on +yd hex cells (v_orig small → v_flip large? wait: top = small v).
+    # Flipped UV samples top rows at large v, i.e. −yd (bottom of lattice).
+    top = hR[uv[:, 1] < 0.35].mean()
+    bot = hR[uv[:, 1] > 0.65].mean()
+    assert bot > top + 0.2
+    assert float(hL.max()) == pytest.approx(0.0)

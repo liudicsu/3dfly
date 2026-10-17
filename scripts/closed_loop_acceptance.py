@@ -56,18 +56,18 @@ def lateral_loom_pose(side: str) -> dict:
     the distance decrease (classic loom) so DNp01 can rise over the EMA rest.
     The previous scenario faced +Y (yaw=π/2) and drove into the frontal wall.
     """
-    speed = 0.55
+    speed = 0.75
     if side == "L":
-        yaw = 0.55  # ~31° toward +Y (left)
+        yaw = 0.70  # ~40° toward +Y (left)
         return {
-            "pose": (-1.2, 3.1, 1.5),
+            "pose": (-0.8, 3.8, 1.5),
             "yaw": yaw,
             "vel": (speed * float(np.cos(yaw)), speed * float(np.sin(yaw)), 0.0),
         }
     if side == "R":
-        yaw = -0.55
+        yaw = -0.70
         return {
-            "pose": (-1.2, -3.1, 1.5),
+            "pose": (-0.8, -3.8, 1.5),
             "yaw": yaw,
             "vel": (speed * float(np.cos(yaw)), speed * float(np.sin(yaw)), 0.0),
         }
@@ -75,12 +75,16 @@ def lateral_loom_pose(side: str) -> dict:
 
 
 def open_space_pose() -> dict:
-    """Centre of the room, heading +X. Keep the run short so no wall is reached."""
+    """Genuinely open segment: start west of centre, heading +X.
+
+    320 steps × 0.02 s × ~0.6 m/s ≈ 3.8 m. From x=-2 that lands near x=+1.8,
+    still well off the ±5 m walls if heading stays roughly +X.
+    """
     return {
-        "pose": (0.0, 0.0, 1.5),
+        "pose": (-2.0, 0.0, 1.5),
         "yaw": 0.0,
-        "vel": (0.30, 0.0, 0.0),
-        "max_steps": 120,
+        "vel": (0.25, 0.0, 0.0),
+        "max_steps": 320,
     }
 
 
@@ -112,7 +116,10 @@ def _run_scenario(
     wall = 0
     t_wall = time.perf_counter()
     left_img, right_img = env.get_eye_images()
-    warmed = brain.prewarm(left_img, right_img, env.get_fly_angular_velocity())
+    n_pre = int(ctl.params.prewarm_steps)
+    if str(name).startswith("side_loom"):
+        n_pre = int(ctl.params.side_loom_prewarm_steps)
+    warmed = brain.prewarm(left_img, right_img, env.get_fly_angular_velocity(), n=n_pre)
     if warmed is not None:
         ctl.capture_baseline(warmed.readout)
         left_img, right_img = env.get_eye_images()
@@ -262,8 +269,8 @@ def main(argv=None) -> int:
 
     room_steps = 80 if args.quick else int(args.steps)
     side_steps = 40 if args.quick else max(160, min(400, args.steps // 5))
-    # 120 steps × 0.02 s × 0.35 m/s ≈ 0.8 m from the centre — stays off the walls.
-    open_steps = 40 if args.quick else 120
+    # ≥300 open steps; start at x=-2 so cruise does not reach the +X wall.
+    open_steps = 40 if args.quick else 320
     if args.quick:
         print("--quick: unofficial short movies", flush=True)
 

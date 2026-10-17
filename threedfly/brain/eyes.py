@@ -2,7 +2,7 @@
 
 flyvis ``BoxEye`` maps the cube-range hex lattice (extent=15 → 721 cells)
 into a square image. We do the same from rendered left/right cameras:
-hex angular coordinates → pixel UV using the 90° eye ``fovy``.
+hex angular coordinates → pixel UV using the eye ``fovy`` (120°).
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
     peak = 255.0 if float(samples.max() if samples.size else 0.0) > 1.5 else 1.0
     return np.clip(samples / peak, 0.0, 1.0)
 
-# MuJoCo left_eye / right_eye cameras (threedfly/sim/mjcf.py).
-EYE_FOVY_DEG = 90.0
+# MuJoCo left_eye / right_eye cameras (threedfly/sim/mjcf.py). Must match fovy.
+EYE_FOVY_DEG = 120.0
 
 
 @lru_cache(maxsize=4)
@@ -65,10 +65,15 @@ def stereo_to_hex(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Left and right MuJoCo eye images → (721,), (721,) hex frames.
 
-    Do **not** flip the right-eye UV here. The MJCF cameras are already
-    mirror-symmetric (image-right = nasal on both sides) once the right
-    camera Y axis is flipped so both look +X.
+    Horizontal: do **not** flip U. After the r3 right-camera X flip both
+    eyes have image-right = nasal and look +X.
+
+    Vertical: the same r3 Y flip that restored look=+X inverts the right
+    image (camera Y ≈ −Z). flyvis loom/T4/T5 expect upright flow, so V is
+    mirrored for the right eye only.
     """
     if uv is None:
         uv = box_eye_uv()
-    return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv)
+    uv_r = np.asarray(uv, dtype=np.float32).copy()
+    uv_r[:, 1] = 1.0 - uv_r[:, 1]
+    return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv_r)

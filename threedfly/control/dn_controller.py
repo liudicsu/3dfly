@@ -56,6 +56,10 @@ class DNFlightController:
         self._base: Optional[DNReadout] = None
         self._warmup: List[float] = []
         self.last_rise = 0.0
+        self._escape_armed = True
+        self._baseline_step: Optional[int] = None
+        self._rise_hold = 0
+        self._approach_threat = ""
 
     def bind_hover(self, hover_action: float) -> None:
         self.params.hover_up = float(hover_action)
@@ -77,12 +81,27 @@ class DNFlightController:
         self._base = None
         self._warmup.clear()
         self.last_rise = 0.0
+        self._escape_armed = True
+        self._baseline_step = None
+        self._rise_hold = 0
+        self._approach_threat = ""
 
-    def capture_baseline(self, readout: DNReadout) -> None:
+    def capture_baseline(self, readout: DNReadout, dnp01_rest: Optional[float] = None) -> None:
         """Snapshot per-side DN rest after brain/flyvis pre-warm."""
         self._base = replace(readout)
-        self.dnp01_rest = max(float(readout.dnp01_L), float(readout.dnp01_R))
+        if dnp01_rest is None:
+            self.dnp01_rest = max(float(readout.dnp01_L), float(readout.dnp01_R))
+        else:
+            self.dnp01_rest = float(dnp01_rest)
         self._warmup.clear()
+        self._baseline_step = int(self.steps)
+        self._rise_hold = 0
+        self._escape_armed = True
+        eye = float(readout.eye_L) - float(readout.eye_R)
+        if abs(eye) >= float(self.params.eye_threat_min):
+            self._approach_threat = "L" if eye > 0.0 else "R"
+        else:
+            self._approach_threat = ""
 
     def _centered(self, ro: DNReadout) -> DNReadout:
         b = self._base
@@ -102,6 +121,10 @@ class DNFlightController:
             dng02_L=float(ro.dng02_L),
             dng02_R=float(ro.dng02_R),
             dng02_amp=float(ro.dng02_amp),
+            lplc2_L=float(ro.lplc2_L) - float(b.lplc2_L),
+            lplc2_R=float(ro.lplc2_R) - float(b.lplc2_R),
+            eye_L=float(ro.eye_L) - float(b.eye_L),
+            eye_R=float(ro.eye_R) - float(b.eye_R),
         )
 
     def _dng_dev(self, ro: DNReadout) -> float:
@@ -117,7 +140,17 @@ class DNFlightController:
         yaw += self._norm_lr(ro.dnp15_L, ro.dnp15_R, p.dnp15_scale_hz, p.dnp15_yaw_gain)
         yaw -= self._norm_lr(ro.hse_L, ro.hse_R, p.hse_scale_hz, p.hse_yaw_damp)
         yaw += self._dnp03_yaw(ro)
+        yaw += self._eye_yaw(ro)
         return float(yaw)
+
+    def _raw_eye_lr(self) -> float:
+        raw = self._last_readout
+        return float(raw.eye_L) - float(raw.eye_R)
+
+    def _eye_yaw(self, ro: DNReadout) -> float:
+        """Brighter ipsilateral eye (raw, not baseline) → contralateral turn."""
+        p = self.params
+        return float(-p.eye_yaw_gain * _tanh(self._raw_eye_lr() / max(p.eye_scale, 1e-6)))
 
     def _dnp03_yaw(self, ro: DNReadout) -> float:
         p = self.params
@@ -125,10 +158,22 @@ class DNFlightController:
         right = max(0.0, float(ro.dnp03_R) - p.dnp03_deadzone_hz)
         return float(p.dnp03_yaw_gain * _tanh((right - left) / max(p.dnp03_scale_hz, 1e-6)))
 
+    def _loom_laterality(self, ro: DNReadout) -> float:
+        """Positive → left-side loom. DNp03 plus optic-lobe LPLC2."""
+        d03 = float(ro.dnp03_L) - float(ro.dnp03_R)
+        lplc = float(ro.lplc2_L) - float(ro.lplc2_R)
+        return d03 + float(self.params.lplc2_threat_gain) * lplc
+
     def _threat_side(self, ro: DNReadout) -> str:
-        if ro.dnp03_L > ro.dnp03_R + 1e-6:
+        if self._approach_threat:
+            return self._approach_threat
+        eye = self._raw_eye_lr()
+        if abs(eye) >= float(self.params.eye_threat_min):
+            return "L" if eye > 0.0 else "R"
+        d = self._loom_laterality(ro)
+        if d > 1e-6:
             return "L"
-        if ro.dnp03_R > ro.dnp03_L + 1e-6:
+        if d < -1e-6:
             return "R"
         return ""
 
@@ -164,17 +209,36 @@ class DNFlightController:
         if dnp01_raw >= p.rate_cap_hz - p.latch_eps_hz:
             self.dnp01_latch_steps += 1
 
-        if self._base is not None:
+        if self.dnp01_rest is not None:
+            rise = dnp01_raw - float(self.dnp01_rest)
+        elif self._base is not None:
             rise = max(float(ro.dnp01_L), float(ro.dnp01_R))
-            if self.dnp01_rest is None:
-                self.dnp01_rest = dnp01_raw
+            self.dnp01_rest = dnp01_raw
+            rise = 0.0
         else:
             rise = self._update_rest(dnp01_raw)
         self.last_rise = float(rise)
 
+        if rise < float(p.dnp01_rearm_delta_hz):
+            self._escape_armed = True
+            self._rise_hold = 0
+        if rise >= p.dnp01_escape_delta_hz:
+            self._rise_hold += 1
+        else:
+            self._rise_hold = 0
         warmed = self.steps >= int(p.dnp01_warmup_steps) or self._base is not None
+        post_base = True
+        hold_ok = True
+        if self._base is not None:
+            delay = int(p.dnp01_post_baseline_steps)
+            if self._baseline_step is not None:
+                post_base = (self.steps - self._baseline_step) >= delay
+            hold_ok = self._rise_hold >= int(p.dnp01_escape_hold_steps)
         brain_fire = (
             warmed
+            and post_base
+            and hold_ok
+            and self._escape_armed
             and self.escape_timer <= 0
             and self.escape_cooldown <= 0
             and rise >= p.dnp01_escape_delta_hz
@@ -188,6 +252,8 @@ class DNFlightController:
         if brain_fire or engineered_fire:
             self.escape_timer = int(p.escape_duration_steps)
             self.escape_cooldown = int(p.escape_duration_steps) + 4
+            if brain_fire:
+                self._escape_armed = False
             self._last_threat = self._threat_side(ro)
             if engineered_fire and not brain_fire:
                 if float(looming_left) > float(looming_right) + 1e-6:
@@ -214,8 +280,7 @@ class DNFlightController:
         hover = float(p.hover_up)
         thrust_forward = p.forward_bias + p.dng02_forward_gain * dng
         thrust_up = hover + p.dng02_up_gain * dng
-        stroke = float(np.clip(hover + p.dng02_stroke_gain * dng, 0.0, 1.0))
-        self.last_wing_strokes = np.array([stroke, stroke], dtype=np.float64)
+        stroke_mean = float(np.clip(hover + p.dng02_stroke_gain * dng, 0.0, 1.0))
 
         yaw = self._steer_yaw(ro)
         pitch = 0.0
@@ -224,7 +289,12 @@ class DNFlightController:
             thrust_forward = float(np.clip(thrust_forward + p.escape_forward, -1.0, 1.0))
             thrust_up = float(np.clip(thrust_up + p.escape_up, -1.0, 1.0))
             dodge = self._dnp03_yaw(ro)
-            yaw = yaw + p.escape_yaw_boost * dodge
+            if self._last_threat == "L":
+                yaw = -float(p.escape_yaw_kick) + 0.25 * dodge
+            elif self._last_threat == "R":
+                yaw = float(p.escape_yaw_kick) + 0.25 * dodge
+            else:
+                yaw = yaw + p.escape_yaw_boost * dodge
             if self.escape_events:
                 self.escape_events[-1].yaw = float(yaw)
             self.escape_timer -= 1
@@ -234,6 +304,15 @@ class DNFlightController:
         action = np.array([thrust_forward, thrust_up, 0.0, pitch, yaw], dtype=np.float64)
         action = p.action_alpha * action + (1.0 - p.action_alpha) * self.prev_action
         action = np.clip(action, -p.action_clip, p.action_clip)
+        # +yaw (left turn) → L−R > 0. DNg02 only sets the bilateral mean.
+        yaw_stroke = float(p.yaw_stroke_gain) * float(action[4])
+        self.last_wing_strokes = np.array(
+            [
+                float(np.clip(stroke_mean + yaw_stroke, 0.0, 1.0)),
+                float(np.clip(stroke_mean - yaw_stroke, 0.0, 1.0)),
+            ],
+            dtype=np.float64,
+        )
         self.prev_action = action.copy()
         self.steps += 1
         return action
@@ -261,6 +340,8 @@ class DNFlightController:
             "dnp01_rise": float(self.last_rise),
             "dnp03_L": float(ro.dnp03_L),
             "dnp03_R": float(ro.dnp03_R),
+            "eye_L": float(ro.eye_L),
+            "eye_R": float(ro.eye_R),
             "dng02_amp": float(ro.dng02_amp),
             "dnp01_latch_frac": self.dnp01_latch_frac,
             "wing_stroke_left": float(self.last_wing_strokes[0]),

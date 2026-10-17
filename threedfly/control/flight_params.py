@@ -43,20 +43,41 @@ class FlightParams:
     dnp01_rot_hz: float = M1_DNP01_ROT_MAX_HZ
     # Frozen rest; 0.55 sits above rotation (0.33) and below a 0.7 Hz slow loom.
     dnp01_escape_delta_hz: float = 0.55
+    # Re-arm only after rise falls below this (rising-edge). A frozen rest +
+    # pinned wall otherwise keeps rise ≥ 0.55 and fires every cooldown.
+    dnp01_rearm_delta_hz: float = 0.20
     dnp01_rest_tau_steps: float = 400.0  # unused while freeze_rest is True
     dnp01_freeze_rest: bool = True
     dnp01_warmup_steps: int = 40
+    # Self-generated takeoff / yaw optic flow raises DNp01 ~0.6 Hz in ~3 steps
+    # and fires before a side wall has a laterality. Wait out that transient.
+    dnp01_post_baseline_steps: int = 16
+    dnp01_escape_hold_steps: int = 3
     dnp01_escape_hz: float = M1_DNP01_LOOM_IPSI_HZ
     escape_duration_steps: int = 8
     escape_pitch: float = 0.45
     escape_forward: float = 0.30
     escape_up: float = 0.20
     escape_yaw_boost: float = 0.35
+    # Discrete contralateral kick from the DN threat side (DNp03+LPLC2).
+    # Continuous DNp03 alone is ~0.05 yaw when L/R are close; not enough to
+    # change heading before wall contact.
+    escape_yaw_kick: float = 0.55
+    # Map DN yaw onto the existing L−R stroke actuator (not DNg02 L−R).
+    # +yaw = left turn = more left stroke. Residual action[4] torque stays.
+    yaw_stroke_gain: float = 0.45
 
-    # --- Looming dodge (DNp03) ---
+    # --- Looming dodge (DNp03 + optic-lobe LPLC2) ---
     dnp03_yaw_gain: float = 0.90
     dnp03_scale_hz: float = 0.50
     dnp03_deadzone_hz: float = 0.04
+    # LPLC2 fallback when the two eyes are balanced (compact dark loom).
+    lplc2_threat_gain: float = 0.20
+    # Room walls brighten the ipsilateral eye. After baseline, that Δ is the
+    # loom laterality DNp03 failed to carry for filled bright fields.
+    eye_yaw_gain: float = 0.85
+    eye_scale: float = 0.06
+    eye_threat_min: float = 0.015
 
     # --- Course steering ---
     dna02_yaw_gain: float = 0.70
@@ -84,7 +105,9 @@ class FlightParams:
     engineered_loom_gain: float = 3.0
 
     # --- Closed-loop timing ---
-    prewarm_steps: int = 48
+    prewarm_steps: int = 80
+    # Side-loom onset: short settle so closing is a rise, not the DC peak.
+    side_loom_prewarm_steps: int = 16
     flyvis_stride: int = 2  # hold last flyvis voltages on odd sim steps
     flyvis_torch_threads: int = 2
 
@@ -96,11 +119,19 @@ class FlightParams:
 
     notes: Dict[str, str] = field(default_factory=lambda: {
         "escape": (
-            "DNp01 rise over *frozen* post-warmup rest ≥ 0.55 Hz "
-            "(above M1 rot 0.33, below loom 2.17); residual is opt-in"
+            "DNp01 rising-edge ≥ 0.55 Hz over frozen rest; side-loom uses a "
+            "16-step prewarm so closing is a rise (80-step settle eats it); residual off"
         ),
-        "dnp03": "continuous ipsi-loom → contralateral turn; per-side baseline subtracted",
+        "dnp03": (
+            "compact dark loom → DNp03/LPLC2; room walls use ipsilateral "
+            "eye-mean rise (bright field) for threat + contralateral yaw; "
+            "30° outward / 120° FOV so the side wall is on-eye"
+        ),
         "dng02": "mean(L,R) amplitude; NO L−R yaw",
+        "yaw_actuator": (
+            "DN yaw (DNa02+DNp15+DNp03−HSE) drives residual torque AND L−R "
+            "stroke (existing physics); DNg02 stays bilateral"
+        ),
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",
         "camera": "right-eye Y flipped so both cameras look +X (r2 bias source)",

@@ -253,6 +253,8 @@ class ClosedLoopBrain:
         t3 = time.perf_counter()
 
         ro = read_dns(self.core.r, self.index)
+        ro.eye_L = float(np.mean(hex_L)) if hex_L is not None else 0.0
+        ro.eye_R = float(np.mean(hex_R)) if hex_R is not None else 0.0
         ms = {
             "sample": 1000.0 * (t1 - t0),
             "flyvis": 1000.0 * (t2 - t1),

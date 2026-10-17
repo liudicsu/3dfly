@@ -95,8 +95,8 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     pose_l = mod.lateral_loom_pose("L")
     pose_r = mod.lateral_loom_pose("R")
     # Mostly +X, with a component toward the side wall (distance decreases).
-    assert 0.2 < pose_l["yaw"] < 0.8
-    assert -0.8 < pose_r["yaw"] < -0.2
+    assert 0.2 < pose_l["yaw"] < 0.9
+    assert -0.9 < pose_r["yaw"] < -0.2
     assert pose_l["pose"][1] > 2.5
     assert pose_r["pose"][1] < -2.5
     assert pose_l["vel"][1] > 0.0
@@ -105,5 +105,5 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert abs(pose_l["yaw"] - np.pi / 2) > 0.7
     open_p = mod.open_space_pose()
     assert open_p["yaw"] == pytest.approx(0.0)
-    assert open_p["max_steps"] <= 120
-    assert abs(open_p["pose"][0]) < 0.1 and abs(open_p["pose"][1]) < 0.1
+    assert open_p["max_steps"] >= 300
+    assert open_p["pose"][0] < -1.0 and abs(open_p["pose"][1]) < 0.1
