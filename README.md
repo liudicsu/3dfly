@@ -23,6 +23,32 @@ A research simulator where a male fruit fly's brain, structured by the real [Mal
 
 **Important scientific note**: This is a *connectome-structured simulator* with engineered I/O mapping, not a claim of neuron-for-neuron biological accuracy. The brain dynamics use simplified LIF/rate models applied to the synaptic graph. **NEW**: Depth estimation now uses **motion parallax and optic flow** (the primary depth cues real fruit flies use) instead of arbitrary mid-network readouts. Optical flow is computed from consecutive frames, combined with flight velocity (egomotion), routed through the connectome (set_input → simulate → readout), and decoded from visual neuron population activity into a 12×16 spatial depth map. This approach is biologically motivated but the flow extraction, parallax calculation, and neural readout are hand-designed engineering approximations, not biologically validated.
 
+### Biological Mapping (NEW)
+
+**The simulation now supports biologically-grounded input/output mapping** using neuron type annotations from the MaleCNS connectome:
+
+**What is measured connectome data:**
+- Synaptic connectivity (~10M connections, filtered from 150M raw)
+- Neuron type annotations (R1-R6, L1-L5, T4/T5, LPLC2, LC4, DNp01, DNg02, DNa, DNb, etc.)
+- Soma and root side information (left/right brain hemisphere)
+- Neurotransmitter identities (acetylcholine, GABA, glutamate, etc.)
+
+**What is engineered (hand-designed bridges):**
+- Image → neuron encoding:
+  - Luminance → R1-R6 photoreceptors (split by brain hemisphere)
+  - Optic flow → T4a-d / T5a-d direction-selective neurons
+  - Looming detection → LPLC2 + LC4 collision detectors
+- Tonic flight drive baseline (keeps fly airborne)
+- DN → motor readout:
+  - DNp01 → escape pitch
+  - DNg02 → thrust/altitude
+  - DNa01/02 difference → yaw control
+  - DNb → roll
+- Safety limits (minimal collision recovery as last resort)
+
+**Scientific honesty:**
+This is a connectome-structured simulator with engineered sensory encoding and motor decoding. The synaptic graph is real; the input/output mappings are biologically inspired but not validated against fruit fly physiology. Neural dynamics use simplified rate models. This is exploratory research simulation, not a claim of neuron-for-neuron accuracy.
+
 ---
 
 ## Features
@@ -747,6 +773,32 @@ threedfly run-interactive --subgraph data/full_connectome.npz --steps 5000
 ### 重要说明
 
 这是一个**基于连接组结构的模拟器**，使用简化的神经元模型（LIF或速率模型）和工程化的输入输出映射。**新版本**：深度估计现在使用**运动视差和光流**（真实果蝇使用的主要深度线索），而不是任意的中间网络神经元读取。从连续帧计算光流，结合飞行速度（自我运动），通过连接组路由（set_input → simulate → readout），从视觉神经元群体活动解码为12×16空间深度图。这种方法有生物学动机，但光流提取、视差计算和神经读取是手工设计的工程近似，未经生物学验证。
+
+### 生物学映射（新功能）
+
+**模拟器现在支持基于生物学的输入输出映射**，使用 MaleCNS 连接组的神经元类型注释：
+
+**什么是测量的连接组数据：**
+- 突触连接（约1000万个连接，从1.5亿原始数据中过滤）
+- 神经元类型注释（R1-R6、L1-L5、T4/T5、LPLC2、LC4、DNp01、DNg02、DNa、DNb等）
+- 胞体和根部位置信息（左右脑半球）
+- 神经递质类型（乙酰胆碱、GABA、谷氨酸等）
+
+**什么是工程化设计的（手工设计的桥接）：**
+- 图像 → 神经元编码：
+  - 亮度 → R1-R6 感光细胞（按脑半球分割）
+  - 光流 → T4a-d / T5a-d 方向选择性神经元
+  - 逼近检测 → LPLC2 + LC4 碰撞检测器
+- 强直性飞行驱动基线（保持果蝇在空中）
+- DN → 运动读取：
+  - DNp01 → 逃逸俯仰
+  - DNg02 → 推力/高度
+  - DNa01/02 差值 → 偏航控制
+  - DNb → 滚转
+- 安全限制（最小化碰撞恢复作为最后手段）
+
+**科学诚实性：**
+这是一个基于连接组结构的模拟器，具有工程化的感觉编码和运动解码。突触图是真实的；输入输出映射受生物学启发但未经果蝇生理学验证。神经动力学使用简化的速率模型。这是探索性研究模拟，而非神经元级精确度的声明。
 
 ---
 
