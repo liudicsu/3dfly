@@ -110,3 +110,20 @@ n_hex, scheme, min, max}, `eye_layout` {L, R: {az_deg[721], el_deg[721]}}
   about 4.5–5 steps/s (about 0.1× real time, including viser and the
   matplotlib dashboard), so the client sees about 4.7–4.9 fps at
   about 220 KiB/s. The 30 Hz cap never limits it here.
+
+## Recording & local replay (PR6)
+
+Length-prefixed (``u32`` LE) concatenation of raw HELLO then FRAME messages —
+same bytes the websocket carries. Helpers:
+
+* Python: ``threedfly.stream.client.write_recording`` / ``read_recording``
+* CLI dump: ``scripts/stream_client.py --dump PATH``
+* Live sim: ``threedfly run-interactive --stream-record PATH`` (records even with 0 clients)
+* Server fan-out: ``scripts/stream_replay.py PATH --port 8767``
+* Browser: ``threedfly/stream/static/recording.js`` (``parseRecording`` + ``RecordingPlayer``)
+* Local demo page: ``http://localhost:PORT/demo`` (not for GitHub Pages)
+* In-panel: ``/brain?rec=/recording.bin&hz=10`` or the file picker under Controls
+
+``stream_replay`` also serves the file at ``/recording.bin`` so the browser can
+replay without consuming the websocket.
+

@@ -1,0 +1,34 @@
+{
+  "base": "http://127.0.0.1:8768",
+  "brain_rec": {
+    "last": {
+      "frameIndex": 190,
+      "simTime": 12.14,
+      "nActive": 19986,
+      "maxRate": 118.63597869873047,
+      "nonzeroCodes": 21262,
+      "hashOk": true,
+      "meanRate": 0.14741533934955214,
+      "source": "recording"
+    },
+    "hashOk": true,
+    "status": "HELLO ok \u00b7 n=45434 \u00b7 hash match",
+    "src": "/recording.bin",
+    "console_tail": [
+      "[warning] [.WebGL-0x3a3c001ad000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "[warning] [.WebGL-0x3a3c001ad000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "[warning] [.WebGL-0x3a3c001ad000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "[warning] [.WebGL-0x3a3c001ad000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+    ],
+    "note": "WebGL canvas hidden for screenshot (SwiftShader hang workaround)"
+  },
+  "pr": 6,
+  "title": "replay + local demo (browser recording.js)",
+  "files": {
+    "recording.js": "parseRecording + RecordingPlayer",
+    "demo.html": "local-only demo page",
+    "brain_panel.html": "?rec= URL + file picker",
+    "stream_replay.py": "serves /recording.bin + /demo",
+    "--stream-record": "CLI flag to dump while simulating"
+  }
+}
