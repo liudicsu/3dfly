@@ -31,10 +31,12 @@ from threedfly.control.closed_loop_metrics import (
     PR16_WALLS,
     PR16_WALLS_PER_100,
     ROOM_XY,
+    angular_size_deg,
     closest_approach_step,
     collision_course_object,
     coverage,
     direction_correct_frac,
+    dnp01_baseline_shows_loom,
     escape_turned_into,
     fire_minus_closest,
     geometry_aware_frac,
@@ -348,7 +350,19 @@ def _run_scenario(
     t_wall = time.perf_counter()
     loom_pos = None if loom_start is None else np.asarray(loom_start, dtype=float).copy()
     loom_v = None if loom_vel is None else np.asarray(loom_vel, dtype=float)
-    show_now = loom_pos is not None and present_at_prewarm and not appear_after_prewarm
+    start_ang = None
+    if loom_pos is not None and pose is not None:
+        fly0 = np.asarray(pose, dtype=float)
+        start_ang = angular_size_deg(float(np.hypot(loom_pos[0] - fly0[0], loom_pos[1] - fly0[1])))
+    # DNp01 rest is a no-loom, DC-removed baseline. A far ≤5° disc in
+    # the prewarm snapshot is grayed out with the walls and freezes
+    # rest at the texture-settle DNp01 (0.50–0.64), so rise ≤0 at 50°.
+    # Receding large discs stay visible.
+    show_now = loom_pos is not None and dnp01_baseline_shows_loom(
+        present_at_prewarm=present_at_prewarm,
+        appear_after_prewarm=appear_after_prewarm,
+        start_ang_deg=start_ang,
+    )
     if show_now:
         _show_loom(env, loom_pos)
     left_img, right_img, left_side, right_side = _eye_pack(env)
@@ -1377,22 +1391,30 @@ def main(argv=None) -> int:
                 "No sim object pose/radius reaches stereo_to_hex or the "
                 "controller. Photoreceptor rest τ=5 s, exp(−dt/τ), init "
                 "at calib mean 0.5 (not frame 1); static contrast is "
-                "~37% at 5 s. Official looms start ≤5° and are present "
-                "at prewarm. GF fire is the one-shot calibrated readout "
-                "(scripts/calibrate_gf_readout.py; von Reyn 2014/2017 "
-                "40–60° at l/v 40 ms) — not the old 0.20 Hz bar. Static "
+                "~37% at 5 s. Prewarm snaps that rest to the no-object "
+                "frame so flyvis/DNp01 settle on a DC-free field "
+                "(uniform-field DNp01 ≈ 0.008 Hz, not the 0.50–0.64 "
+                "texture climb). Official looms start ≤5° and appear "
+                "after that snapshot. Receding large discs stay visible "
+                "at baseline so we do not inject a 40° onset. GF fire "
+                "is the one-shot "
+                "calibrated readout (scripts/calibrate_gf_readout.py; "
+                "von Reyn 2014/2017 40–60° at l/v 40 ms). Static "
                 "30–40° onset and receding discs are 0-fire gates; if "
                 "they fire after calibration, report, do not patch. "
                 "Frontal both-GF takeoff (az0/az5/az12). Each eye has a "
                 "forward + ipsilateral side camera so the flyvis ±75° "
                 "lattice is fully sampled (1:1 deg; rear 75–165° has "
                 "no flyvis cells). Eccentric looms are late or silent. "
-                "Frontolat on-time turn-away is the remaining miss: "
-                "without the 20–30° onset cheat, the score still "
-                "crosses after closest approach (object already behind, "
-                "dCA +5…+9; lock matches true side). No-object 0/6. "
-                "Report brain+flyvis and full-loop ms/step separately; "
-                "full-loop need not hit 25 ms."
+                "Open-loop camera (ladder L2–L4) now fires at 45–50° "
+                "with dCA −9…−10; the old +5…+9 cluster was rest "
+                "absorption, not pipeline lag. Closed-loop frontolat "
+                "still misses when steering yaws the object off-axis "
+                "before GF (L5). Static 30–40° onset and recede fire "
+                "because rest is the uniform-field baseline — report, "
+                "do not patch. No-object 0/6. Report brain+flyvis and "
+                "full-loop ms/step separately; full-loop need not hit "
+                "25 ms."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],

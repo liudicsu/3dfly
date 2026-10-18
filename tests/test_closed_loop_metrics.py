@@ -16,6 +16,7 @@ from threedfly.control.closed_loop_metrics import (
     collision_course_object,
     coverage,
     direction_correct_frac,
+    dnp01_baseline_shows_loom,
     escape_turned_away,
     fire_minus_closest,
     geometry_aware_event_ok,
@@ -400,3 +401,19 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert vg["n"] == 2
     assert vg["mean"] == pytest.approx(1.0)
     assert vg["pass"] is True
+
+
+def test_far_disc_hidden_for_dnp01_baseline_large_recede_stays():
+    """≤5° approach discs do not sit in the DNp01 rest snapshot; recede does."""
+    assert dnp01_baseline_shows_loom(
+        present_at_prewarm=True, appear_after_prewarm=False, start_ang_deg=5.0
+    ) is False
+    assert dnp01_baseline_shows_loom(
+        present_at_prewarm=True, appear_after_prewarm=False, start_ang_deg=4.9
+    ) is False
+    assert dnp01_baseline_shows_loom(
+        present_at_prewarm=True, appear_after_prewarm=False, start_ang_deg=42.0
+    ) is True
+    assert dnp01_baseline_shows_loom(
+        present_at_prewarm=False, appear_after_prewarm=True, start_ang_deg=34.0
+    ) is False

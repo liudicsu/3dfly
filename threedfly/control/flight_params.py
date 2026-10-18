@@ -80,6 +80,12 @@ class FlightParams:
     # VPN: HS tracks the loom itself and would hide 40–60° expansion.
     vpn_hse_gate: float = 0.0
     # Slow rest: eats the 16-step settle climb, keeps a 1 s compact loom.
+    # Rest is frozen after a *no-object* prewarm on DC-removed photoreceptor
+    # input (uniform-field DNp01 ≈ 0.008 Hz). A present ≤5° disc *or*
+    # residual 1/f / lighting contrast freezes rest at 0.50–0.64 and
+    # absorbs the inbound camera rise (decomp: +0.15 at 40°, +0.24 at
+    # 60° when rest is the uniform field). Biological GF has no
+    # loom-present / texture-DC subtraction.
     dnp01_rest_tau_steps: float = 100.0
     dnp01_freeze_rest: bool = True
     dnp01_warmup_steps: int = 40
@@ -202,7 +208,9 @@ class FlightParams:
             "Forward 150° + ipsilateral 150° side camera per eye so the "
             "flyvis ±75° lattice (1:1 deg, centre = frontal) is fully "
             "sampled; rear 75–165° has no flyvis cells. Photoreceptor rest "
-            "τ=5 s, exp(−dt/τ), init at calib mean 0.5 (not frame 1). "
+            "τ=5 s, exp(−dt/τ), init at calib mean 0.5 (not frame 1); "
+            "prewarm snaps rest to the no-object frame so flyvis/DNp01 "
+            "settle on a DC-free field. "
             "BoxEye hex-box at the scaled spacing. Matte-black loom. "
             "320 px. 1/f RMS 0.05, gain 1.10. Laterality is per-side "
             "DNp01 rise. LPi (Glu/−) T4/T5→LPi→LPLC2 is in coreTplus. "

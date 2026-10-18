@@ -32,7 +32,11 @@ from threedfly.brain.core_bundle import (
     load_core_bundle,
 )
 from threedfly.brain.core_subgraph import select_core_tplus, slice_connectome
-from threedfly.brain.eyes import reset_luminance_rest, stereo_to_hex
+from threedfly.brain.eyes import (
+    reset_luminance_rest,
+    snap_luminance_rest_from_images,
+    stereo_to_hex,
+)
 from threedfly.brain.handoff import (
     FlyvisCalibration,
     FlyvisEye,
@@ -301,12 +305,19 @@ class ClosedLoopBrain:
         Runs at least ``n`` steps (default ``prewarm_steps``) and continues
         until DNp01's last-8 std is below ``prewarm_settle_std`` or
         ``prewarm_max_steps`` is hit. Same schedule for every scenario.
+
+        Photoreceptor rest is snapped to this no-object frame first so
+        flyvis sees a DC-free field and DNp01 rest is the uniform-field
+        rate, not the texture-settle climb.
         """
         n = int(self.params.prewarm_steps if n is None else n)
         max_n = int(getattr(self.params, "prewarm_max_steps", n))
         max_n = max(n, max_n)
         tol = float(getattr(self.params, "prewarm_settle_std", 0.0))
         drop = float(getattr(self.params, "prewarm_peak_drop_hz", 0.12))
+        snap_luminance_rest_from_images(
+            left_img, right_img, left_side_img, right_side_img
+        )
         # Flyvis hold-stride would freeze the settle on the DNp01 peak.
         prev_stride = int(self.params.flyvis_stride)
         self.params.flyvis_stride = 1

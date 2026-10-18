@@ -116,6 +116,30 @@ def angular_size_deg(distance: float, radius: float = LOOM_RADIUS_M) -> float:
     return float(2.0 * np.degrees(np.arctan(float(radius) / d)))
 
 
+def dnp01_baseline_shows_loom(
+    *,
+    present_at_prewarm: bool,
+    appear_after_prewarm: bool,
+    start_ang_deg: Optional[float],
+    start_ang_max_deg: float = LOOM_START_ANG_MAX_DEG,
+) -> bool:
+    """Whether the object is visible while DNp01 rest is captured.
+
+    Biological GF has no loom-present subtraction. Prewarm snaps
+    photoreceptor rest to this frame (DC → mid-gray) and freezes DNp01
+    there. A far (≤5°) disc in that snapshot is grayed out and the
+    inbound climb is absorbed (camera rest 0.50–0.64 vs uniform-field
+    0.008 Hz). Hide those discs, snap/settle, then show them. An
+    already-large receding disc stays visible so we do not inject a
+    40° onset.
+    """
+    if appear_after_prewarm or not present_at_prewarm:
+        return False
+    if start_ang_deg is not None and float(start_ang_deg) <= float(start_ang_max_deg) + 0.51:
+        return False
+    return True
+
+
 def loom_geometry(obj_xyz, fly_xyz, heading_rad: float, radius: float = LOOM_RADIUS_M) -> dict:
     obj = np.asarray(obj_xyz, dtype=float)
     fly = np.asarray(fly_xyz, dtype=float)

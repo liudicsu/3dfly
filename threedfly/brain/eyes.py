@@ -326,6 +326,54 @@ def reset_luminance_rest() -> None:
     BG_REST.reset()
 
 
+def raw_stereo_hex(
+    left_img: np.ndarray,
+    right_img: np.ndarray,
+    left_side_img: Optional[np.ndarray] = None,
+    right_side_img: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """BoxEye hex luminance. Does not touch photoreceptor rest."""
+    hex_L, ok_L = _sample_hex_box(left_img, "L")
+    hex_R, ok_R = _sample_hex_box(right_img, "R")
+    if left_side_img is not None:
+        s, ok_s = _sample_hex_box(left_side_img, "L", cant_deg=EYE_SIDE_CANT_DEG)
+        fill = (~ok_L) & ok_s
+        hex_L = np.where(fill, s, hex_L).astype(np.float32)
+        ok_L = ok_L | ok_s
+    if right_side_img is not None:
+        s, ok_s = _sample_hex_box(right_side_img, "R", cant_deg=EYE_SIDE_CANT_DEG)
+        fill = (~ok_R) & ok_s
+        hex_R = np.where(fill, s, hex_R).astype(np.float32)
+        ok_R = ok_R | ok_s
+    return hex_L, hex_R
+
+
+def snap_luminance_rest(hex_L: np.ndarray, hex_R: np.ndarray) -> None:
+    """Set per-hex rest to this frame (DC removal). Next luminance step ≈ 0.5."""
+    BG_REST.hex_L = np.asarray(hex_L, dtype=np.float32).copy()
+    BG_REST.hex_R = np.asarray(hex_R, dtype=np.float32).copy()
+
+
+def snap_luminance_rest_from_images(
+    left_img: np.ndarray,
+    right_img: np.ndarray,
+    left_side_img: Optional[np.ndarray] = None,
+    right_side_img: Optional[np.ndarray] = None,
+) -> None:
+    """Match photoreceptor rest to the current scene so flyvis sees mid-gray.
+
+    Biological LMCs high-pass standing luminance. Prewarm must settle
+    DNp01 on that uniform-field baseline (~0.008 Hz), not on residual
+    1/f / lighting contrast (camera ladder rest 0.50–0.64 absorbed the
+    inbound rise). τ=5 s still applies after the snap; a later loom is
+    a change. Call on the *no-object* frame so a present disc is not
+    grayed out.
+    """
+    snap_luminance_rest(
+        *raw_stereo_hex(left_img, right_img, left_side_img, right_side_img)
+    )
+
+
 def _luminance_to_gray(
     hex_frame: np.ndarray,
     valid: np.ndarray,
