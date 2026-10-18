@@ -238,9 +238,17 @@ class DNFlightController:
         }
 
     def _bilateral_expansion(self) -> bool:
-        """Frontal / wall: both eyes climb together — brake, do not yaw."""
-        climbing = self.last_rise >= 0.08 or self._vpn_expanding()
-        return bool(climbing) and not self._lateral_dnp01_climb()
+        """Frontal / wall: *both* eyes climb — brake, do not yaw.
+
+        ``not lateral`` alone is too broad: a 35° loom plus a little
+        contralateral leak would freeze VPN laterality. Require a real
+        rise on both sides.
+        """
+        if self._last_readout is None:
+            return False
+        rise_L, rise_R = self._dnp01_rises(self._last_readout)
+        both = min(float(rise_L), float(rise_R)) >= 0.08
+        return bool(both) and not self._lateral_dnp01_climb()
 
     def _steer_yaw(self, ro: DNReadout) -> float:
         t = self._steer_terms(ro)

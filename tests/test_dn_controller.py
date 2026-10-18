@@ -495,6 +495,17 @@ def test_bilateral_expansion_brakes_not_yaws():
     assert act[0] < 0.38
 
 
+def test_one_sided_climb_is_not_bilateral():
+    """A 35° loom must keep VPN yaw (course freeze only)."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=8)
+    rest = DNReadout(dnp01_L=1.80, dnp01_R=1.80, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    climb = DNReadout(dnp01_L=2.10, dnp01_R=1.81, lc4_L=1.4, lc4_R=0.2, dng02_amp=5.0)
+    c.compute(climb)
+    assert c.last_yaw_terms.get("bilateral_brake") == pytest.approx(0.0)
+    assert c.last_yaw_terms.get("course_frozen") == pytest.approx(1.0)
+
+
 def test_brief_slope_bump_does_not_latch_through_slow_open_climb():
     """Open wander can have one steep 4-step window; that must not stay armed."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
