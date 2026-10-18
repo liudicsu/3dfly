@@ -1,0 +1,94 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>3dfly brain stream inspector</title>
+<style>
+ body{background:#0d1117;color:#c9d1d9;font:12px/1.35 ui-monospace,Menlo,monospace;margin:12px}
+ h1{font-size:15px;margin:0 0 8px} h2{font-size:12px;margin:10px 0 4px;color:#58a6ff}
+ .grid{display:grid;grid-template-columns:330px 330px 1fr;gap:14px}
+ table{border-collapse:collapse} td{padding:0 6px 0 0} .v{text-align:right;color:#e3b341}
+ .bar{display:inline-block;height:9px;background:#3fb950;vertical-align:middle}
+ canvas{background:#161b22;border:1px solid #30363d;image-rendering:pixelated}
+ #status{color:#3fb950}
+</style></head><body>
+<h1>3dfly brain stream — protocol v<span id="ver">?</span> <span id="status">connecting…</span></h1>
+<div id="hdr"></div>
+<div class="grid">
+ <div><h2>DN readouts (Hz)</h2><table id="dn"></table>
+      <h2>Pose</h2><table id="pose"></table>
+      <h2>Control</h2><table id="ctl"></table></div>
+ <div><h2>Cell-type mean rate (Hz, log bar)</h2><table id="ct"></table>
+      <h2>Population</h2><table id="st"></table></div>
+ <div><h2>Activity: all <span id="nn"></span> coreTplus neurons (1 px each, log1p uint8)</h2>
+      <canvas id="act" width="214" height="214" style="width:428px;height:428px"></canvas>
+      <h2>Eyes (hex luminance)</h2>
+      <canvas id="eyeL" width="200" height="200"></canvas> <canvas id="eyeR" width="200" height="200"></canvas></div>
+</div>
+<script type="module">
+import { BrainStream, Section } from "./brain_stream.js";
+const q = new URLSearchParams(location.search);
+const url = q.get("ws") || `ws://${location.host}`;
+const $ = (id) => document.getElementById(id);
+const f = (v) => (Math.abs(v) >= 0.01 || v === 0 ? v.toFixed(3) : v.toExponential(2));
+function table(el, names, vals, bars) {
+  let h = "";
+  const top = Math.log10(1 + 20 / 1e-3);
+  names.forEach((n, i) => {
+    const v = vals[i];
+    const b = bars ? `<td><span class="bar" style="width:${(110 * Math.min(1, Math.log10(1 + Math.max(v, 0) / 1e-3) / top)).toFixed(1)}px"></span></td>` : "";
+    h += `<tr><td>${n}</td><td class="v">${f(v)}</td>${b}</tr>`;
+  });
+  el.innerHTML = h;
+}
+function viridis(t) {
+  const s = [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]];
+  const x = Math.min(0.9999, Math.max(0, t)) * 4, i = Math.floor(x), u = x - i;
+  return s[i].map((c, k) => c + (s[i + 1][k] - c) * u);
+}
+let actImg = null, eyeXY = null;
+function drawEye(cv, side, vals) {
+  const ctx = cv.getContext("2d"); ctx.fillStyle = "#161b22"; ctx.fillRect(0, 0, 200, 200);
+  const lay = eyeXY && eyeXY[side];
+  for (let i = 0; i < vals.length; i++) {
+    const g = vals[i];
+    ctx.fillStyle = `rgb(${g},${g},${g})`;
+    let x, y;
+    if (lay) { x = 100 + lay.az_deg[i] * 1.2 * (side === "L" ? -1 : 1); y = 100 - lay.el_deg[i] * 1.2; }
+    else { x = 4 + (i % 27) * 7; y = 4 + Math.floor(i / 27) * 7; }
+    ctx.beginPath(); ctx.arc(x, y, 3.3, 0, 6.283); ctx.fill();
+  }
+}
+let last = null;
+new BrainStream(url, {
+  onStatus: (s) => ($("status").textContent = s),
+  onHello: (m) => {
+    $("ver").textContent = m.version; $("nn").textContent = m.n_neurons.toLocaleString();
+    eyeXY = m.eye_layout || null;
+    window.__hello = m;
+  },
+  onFrame: (fr, st) => {
+    const m = st.meta, s = fr.sections; last = fr;
+    const r = st.rates();
+    $("hdr").innerHTML = `frame <b>${fr.frameIndex}</b> · sim t <b>${fr.simTime.toFixed(2)} s</b> · ` +
+      `<b>${r.fps.toFixed(1)}</b> frames/s · <b>${(r.bps / 1024).toFixed(0)}</b> KiB/s payload · ` +
+      `${fr.nbytes.toLocaleString()} B/frame · received ${st.nFrames}`;
+    table($("dn"), m.dn_names, s[Section.DN]);
+    table($("pose"), m.pose_fields, s[Section.POSE]);
+    if (s[Section.CONTROL]) table($("ctl"), m.control_names, s[Section.CONTROL]);
+    table($("ct"), m.celltype_names.map((n, i) => `${n} (${m.celltype_sizes[i]})`), s[Section.CELLTYPE], true);
+    table($("st"), m.stats_fields, s[Section.STATS]);
+    const a = s[Section.ACTIVITY], cv = $("act"), ctx = cv.getContext("2d");
+    if (!actImg) actImg = ctx.createImageData(cv.width, cv.height);
+    const d = actImg.data;
+    let nz = 0;
+    for (let i = 0; i < cv.width * cv.height; i++) {
+      const v = i < a.length ? a[i] : 0; if (v) nz++;
+      const c = i < a.length ? viridis(v / 255) : [13, 17, 23];
+      d[4 * i] = c[0]; d[4 * i + 1] = c[1]; d[4 * i + 2] = c[2]; d[4 * i + 3] = 255;
+    }
+    ctx.putImageData(actImg, 0, 0);
+    if (s[Section.EYE_L]) drawEye($("eyeL"), "L", s[Section.EYE_L]);
+    if (s[Section.EYE_R]) drawEye($("eyeR"), "R", s[Section.EYE_R]);
+    window.__last = { frame: fr.frameIndex, t: fr.simTime, nonzero_activity: nz, fps: r.fps, bps: r.bps,
+      dn: Object.fromEntries(m.dn_names.map((n, i) => [n, s[Section.DN][i]])) };
+  },
+});
+</script></body></html>

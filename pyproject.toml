@@ -36,6 +36,7 @@ dependencies = [
     "click>=8.0.0",
     "viser>=0.1.0",
     "trimesh>=4.0.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -60,6 +61,7 @@ include = ["threedfly*"]
 
 [tool.setuptools.package-data]
 "threedfly.brain.data" = ["*.txt.gz"]
+"threedfly.stream" = ["static/*"]
 
 [tool.black]
 line-length = 100

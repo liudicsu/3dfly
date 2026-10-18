@@ -41,6 +41,9 @@ def run_interactive_simulation(
     apply_ei_signs: bool = True,
     use_core_tplus=None,
     engineered_looming_residual: bool = False,
+    stream_port: int = 8765,
+    stream_hz: float = 30.0,
+    stream_log: str = None,
 ):
     """
     Run interactive 3dfly simulation with unified web interface.
@@ -62,6 +65,13 @@ def run_interactive_simulation(
         port: Visualization server port
         max_collisions: Maximum collisions before stopping (0 = unlimited)
         enable_soft_recovery: Enable soft collision recovery (back off and continue)
+        stream_port: Binary brain-stream websocket port (protocol v1, see
+            docs/stream_protocol.md); 0 disables. Same port serves an HTTP
+            inspector page at ``http://host:stream_port/``.
+        stream_hz: Max display frame rate of the stream (sim rates are
+            window-max reduced between frames).
+        stream_log: Optional path; server stats are appended as JSON lines
+            every ~5 s.
     """
     np.random.seed(seed)
     
@@ -200,6 +210,25 @@ def run_interactive_simulation(
         # Per-neuron cell types → real cell-type family means in the panel.
         viz.set_brain_metadata(types=core_brain.core.typ)
     print("  ✓ Unified web interface ready (3D view + dashboard panels)")
+
+    stream = None
+    frame_builder = None
+    if stream_port:
+        from threedfly.stream.builder import FrameBuilder
+        from threedfly.stream.server import BrainStreamServer
+
+        if use_core:
+            frame_builder = FrameBuilder(
+                types=core_brain.core.typ,
+                sides=core_brain.core.side,
+                body_ids=core_brain.core.body_ids,
+            )
+        else:
+            frame_builder = FrameBuilder(n_neurons=n_neurons)
+        stream = BrainStreamServer(host=host, port=stream_port, max_hz=stream_hz).start()
+        stream.set_hello(frame_builder.hello())
+        print(f"  ✓ Brain stream (protocol v1) {stream.url}  inspector: http://localhost:{stream.port}/")
+    stream_stats_t = time.time()
     
     print("\n[8/8] Starting interactive simulation...")
     print("=" * 70)
@@ -325,6 +354,7 @@ def run_interactive_simulation(
             flow_features = np.zeros(8, dtype=np.float32)
             flow_info = {"flow_left": None, "flow_right": None, "flow_magnitude": 0.0}
             brain_readout = None
+            core_step = None
             if use_core:
                 core_step = core_brain.step(
                     left_img, right_img, env.get_fly_angular_velocity()
@@ -404,6 +434,31 @@ def run_interactive_simulation(
                 )
                 action = controller.compute_action(brain_activity)
             
+            # Binary brain stream: fold every step into the window max; encode
+            # only when a client is connected and a display frame is due.
+            if stream is not None:
+                frame_builder.accumulate(brain_activity)
+                if stream.wants_frame():
+                    stream.publish(
+                        frame_builder.build(
+                            sim_time=step * sim_dt,
+                            readout=core_step.readout if core_step is not None else None,
+                            position=fly_pos,
+                            orientation=env.get_fly_orientation(),
+                            velocity=fly_velocity,
+                            wing_angles=env.get_wing_angles(),
+                            hex_L=core_step.hex_L if core_step is not None else None,
+                            hex_R=core_step.hex_R if core_step is not None else None,
+                            control=action,
+                        )
+                    )
+                if stream_log and time.time() - stream_stats_t > 5.0:
+                    stream_stats_t = time.time()
+                    import json as _json
+
+                    with open(stream_log, "a") as fh:
+                        fh.write(_json.dumps({"step": step, **stream.stats()}) + "\n")
+
             # Step environment (DNg02 L/R → wing strokes when the controller provides them)
             wing_strokes = getattr(controller, "last_wing_strokes", None)
             left_img, right_img, info = env.step(action, wing_strokes=wing_strokes)
@@ -551,6 +606,8 @@ def run_interactive_simulation(
         pass
     
     # Cleanup
+    if stream is not None:
+        stream.stop()
     viz.close()
     env.close()
     

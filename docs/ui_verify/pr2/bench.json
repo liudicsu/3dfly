@@ -1,0 +1,75 @@
+{
+ "recording_frames": 68,
+ "n_neurons": 45434,
+ "frame_bytes_mean": 47272.0,
+ "zlib6_bytes_mean": 31608.632352941175,
+ "zlib_ratio": 0.669,
+ "accumulate_ms": 0.006,
+ "build_encode_ms": 0.165,
+ "runs": [
+  {
+   "target_hz": 10.0,
+   "compression": "deflate",
+   "frames": 60,
+   "fps": 9.97,
+   "payload_kib_per_s": 460.4,
+   "decode_ms": 0.114
+  },
+  {
+   "target_hz": 30.0,
+   "compression": "deflate",
+   "frames": 180,
+   "fps": 29.75,
+   "payload_kib_per_s": 1373.3,
+   "decode_ms": 0.094
+  },
+  {
+   "target_hz": 60.0,
+   "compression": "deflate",
+   "frames": 356,
+   "fps": 59.18,
+   "payload_kib_per_s": 2731.9,
+   "decode_ms": 0.068
+  },
+  {
+   "target_hz": 120.0,
+   "compression": "deflate",
+   "frames": 707,
+   "fps": 117.65,
+   "payload_kib_per_s": 5431.1,
+   "decode_ms": 0.076
+  },
+  {
+   "target_hz": 10.0,
+   "compression": "none",
+   "frames": 60,
+   "fps": 9.97,
+   "payload_kib_per_s": 460.1,
+   "decode_ms": 0.075
+  },
+  {
+   "target_hz": 30.0,
+   "compression": "none",
+   "frames": 180,
+   "fps": 29.78,
+   "payload_kib_per_s": 1374.8,
+   "decode_ms": 0.058
+  },
+  {
+   "target_hz": 60.0,
+   "compression": "none",
+   "frames": 357,
+   "fps": 59.29,
+   "payload_kib_per_s": 2737.0,
+   "decode_ms": 0.045
+  },
+  {
+   "target_hz": 120.0,
+   "compression": "none",
+   "frames": 710,
+   "fps": 118.14,
+   "payload_kib_per_s": 5453.9,
+   "decode_ms": 0.042
+  }
+ ]
+}
