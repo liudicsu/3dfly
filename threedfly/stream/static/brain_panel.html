@@ -5,52 +5,69 @@
 <title>3dfly · brain panel</title>
 <style>
   html,body{margin:0;height:100%;background:#070a10;color:#cfd8e3;font:12px/1.35 ui-monospace,Menlo,monospace;overflow:hidden}
-  #wrap{display:grid;grid-template-columns:1fr 220px;height:100vh}
-  #view{position:relative;min-width:0}
+  #wrap{display:grid;grid-template-columns:1.35fr 1fr;grid-template-rows:100vh;height:100vh}
+  #left{display:grid;grid-template-rows:1fr 160px;min-width:0;min-height:0}
+  #view{position:relative;min-width:0;min-height:0}
   #view canvas{display:block;width:100%;height:100%}
   #hud{position:absolute;left:10px;top:8px;background:#0b1220cc;padding:8px 10px;border:1px solid #1e2a3a;border-radius:6px;max-width:460px;pointer-events:none;z-index:2}
   #hud b{color:#8fb3ff}
-  #side{border-left:1px solid #1a2433;padding:10px;overflow:auto;background:#0a1018}
-  #side h2{margin:0 0 8px;font-size:13px;color:#8fb3ff;letter-spacing:.04em}
-  label{display:block;margin:6px 0 2px;color:#9aa7b5}
-  select,button,input[type=range]{width:100%;box-sizing:border-box;background:#121a26;color:#e6edf3;border:1px solid #2a3a4e;border-radius:4px;padding:6px}
-  button{cursor:pointer;margin-top:8px}
+  #timeline-wrap{border-top:1px solid #1a2433;padding:4px 6px;background:#0a1018}
+  #timeline-wrap h3,#side h3{margin:0 0 4px;font-size:11px;color:#8fb3ff;font-weight:600;letter-spacing:.04em}
+  #timeline{width:100%;height:120px;display:block}
+  #side{border-left:1px solid #1a2433;padding:6px;overflow:auto;background:#0a1018;display:grid;grid-template-rows:auto 110px 130px minmax(140px,1fr) auto;gap:6px}
+  .card{background:#0b1220;border:1px solid #1e2a3a;border-radius:6px;padding:6px;position:relative;overflow:hidden;min-height:0}
+  .card h3{margin:0 0 4px;font-size:11px;color:#8fb3ff;font-weight:600;letter-spacing:.04em}
+  canvas.f{width:100%;height:calc(100% - 16px);display:block}
+  #eyes{display:flex;gap:6px} #eyes canvas{width:50%;aspect-ratio:1;background:#070a10}
+  #controls{padding:4px 0}
+  label{display:block;margin:4px 0 2px;color:#9aa7b5}
+  select,button,input[type=range]{width:100%;box-sizing:border-box;background:#121a26;color:#e6edf3;border:1px solid #2a3a4e;border-radius:4px;padding:5px}
+  button{cursor:pointer;margin-top:6px}
   button:hover{border-color:#4a6a8e}
-  .stat{color:#9aa7b5;margin-top:10px;font-size:11px;white-space:pre-wrap}
+  .stat{color:#9aa7b5;margin-top:6px;font-size:11px;white-space:pre-wrap}
   .ok{color:#59d38a}.bad{color:#ff5d5d}.warn{color:#ffb454}
-  #filters{max-height:42vh;overflow:auto;border:1px solid #1e2a3a;border-radius:4px;padding:4px;margin-top:4px;opacity:.45}
+  #filters{max-height:18vh;overflow:auto;border:1px solid #1e2a3a;border-radius:4px;padding:4px;margin-top:4px;opacity:.45}
   #filters label.chk{display:flex;gap:6px;align-items:center;margin:2px 0;color:#cfd8e3}
   #filters input{width:auto}
 </style>
 </head>
 <body>
 <div id="wrap">
-  <div id="view">
-    <div id="hud">
-      <div><b>coreTplus brain panel</b> · <span id="nshow">…</span></div>
-      <div>stream: <span id="src">…</span> · <span id="fps">—</span></div>
-      <div>asset hash: <span id="ahash">…</span></div>
-      <div>hello hash: <span id="hhash">…</span></div>
-      <div>frame <span id="fi">—</span> · t=<span id="st">—</span>s · <span id="act">—</span></div>
+  <div id="left">
+    <div id="view">
+      <div id="hud">
+        <div><b>coreTplus brain panel</b> · <span id="nshow">…</span></div>
+        <div>stream: <span id="src">…</span> · <span id="fps">—</span></div>
+        <div>asset hash: <span id="ahash">…</span></div>
+        <div>hello hash: <span id="hhash">…</span></div>
+        <div>frame <span id="fi">—</span> · t=<span id="st">—</span>s · <span id="act">—</span></div>
+      </div>
     </div>
+    <div id="timeline-wrap" class="card"><h3>TIMELINE · escape events</h3><canvas id="timeline"></canvas></div>
   </div>
   <aside id="side">
-    <h2>Controls</h2>
-    <label>Point size</label>
-    <input id="psize" type="range" min="1" max="12" step="0.5" value="3.5">
-    <label>Activity gain</label>
-    <input id="gain" type="range" min="0.4" max="5" step="0.1" value="1.4">
-    <label>Cell-type filter</label>
-    <select id="preset">
-      <option value="all">All types</option>
-      <option value="pathway">Signal-flow pathway</option>
-      <option value="dn">DNs + LPLC2/LC4</option>
-      <option value="t4t5">T4 / T5</option>
-      <option value="custom">Custom…</option>
-    </select>
-    <div id="filters"></div>
-    <button id="resetCam" type="button">Reset camera</button>
-    <div class="stat" id="status">boot</div>
+    <div class="card"><h3>HEX EYES · L / R (721)</h3><div id="eyes"><canvas id="eyeL" width="260" height="260"></canvas><canvas id="eyeR" width="260" height="260"></canvas></div></div>
+    <div class="card"><h3>PATHWAY · eyes → T4/T5 → LPLC2/LC4 → DNp01/DNp03/DNa02 → DNg02 → wings</h3><canvas class="f" id="flow"></canvas></div>
+    <div class="card"><h3>DN / LPLC2 READOUTS (Hz)</h3><canvas class="f" id="dn"></canvas></div>
+    <div class="card"><h3>CELL-TYPE HEATMAP</h3><canvas class="f" id="heat"></canvas></div>
+    <div id="controls" class="card">
+      <h3>CONTROLS</h3>
+      <label>Point size</label>
+      <input id="psize" type="range" min="1" max="12" step="0.5" value="3.5">
+      <label>Activity gain</label>
+      <input id="gain" type="range" min="0.4" max="5" step="0.1" value="1.4">
+      <label>Cell-type filter</label>
+      <select id="preset">
+        <option value="all">All types</option>
+        <option value="pathway">Signal-flow pathway</option>
+        <option value="dn">DNs + LPLC2/LC4</option>
+        <option value="t4t5">T4 / T5</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <div id="filters"></div>
+      <button id="resetCam" type="button">Reset camera</button>
+      <div class="stat" id="status">boot</div>
+    </div>
   </aside>
 </div>
 <script type="module">
@@ -58,6 +75,7 @@ import * as THREE from './vendor/three.module.js';
 import { OrbitControls } from './vendor/OrbitControls.js';
 import { GLTFLoader } from './vendor/GLTFLoader.js';
 import { BrainStream, Section, activityLUT } from './brain_stream.js';
+import { DashboardPanels } from './dashboard_panels.js';
 
 const qs = new URLSearchParams(location.search);
 const WS_URL = qs.get('ws') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
@@ -232,12 +250,23 @@ Object.values(checks).forEach(cb => cb.addEventListener('change', () => {
 }));
 applyFilter();
 
+const dash = new DashboardPanels({
+  eyeL: document.getElementById('eyeL'),
+  eyeR: document.getElementById('eyeR'),
+  flow: document.getElementById('flow'),
+  dn: document.getElementById('dn'),
+  heat: document.getElementById('heat'),
+  timeline: document.getElementById('timeline'),
+});
+window.__dash = dash;
+
 let lut = null, hashOk = null;
 const stream = new BrainStream(WS_URL, {
   onStatus: (s) => setStatus('ws: ' + s, s === 'connected' ? 'ok' : 'warn'),
   onHello: (hello) => {
     window.__hello = hello;
     lut = activityLUT(hello);
+    dash.onHello(hello);
     hashOk = hello.body_ids_sha1 === meta.body_ids_sha1 && hello.n_neurons === N;
     const hh = document.getElementById('hhash');
     hh.textContent = (hashOk ? '✓ ' : '✗ ') + (hello.body_ids_sha1 || 'missing');
@@ -278,6 +307,13 @@ const stream = new BrainStream(WS_URL, {
       hashOk,
       meanRate: rate.reduce((a, b) => a + b, 0) / N,
     };
+    dash.onFrame(msg, {
+      DN: msg.sections[Section.DN],
+      CELLTYPE: msg.sections[Section.CELLTYPE],
+      EYE_L: msg.sections[Section.EYE_L],
+      EYE_R: msg.sections[Section.EYE_R],
+      STATS: stats,
+    });
   }
 });
 
