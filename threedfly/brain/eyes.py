@@ -348,30 +348,32 @@ def raw_stereo_hex(
     return hex_L, hex_R
 
 
-def snap_luminance_rest(hex_L: np.ndarray, hex_R: np.ndarray) -> None:
-    """Set per-hex rest to this frame (DC removal). Next luminance step ≈ 0.5."""
+def init_luminance_rest(hex_L: np.ndarray, hex_R: np.ndarray) -> None:
+    """τ→∞ equivalent: set per-hex rest to this frame. Next luminance ≈ 0.5.
+
+    A several-τ prewarm at τ=5 s would reach the same DC-free field.
+    This is that initialisation, not a sim-object paint. Call only on a
+    no-object frame so a present disc is not grayed out.
+    """
     BG_REST.hex_L = np.asarray(hex_L, dtype=np.float32).copy()
     BG_REST.hex_R = np.asarray(hex_R, dtype=np.float32).copy()
 
 
-def snap_luminance_rest_from_images(
+def init_luminance_rest_from_images(
     left_img: np.ndarray,
     right_img: np.ndarray,
     left_side_img: Optional[np.ndarray] = None,
     right_side_img: Optional[np.ndarray] = None,
 ) -> None:
-    """Match photoreceptor rest to the current scene so flyvis sees mid-gray.
-
-    Biological LMCs high-pass standing luminance. Prewarm must settle
-    DNp01 on that uniform-field baseline (~0.008 Hz), not on residual
-    1/f / lighting contrast (camera ladder rest 0.50–0.64 absorbed the
-    inbound rise). τ=5 s still applies after the snap; a later loom is
-    a change. Call on the *no-object* frame so a present disc is not
-    grayed out.
-    """
-    snap_luminance_rest(
+    """Initialise photoreceptor rest from rendered pixels only (no object state)."""
+    init_luminance_rest(
         *raw_stereo_hex(left_img, right_img, left_side_img, right_side_img)
     )
+
+
+# Back-compat aliases.
+snap_luminance_rest = init_luminance_rest
+snap_luminance_rest_from_images = init_luminance_rest_from_images
 
 
 def _luminance_to_gray(

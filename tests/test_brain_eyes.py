@@ -18,6 +18,7 @@ from threedfly.brain.eyes import (
     hex_coverage,
     hex_in_bio_envelope,
     image_to_hex,
+    init_luminance_rest_from_images,
     reset_luminance_rest,
     snap_luminance_rest_from_images,
     stereo_to_hex,
@@ -309,7 +310,7 @@ def test_per_hex_rest_decays_to_e_fold_at_tau():
 
 
 def test_snap_luminance_rest_zeros_static_keeps_change():
-    """Prewarm DC snap: static texture → mid-gray; a later disc is a change."""
+    """τ→∞ rest init: static texture → mid-gray; a later disc is a change."""
     from threedfly.brain.eyes import hex_camera_uv
 
     h = w = 64
@@ -318,7 +319,9 @@ def test_snap_luminance_rest_zeros_static_keeps_change():
     tex[(yy // 16 + xx // 16) % 2 == 0] = 40
     tex[(yy // 16 + xx // 16) % 2 == 1] = 220
     reset_luminance_rest()
-    snap_luminance_rest_from_images(tex, tex)
+    init_luminance_rest_from_images(tex, tex)
+    # Alias kept for older call sites.
+    assert snap_luminance_rest_from_images is init_luminance_rest_from_images
     grayed, _ = stereo_to_hex(tex, tex, dt=0.02)
     _, ok = hex_camera_uv("L", h, w)
     assert float(np.std(grayed[ok])) < 0.02

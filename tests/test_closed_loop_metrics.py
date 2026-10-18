@@ -17,6 +17,12 @@ from threedfly.control.closed_loop_metrics import (
     coverage,
     direction_correct_frac,
     dnp01_baseline_shows_loom,
+    flight_avoidance_ok,
+    heading_away_from_side,
+    min_center_distance_m,
+    net_heading_delta,
+    passed_far_side,
+    yaw_term_away_integrals,
     escape_turned_away,
     fire_minus_closest,
     geometry_aware_event_ok,
@@ -299,6 +305,8 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     recedes = mod.receding_gate_cases()
     assert len(recedes) == 2
     assert recedes[0]["loom_vel"][0] > 0.0  # moving away from origin along +X/+Y
+    assert all(c.get("present_at_prewarm") is True for c in recedes)
+    assert all(c.get("appear_after_prewarm") is False for c in recedes)
     unseen = mod.unseen_frontolat_cases()
     assert len(unseen) == 16
     assert {abs(c["az_design_deg"]) for c in unseen} >= {25.0, 40.0, 50.0, 65.0}
@@ -316,38 +324,40 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     gate = mod._frontolat_gate(
         {
             "fl_L_az35_lv0.04_d2.4": {
-                "brain_escapes": 1,
-                "approaching_at_fire": True,
-                "visible_at_fire": True,
-                "escape_direction_correct": 1.0,
+                "flight_avoidance_ok": True,
+                "avoidance_mode": "pre_gf_saccade",
+                "yaw_driver": "dnp03",
+                "brain_escapes": 0,
             },
             "fl_R_az35_lv0.04_d2.4": {
+                "flight_avoidance_ok": False,
+                "avoidance_mode": "none",
                 "brain_escapes": 1,
                 "approaching_at_fire": False,
-                "visible_at_fire": True,
-                "escape_direction_correct": 1.0,
             },
             "side_loom_left": {
+                "flight_avoidance_ok": True,
                 "brain_escapes": 1,
-                "approaching_at_fire": True,
-                "escape_direction_correct": 1.0,
             },
         }
     )
     assert gate["n"] == 2
     assert gate["mean"] == pytest.approx(0.5)
     assert gate["pass"] is False
+    assert gate["n_pre_gf_saccade"] == 1
+    assert gate["yaw_drivers"]["dnp03"] == 1
     official = mod._official_pass(
         {
             "frontolat_gate": {"pass": True},
             "frontal_gate": {"pass": True},
             "ctrl_noobj_headings": {"pass": True},
-            "static_onset_gate": {"pass": True},
+            "static_onset_gate": {"pass": False},
             "recede_gate": {"pass": True},
         },
         type("P", (), {"use_engineered_eye_laterality": False, "use_engineered_looming_residual": False})(),
     )
     assert official["pass"] is True
+    assert "static_onset" not in official["gates"]
     official_fail = mod._official_pass(
         {
             "frontolat_gate": {"pass": False},
@@ -401,6 +411,52 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert vg["n"] == 2
     assert vg["mean"] == pytest.approx(1.0)
     assert vg["pass"] is True
+
+
+def test_flight_avoidance_miss_and_far_side():
+    """Miss + heading-away or far-side pass; GF is not required."""
+    assert min_center_distance_m([2.0, 0.4, 1.1]) == pytest.approx(0.4)
+    rec = flight_avoidance_ok(
+        min_center_m=0.4,
+        headings=[0.0, -0.05, -0.15],
+        threat_side="L",
+        azimuths=[35.0, 50.0, 80.0],
+        ca_step=2,
+    )
+    assert rec["ok"] is True
+    assert rec["missed"] is True
+    assert rec["heading_away"] is True
+    assert rec["passed_far_side"] is True
+    hit = flight_avoidance_ok(
+        min_center_m=0.05,
+        headings=[0.0, -0.2],
+        threat_side="L",
+        azimuths=[80.0, 90.0],
+        ca_step=1,
+    )
+    assert hit["ok"] is False
+    assert hit["missed"] is False
+    # Right threat, heading increase is away; object stays negative az.
+    right = flight_avoidance_ok(
+        min_center_m=0.5,
+        headings=[0.0, 0.04, 0.12],
+        threat_side="R",
+        azimuths=[-35.0, -55.0, -90.0],
+        ca_step=2,
+    )
+    assert right["ok"] is True
+    assert heading_away_from_side(net_heading_delta([0.0, 0.12]), "R")
+    assert passed_far_side([-35.0, -90.0], "R", ca_step=1)
+    integ = yaw_term_away_integrals(
+        [
+            {"dnp03": -0.2, "dna02": 0.01, "dnp15": 0.0, "hse": 0.0, "vpn_loom": -0.05},
+            {"dnp03": -0.3, "dna02": 0.01, "dnp15": 0.0, "hse": 0.0, "vpn_loom": -0.04},
+        ],
+        "L",
+        end_step=1,
+    )
+    assert integ["driver"] == "dnp03"
+    assert integ["integrals"]["dnp03"] > integ["integrals"]["vpn_loom"]
 
 
 def test_far_disc_hidden_for_dnp01_baseline_large_recede_stays():

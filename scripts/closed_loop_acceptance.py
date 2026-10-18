@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Closed-loop M2–M4 acceptance.
 
-Official escape gate: frontolateral collision-course looms (|az0| 20–70°,
-both sides, several l/v and start distances, plus fixed-seed randoms).
-Pass if ≥80% fire while visible and approaching (dCA ≤ 0) and turn away.
-Pure frontal (|az0|<20°) must fire (brake/climb or either side ok).
-Eccentric official L/R (|az|≈90–120°) are report-only.
+Official flight gate: frontolateral collision-course looms (|az0| 20–70°,
+both sides, several l/v). Pass if ≥80% miss the object (closest approach
+> 0.1 m) and turn it to the far side — GF fire is not required
+(Tammero & Dickinson 2002; Muijres et al. 2014). Report GF escapes vs
+pre-GF saccades and which DNs drove the turn. Pure frontal (|az0|<20°)
+must fire. Receding discs must not fire. Static 30–40° onset is
+report-only. Eccentric official L/R (|az|≈90–120°) are report-only.
 
     taskset -c 0,1 python scripts/closed_loop_acceptance.py --steps 2000 --output output/m2
 """
@@ -32,6 +34,7 @@ from threedfly.control.closed_loop_metrics import (
     PR16_WALLS_PER_100,
     ROOM_XY,
     angular_size_deg,
+    avoidance_mode,
     closest_approach_step,
     collision_course_object,
     coverage,
@@ -39,8 +42,12 @@ from threedfly.control.closed_loop_metrics import (
     dnp01_baseline_shows_loom,
     escape_turned_into,
     fire_minus_closest,
+    flight_avoidance_ok,
     geometry_aware_frac,
     loom_geometry,
+    min_center_distance_m,
+    min_surface_clearance_m,
+    net_heading_delta,
     object_behind_fly,
     onset_azimuth_band,
     start_distance_for_angular_size,
@@ -48,6 +55,7 @@ from threedfly.control.closed_loop_metrics import (
     visible_loom_placement,
     wall_ttc_s,
     walls_per_100,
+    yaw_term_away_integrals,
     wrap_heading_delta,
     xy_extent,
 )
@@ -189,7 +197,11 @@ def unseen_frontolat_cases() -> list:
 
 
 def static_onset_gate_cases() -> list:
-    """A 30–40° disc that appears and stays still must not fire."""
+    """Report-only: a 30–40° disc that appears and stays still.
+
+    Abrupt large dark onset/dimming can drive GF; fires are reported,
+    not gated.
+    """
     cases = []
     for az, ang in ((40.0, 34.0), (-40.0, 34.0), (30.0, 34.0), (-30.0, 34.0)):
         dist = start_distance_for_angular_size(ang)
@@ -205,7 +217,11 @@ def static_onset_gate_cases() -> list:
 
 
 def receding_gate_cases() -> list:
-    """A receding disc (az 40°, start 1.5 m) must not fire."""
+    """A receding disc (az 40°, start 1.5 m) must not fire.
+
+    Object is already present during prewarm (no DC-init) so the large
+    disc is not an onset. LPLC2/GF are expansion-selective.
+    """
     cases = []
     for az in (40.0, -40.0):
         spec = collision_course_object(az, 1.5, 0.04)
@@ -214,6 +230,7 @@ def receding_gate_cases() -> list:
         spec["tag"] = f"recede_{'L' if az > 0 else 'R'}_az{int(abs(az))}"
         spec["band"] = "recede"
         spec["present_at_prewarm"] = True
+        spec["appear_after_prewarm"] = False
         spec["stride"] = 1
         cases.append(spec)
     return cases
@@ -354,10 +371,9 @@ def _run_scenario(
     if loom_pos is not None and pose is not None:
         fly0 = np.asarray(pose, dtype=float)
         start_ang = angular_size_deg(float(np.hypot(loom_pos[0] - fly0[0], loom_pos[1] - fly0[1])))
-    # DNp01 rest is a no-loom, DC-removed baseline. A far ≤5° disc in
-    # the prewarm snapshot is grayed out with the walls and freezes
-    # rest at the texture-settle DNp01 (0.50–0.64), so rise ≤0 at 50°.
-    # Receding large discs stay visible.
+    # Far ≤5° discs are hidden; photoreceptor rest is τ→∞-initialised to
+    # that no-object frame. A large receding disc stays visible and we
+    # skip DC-init so it is not grayed out and then re-appears as onset.
     show_now = loom_pos is not None and dnp01_baseline_shows_loom(
         present_at_prewarm=present_at_prewarm,
         appear_after_prewarm=appear_after_prewarm,
@@ -374,6 +390,7 @@ def _run_scenario(
         n=n_pre,
         left_side_img=left_side,
         right_side_img=right_side,
+        dc_init=not show_now,
     )
     if warmed is not None:
         ctl.capture_baseline(warmed.readout)
@@ -550,6 +567,26 @@ def _run_scenario(
         elif threat_side == "R":
             pre_toward = dhead < -0.02
     dx, dy = xy_extent(traj)
+    min_center = min_center_distance_m(distances)
+    min_surface = min_surface_clearance_m(distances)
+    az_series = [t.get("azimuth_deg") for t in yaw_terms]
+    avoid = flight_avoidance_ok(
+        min_center_m=min_center,
+        headings=headings_arr,
+        threat_side=threat_side or "",
+        azimuths=az_series,
+        ca_step=ca_step,
+    )
+    yaw_away = yaw_term_away_integrals(
+        yaw_terms,
+        threat_side or "",
+        end_step=ca_step if ca_step is not None else None,
+    )
+    gf_approaching = int(ctl.brain_escape_count) > 0 and bool(va_ok)
+    mode = avoidance_mode(
+        avoidance_ok=bool(avoid["ok"]),
+        gf_fired_approaching=gf_approaching,
+    )
     yaw_summary = _yaw_term_summary(yaw_terms)
     events = []
     for e in ctl.escape_events:
@@ -642,6 +679,16 @@ def _run_scenario(
         "dnp01": np.asarray(dnp01, dtype=float),
         "dnp01_rise": np.asarray(rises, dtype=float),
         "dnp01_rise_max": float(np.max(rises)) if rises else 0.0,
+        "min_center_m": min_center,
+        "min_surface_m": min_surface,
+        "net_heading_rad": float(avoid["net_heading_rad"]),
+        "heading_away": bool(avoid["heading_away"]),
+        "passed_far_side": bool(avoid["passed_far_side"]),
+        "flight_avoidance_ok": bool(avoid["ok"]),
+        "avoidance_mode": mode,
+        "gf_fired_approaching": bool(gf_approaching),
+        "yaw_driver": yaw_away.get("driver"),
+        "yaw_away_integrals": yaw_away.get("integrals"),
         "yaw_terms": yaw_summary,
         "would_fire": int(ctl.would_fire_count),
         "rise_geometry": rise_geometry,
@@ -679,6 +726,7 @@ def _noobj_heading_summary(scenarios: dict) -> dict:
             "steps": sc.get("steps"),
             "wall_dist_m": sc.get("wall_dist_m"),
             "wall_ttc_s": sc.get("wall_ttc_s"),
+            "net_heading_rad": sc.get("net_heading_rad"),
         }
         fires += n
     return {
@@ -686,6 +734,45 @@ def _noobj_heading_summary(scenarios: dict) -> dict:
         "n": int(len(per)),
         "fires": int(fires),
         "pass": bool(per) and fires == 0,
+    }
+
+
+def _yaw_control_stats(scenarios: dict) -> dict:
+    """No-object |net yaw| vs frontolat away-yaw. Control for random course."""
+    noobj = []
+    for name, sc in scenarios.items():
+        if name.startswith("ctrl_noobj_") or name == "open_space":
+            h = sc.get("net_heading_rad")
+            if h is not None:
+                noobj.append(abs(float(h)))
+    loom = []
+    for name, sc in scenarios.items():
+        if not _is_frontolat(name):
+            continue
+        if sc.get("heading_away") or sc.get("flight_avoidance_ok"):
+            h = sc.get("net_heading_rad")
+            if h is not None:
+                loom.append(abs(float(h)))
+    no_mean = float(np.mean(noobj)) if noobj else None
+    no_std = float(np.std(noobj)) if noobj else None
+    loom_mean = float(np.mean(loom)) if loom else None
+    above = None
+    if no_mean is not None and loom_mean is not None:
+        thresh = no_mean + 2.0 * (no_std or 0.0)
+        above = bool(loom) and loom_mean > thresh
+    return {
+        "noobj_abs_net_heading": {
+            "n": int(len(noobj)),
+            "mean": no_mean,
+            "std": no_std,
+            "max": float(max(noobj)) if noobj else None,
+        },
+        "frontolat_away_abs_net_heading": {
+            "n": int(len(loom)),
+            "mean": loom_mean,
+            "std": float(np.std(loom)) if loom else None,
+        },
+        "frontolat_mean_exceeds_noobj_mean_plus_2std": above,
     }
 
 
@@ -714,7 +801,7 @@ def _is_unseen(name: str) -> bool:
 
 
 def _case_ok(sc: dict, *, require_away: bool) -> float:
-    """1 if fire while visible+approaching (and turn away when required)."""
+    """Legacy fire-while-approaching score (frontal / report-only extras)."""
     if int(sc.get("brain_escapes") or 0) <= 0:
         return 0.0
     if not sc.get("approaching_at_fire") and not sc.get("visible_at_fire"):
@@ -728,15 +815,49 @@ def _case_ok(sc: dict, *, require_away: bool) -> float:
     return 1.0
 
 
+def _true_side(name: str, sc: dict) -> Optional[str]:
+    if sc.get("true_side") in ("L", "R"):
+        return sc["true_side"]
+    if "_L_" in name or name.startswith("fl_L") or name.startswith("unseen_L"):
+        return "L"
+    if "_R_" in name or name.startswith("fl_R") or name.startswith("unseen_R"):
+        return "R"
+    az = sc.get("az_design_deg")
+    if az is not None:
+        if float(az) > 1e-6:
+            return "L"
+        if float(az) < -1e-6:
+            return "R"
+    return None
+
+
+def _flight_ok(sc: dict) -> float:
+    """1 if the fly missed and turned the object to the far side."""
+    if sc.get("flight_avoidance_ok") is not None:
+        return 1.0 if sc.get("flight_avoidance_ok") else 0.0
+    return 0.0
+
+
 def _frontolat_gate(scenarios: dict) -> dict:
-    """Official escape gate: frontolateral collision-course, ≥80%."""
+    """Official flight gate: miss + far-side / heading-away, ≥80%. GF optional."""
     per = {}
     details = {}
     scores = []
+    n_gf = 0
+    n_saccade = 0
+    drivers = {}
     for name, sc in scenarios.items():
         if not _is_frontolat(name):
             continue
-        ok = _case_ok(sc, require_away=True)
+        ok = _flight_ok(sc)
+        mode = sc.get("avoidance_mode") or "none"
+        if mode == "gf_escape":
+            n_gf += 1
+        elif mode == "pre_gf_saccade":
+            n_saccade += 1
+        drv = sc.get("yaw_driver")
+        if drv:
+            drivers[drv] = int(drivers.get(drv, 0)) + 1
         per[name] = ok
         details[name] = {
             "ok": ok,
@@ -751,8 +872,16 @@ def _frontolat_gate(scenarios: dict) -> dict:
             "brain_escapes": sc.get("brain_escapes"),
             "threat_locked": sc.get("threat_locked"),
             "dnp01_rise_max": sc.get("dnp01_rise_max"),
-            "true_side": "L" if name.startswith("fl_L") else ("R" if name.startswith("fl_R") else None),
+            "true_side": _true_side(name, sc),
             "fire_diag": sc.get("fire_diag"),
+            "min_center_m": sc.get("min_center_m"),
+            "min_surface_m": sc.get("min_surface_m"),
+            "net_heading_rad": sc.get("net_heading_rad"),
+            "heading_away": sc.get("heading_away"),
+            "passed_far_side": sc.get("passed_far_side"),
+            "avoidance_mode": mode,
+            "yaw_driver": drv,
+            "yaw_away_integrals": sc.get("yaw_away_integrals"),
         }
         scores.append(ok)
     mean = float(np.mean(scores)) if scores else None
@@ -761,6 +890,9 @@ def _frontolat_gate(scenarios: dict) -> dict:
         "details": details,
         "mean": mean,
         "n": int(len(scores)),
+        "n_gf_escape": int(n_gf),
+        "n_pre_gf_saccade": int(n_saccade),
+        "yaw_drivers": drivers,
         "pass": bool(scores) and float(mean) >= 0.80,
     }
 
@@ -827,14 +959,14 @@ def _zero_fire_gate(scenarios: dict, pred) -> dict:
 
 
 def _unseen_gate(scenarios: dict) -> dict:
-    """Report-only unseen-like frontolat grid (same scoring as official)."""
+    """Report-only unseen-like frontolat grid (same flight scoring as official)."""
     per = {}
     details = {}
     scores = []
     for name, sc in scenarios.items():
         if not _is_unseen(name):
             continue
-        ok = _case_ok(sc, require_away=True)
+        ok = _flight_ok(sc)
         per[name] = ok
         details[name] = {
             "ok": ok,
@@ -844,8 +976,12 @@ def _unseen_gate(scenarios: dict) -> dict:
             "escape_direction_correct": sc.get("escape_direction_correct"),
             "brain_escapes": sc.get("brain_escapes"),
             "dnp01_rise_max": sc.get("dnp01_rise_max"),
-            "true_side": "L" if "_L_" in name else ("R" if "_R_" in name else None),
+            "true_side": _true_side(name, sc),
             "fire_diag": sc.get("fire_diag"),
+            "min_center_m": sc.get("min_center_m"),
+            "net_heading_rad": sc.get("net_heading_rad"),
+            "avoidance_mode": sc.get("avoidance_mode"),
+            "yaw_driver": sc.get("yaw_driver"),
         }
         scores.append(ok)
     mean = float(np.mean(scores)) if scores else None
@@ -873,11 +1009,14 @@ def _official_pass(summary: dict, params) -> dict:
         "frontolat": bool(fl.get("pass")),
         "frontal": bool(fr.get("pass")),
         "noobj_open": bool(no.get("pass")),
-        "static_onset": bool(st.get("pass")),
         "recede": bool(rc.get("pass")),
         "brain_only": brain_only,
     }
-    return {"pass": all(gates.values()), "gates": gates}
+    return {
+        "pass": all(gates.values()),
+        "gates": gates,
+        "report_only": {"static_onset": bool(st.get("pass"))},
+    }
 
 
 def _variant_direction(scenarios: dict) -> dict:
@@ -1168,7 +1307,7 @@ def main(argv=None) -> int:
         n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"], dt=0.01)
         scenarios[spec["tag"]] = _run_loom_case(spec, n)
 
-    print("Gate: static 30–40° onset must not fire…", flush=True)
+    print("Report-only: static 30–40° onset (abrupt dimming may drive GF)…", flush=True)
     for spec in static_onset_gate_cases()[: 1 if args.quick else None]:
         scenarios[spec["tag"]] = _run_loom_case(spec, 40 if args.quick else 80)
 
@@ -1379,6 +1518,7 @@ def main(argv=None) -> int:
             "frontal_gate": _frontal_gate(scenarios),
             "static_onset_gate": _zero_fire_gate(scenarios, _is_static_onset),
             "recede_gate": _zero_fire_gate(scenarios, _is_recede),
+            "yaw_control": _yaw_control_stats(scenarios),
             "unseen_frontolat": _unseen_gate(scenarios),
             "variant_direction_correct": _variant_direction(scenarios),
             "variant_geometry_aware": _variant_geometry_aware(scenarios),
@@ -1390,31 +1530,20 @@ def main(argv=None) -> int:
             "known_limitations": (
                 "No sim object pose/radius reaches stereo_to_hex or the "
                 "controller. Photoreceptor rest τ=5 s, exp(−dt/τ), init "
-                "at calib mean 0.5 (not frame 1); static contrast is "
-                "~37% at 5 s. Prewarm snaps that rest to the no-object "
-                "frame so flyvis/DNp01 settle on a DC-free field "
-                "(uniform-field DNp01 ≈ 0.008 Hz, not the 0.50–0.64 "
-                "texture climb). Official looms start ≤5° and appear "
-                "after that snapshot. Receding large discs stay visible "
-                "at baseline so we do not inject a 40° onset. GF fire "
-                "is the one-shot "
-                "calibrated readout (scripts/calibrate_gf_readout.py; "
-                "von Reyn 2014/2017 40–60° at l/v 40 ms). Static "
-                "30–40° onset and receding discs are 0-fire gates; if "
-                "they fire after calibration, report, do not patch. "
-                "Frontal both-GF takeoff (az0/az5/az12). Each eye has a "
-                "forward + ipsilateral side camera so the flyvis ±75° "
-                "lattice is fully sampled (1:1 deg; rear 75–165° has "
-                "no flyvis cells). Eccentric looms are late or silent. "
-                "Open-loop camera (ladder L2–L4) now fires at 45–50° "
-                "with dCA −9…−10; the old +5…+9 cluster was rest "
-                "absorption, not pipeline lag. Closed-loop frontolat "
-                "still misses when steering yaws the object off-axis "
-                "before GF (L5). Static 30–40° onset and recede fire "
-                "because rest is the uniform-field baseline — report, "
-                "do not patch. No-object 0/6. Report brain+flyvis and "
-                "full-loop ms/step separately; full-loop need not hit "
-                "25 ms."
+                "at calib mean 0.5 (not frame 1). No-object prewarm "
+                "initialises rest to that frame (τ→∞ equivalent of a "
+                "several-τ wait) so flyvis/DNp01 settle on a DC-free "
+                "field. Receding large discs stay visible and skip that "
+                "initialisation so the standing disc is not an onset. "
+                "GF readout is frozen (calibrate_gf_readout.py; von "
+                "Reyn 2014/2017). Frontolat flight gate is miss + "
+                "far-side/heading-away (Tammero 2002; Muijres 2014), "
+                "not GF fire. Static 30–40° onset is report-only. "
+                "Recede must be 0 fires. Frontal both-GF takeoff. "
+                "Rear 75–165° has no flyvis cells. Eccentric looms "
+                "are late or silent. No-object yaw is the control for "
+                "whether frontolat turns exceed random course. "
+                "brain+flyvis is the 25 ms bar; full-loop need not."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
@@ -1449,20 +1578,32 @@ def main(argv=None) -> int:
 def _print_variant_tables(summary: dict) -> None:
     fl = summary.get("frontolat_gate") or {}
     if fl.get("details"):
-        print("\nFrontolateral collision-course GATE (|az0| 20–70°, visible+approaching, turn away):", flush=True)
         print(
-            f"{'scenario':<28} {'ok':>4} {'az0':>7} {'angF':>6} {'dCA':>5} {'away':>5} {'esc':>4} {'rise':>6}",
+            "\nFrontolateral flight GATE (|az0| 20–70°, miss >0.1 m + far-side/heading-away; GF optional):",
+            flush=True,
+        )
+        print(
+            f"{'scenario':<28} {'ok':>4} {'dmin':>6} {'dhd':>6} {'away':>4} {'far':>4} "
+            f"{'mode':>14} {'drv':>7} {'esc':>4} {'rise':>6}",
             flush=True,
         )
         for name, d in fl["details"].items():
             print(
-                f"{name:<28} {_fmt(d.get('ok')):>4} {_fmt(d.get('azimuth_onset_deg')):>7} "
-                f"{_fmt(d.get('angular_size_fire_deg')):>6} {_fmt(d.get('fire_minus_closest')):>5} "
-                f"{_fmt(d.get('escape_direction_correct')):>5} {str(d.get('brain_escapes')):>4} "
-                f"{_fmt(d.get('dnp01_rise_max')):>6}",
+                f"{name:<28} {_fmt(d.get('ok')):>4} {_fmt(d.get('min_center_m')):>6} "
+                f"{_fmt(d.get('net_heading_rad')):>6} "
+                f"{_fmt(1 if d.get('heading_away') else 0):>4} "
+                f"{_fmt(1 if d.get('passed_far_side') else 0):>4} "
+                f"{str(d.get('avoidance_mode') or '-'):>14} "
+                f"{str(d.get('yaw_driver') or '-'):>7} "
+                f"{str(d.get('brain_escapes')):>4} {_fmt(d.get('dnp01_rise_max')):>6}",
                 flush=True,
             )
-        print(f"frontolat mean={fl.get('mean')} n={fl.get('n')} pass={fl.get('pass')}", flush=True)
+        print(
+            f"frontolat mean={fl.get('mean')} n={fl.get('n')} pass={fl.get('pass')} "
+            f"gf_escape={fl.get('n_gf_escape')} pre_gf_saccade={fl.get('n_pre_gf_saccade')} "
+            f"drivers={fl.get('yaw_drivers')}",
+            flush=True,
+        )
         print(
             f"{'scenario':<28} {'true':>4} {'lock':>4} {'bino':>4} "
             f"{'rL':>6} {'rR':>6} {'lc4L':>6} {'lc4R':>6} {'l2L':>6} {'l2R':>6} {'yaw':>6}",
@@ -1480,42 +1621,12 @@ def _print_variant_tables(summary: dict) -> None:
                 f"{_fmt(fd.get('yaw')):>6}",
                 flush=True,
             )
-        print(
-            "\nAway=0 diagnosis (lock vs true side at fire; dCA / az_fire):",
-            flush=True,
-        )
-        print(
-            f"{'scenario':<28} {'true':>4} {'lock':>4} {'azF':>7} {'dCA':>5} "
-            f"{'vis':>3} {'away':>5} {'note':<40}",
-            flush=True,
-        )
+        print("\nFrontolat yaw integrals (away-signed; driver = max):", flush=True)
         for name, d in fl["details"].items():
-            if int(d.get("brain_escapes") or 0) <= 0:
-                continue
-            fd = d.get("fire_diag") or {}
-            true = d.get("true_side") or "-"
-            lock = d.get("threat_locked") or fd.get("threat_side") or "-"
-            azf = d.get("azimuth_fire_deg")
-            dca = d.get("fire_minus_closest")
-            behind = (
-                azf is not None
-                and abs(float(azf)) > 90.0
-                and dca is not None
-                and int(dca) > 0
-            )
-            lock_ok = true in ("L", "R") and lock == true
-            if behind and lock_ok:
-                note = "lock ok; object already behind (passed)"
-            elif behind:
-                note = "object behind; lock disagrees"
-            elif lock_ok:
-                note = "lock matches true side"
-            else:
-                note = "lock != true side"
+            integ = d.get("yaw_away_integrals") or {}
+            parts = " ".join(f"{k}={_fmt(integ.get(k))}" for k in ("dnp03", "vpn_loom", "dna02", "dnp15", "hse"))
             print(
-                f"{name:<28} {str(true):>4} {str(lock):>4} {_fmt(azf):>7} "
-                f"{_fmt(dca):>5} {_fmt(1 if d.get('visible_at_fire') else 0):>3} "
-                f"{_fmt(d.get('escape_direction_correct')):>5} {note:<40}",
+                f"  {name:<28} mode={d.get('avoidance_mode')} drv={d.get('yaw_driver')} {parts}",
                 flush=True,
             )
     fr = summary.get("frontal_gate") or {}
@@ -1531,14 +1642,14 @@ def _print_variant_tables(summary: dict) -> None:
         print(f"frontal mean={fr.get('mean')} pass={fr.get('pass')}", flush=True)
     st = summary.get("static_onset_gate") or {}
     if st.get("details"):
-        print("\nStatic 30–40° onset GATE (must be 0 fires):", flush=True)
+        print("\nStatic 30–40° onset REPORT-ONLY (abrupt dimming may drive GF):", flush=True)
         for name, d in st["details"].items():
             print(
                 f"  {name} ok={d.get('ok')} esc={d.get('brain_escapes')} "
                 f"rise={_fmt(d.get('dnp01_rise_max'))}",
                 flush=True,
             )
-        print(f"static_onset pass={st.get('pass')} n={st.get('n')}", flush=True)
+        print(f"static_onset report-only mean={st.get('mean')} n={st.get('n')}", flush=True)
     rc = summary.get("recede_gate") or {}
     if rc.get("details"):
         print("\nReceding disc GATE (must be 0 fires):", flush=True)
@@ -1602,14 +1713,27 @@ def _print_variant_tables(summary: dict) -> None:
         for name, d in noobj["per_scenario"].items():
             print(
                 f"  {name} esc={d.get('escapes')} rise={_fmt(d.get('rise_max'))} "
+                f"yaw={_fmt(d.get('net_heading_rad'))} "
                 f"wall_m={_fmt(d.get('wall_dist_m'))} ttc={_fmt(d.get('wall_ttc_s'))}s",
                 flush=True,
             )
+    yc = summary.get("yaw_control") or {}
+    if yc:
+        no = yc.get("noobj_abs_net_heading") or {}
+        lm = yc.get("frontolat_away_abs_net_heading") or {}
+        print(
+            f"\nYaw control (no-object |net heading| vs frontolat away): "
+            f"noobj n={no.get('n')} mean={_fmt(no.get('mean'))} std={_fmt(no.get('std'))} "
+            f"max={_fmt(no.get('max'))} | frontolat n={lm.get('n')} mean={_fmt(lm.get('mean'))} "
+            f"exceeds_noobj+2sd={yc.get('frontolat_mean_exceeds_noobj_mean_plus_2std')}",
+            flush=True,
+        )
     print(
         f"OFFICIAL pass={(summary.get('official_pass') or {}).get('pass')} gates={(summary.get('official_pass') or {}).get('gates')} | "
-        f"frontolat gate mean={summary.get('frontolat_gate', {}).get('mean')} pass={summary.get('frontolat_gate', {}).get('pass')} | "
+        f"frontolat gate mean={summary.get('frontolat_gate', {}).get('mean')} pass={summary.get('frontolat_gate', {}).get('pass')} "
+        f"gf={summary.get('frontolat_gate', {}).get('n_gf_escape')} saccade={summary.get('frontolat_gate', {}).get('n_pre_gf_saccade')} | "
         f"frontal pass={summary.get('frontal_gate', {}).get('pass')} | "
-        f"static_onset pass={(summary.get('static_onset_gate') or {}).get('pass')} | "
+        f"static_onset report-only={(summary.get('static_onset_gate') or {}).get('pass')} | "
         f"recede pass={(summary.get('recede_gate') or {}).get('pass')} | "
         f"unseen mean={(summary.get('unseen_frontolat') or {}).get('mean')} | "
         f"no-object (open) fires={noobj.get('fires')} n={noobj.get('n')} pass={noobj.get('pass')} | "

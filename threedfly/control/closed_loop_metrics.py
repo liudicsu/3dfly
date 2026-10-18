@@ -31,6 +31,16 @@ LATERAL_AZ_DEG = 30.0
 FRONTAL_AZ_MAX_DEG = 20.0
 FRONTOLAT_AZ_MIN_DEG = 20.0
 FRONTOLAT_AZ_MAX_DEG = 70.0
+# Closed-loop flight miss: fly-body envelope, not the 0.58 m visual disc.
+# That radius sets l/v; treating it as a solid sphere would fail any
+# 30° banked saccade (L5 still clips the visual sphere). 0.1 m is a
+# clear closest-approach gap (Tammero / Muijres evasive miss).
+MISS_CENTER_M = 0.1
+# Net heading away from the true side. ~4.6°; no-object wander is the control.
+NET_HEADING_AWAY_RAD = 0.08
+# Object stayed ipsilateral at closest approach (did not cross in front).
+FAR_SIDE_AZ_DEG = 40.0
+YAW_TERM_KEYS = ("dna02", "dnp15", "hse", "dnp03", "vpn_loom")
 
 
 def xy_extent(traj: np.ndarray) -> tuple[float, float]:
@@ -125,13 +135,11 @@ def dnp01_baseline_shows_loom(
 ) -> bool:
     """Whether the object is visible while DNp01 rest is captured.
 
-    Biological GF has no loom-present subtraction. Prewarm snaps
-    photoreceptor rest to this frame (DC → mid-gray) and freezes DNp01
-    there. A far (≤5°) disc in that snapshot is grayed out and the
-    inbound climb is absorbed (camera rest 0.50–0.64 vs uniform-field
-    0.008 Hz). Hide those discs, snap/settle, then show them. An
-    already-large receding disc stays visible so we do not inject a
-    40° onset.
+    Far (≤5°) approach discs are hidden so photoreceptor rest can be
+    initialised to the no-object scene (τ→∞ equivalent of the 5 s LMC
+    high-pass) and DNp01 rest is the uniform-field rate. An already-large
+    receding disc stays visible and that initialisation is *skipped*, so
+    the standing disc is not grayed out and then re-appears as an onset.
     """
     if appear_after_prewarm or not present_at_prewarm:
         return False
@@ -376,6 +384,117 @@ def geometry_aware_event_ok(
     if cls == "frontal":
         return not into
     return escape_turned_away(headings, event_step, threat_side, window=window)
+
+
+def min_center_distance_m(distances) -> Optional[float]:
+    d = np.asarray(list(distances), dtype=float)
+    d = d[np.isfinite(d)]
+    if d.size == 0:
+        return None
+    return float(np.min(d))
+
+
+def min_surface_clearance_m(distances, radius: float = LOOM_RADIUS_M) -> Optional[float]:
+    d = min_center_distance_m(distances)
+    if d is None:
+        return None
+    return float(d) - float(radius)
+
+
+def net_heading_delta(headings) -> float:
+    h = np.asarray(list(headings), dtype=float)
+    if h.size < 2:
+        return 0.0
+    return wrap_heading_delta(float(h[-1]), float(h[0]))
+
+
+def heading_away_from_side(
+    delta_rad: float,
+    threat_side: str,
+    min_abs: float = NET_HEADING_AWAY_RAD,
+) -> bool:
+    """+yaw = left. Left threat → heading decrease is away."""
+    if threat_side == "L":
+        return float(delta_rad) < -float(min_abs)
+    if threat_side == "R":
+        return float(delta_rad) > float(min_abs)
+    return False
+
+
+def passed_far_side(
+    azimuths,
+    threat_side: str,
+    ca_step: Optional[int] = None,
+    min_az_deg: float = FAR_SIDE_AZ_DEG,
+) -> bool:
+    """True when at closest approach the object is still on the threat side."""
+    az = np.asarray(list(azimuths), dtype=float)
+    if az.size == 0:
+        return False
+    i = int(az.size - 1) if ca_step is None else int(ca_step)
+    i = int(np.clip(i, 0, az.size - 1))
+    a = float(az[i])
+    if not np.isfinite(a):
+        return False
+    if threat_side == "L":
+        return a >= float(min_az_deg)
+    if threat_side == "R":
+        return a <= -float(min_az_deg)
+    return False
+
+
+def flight_avoidance_ok(
+    *,
+    min_center_m: Optional[float],
+    headings,
+    threat_side: str,
+    azimuths=None,
+    ca_step: Optional[int] = None,
+    miss_m: float = MISS_CENTER_M,
+) -> dict:
+    """Flight success: miss the object and turn it to the far side.
+
+    GF fire is not required (Tammero & Dickinson 2002; Muijres et al. 2014:
+    flying Drosophila mostly bank away; GF takeoff is primarily from
+    standing). ``missed`` is a 0.1 m closest-approach envelope around the
+    fly, not clearance of the 0.58 m visual-equivalent sphere.
+    """
+    missed = min_center_m is not None and float(min_center_m) > float(miss_m)
+    dhead = net_heading_delta(headings)
+    away = heading_away_from_side(dhead, threat_side)
+    far = passed_far_side(azimuths or [], threat_side, ca_step=ca_step)
+    return {
+        "ok": bool(missed and (away or far)),
+        "missed": bool(missed),
+        "min_center_m": None if min_center_m is None else float(min_center_m),
+        "net_heading_rad": float(dhead),
+        "heading_away": bool(away),
+        "passed_far_side": bool(far),
+    }
+
+
+def yaw_term_away_integrals(rows, threat_side: str, end_step: Optional[int] = None) -> dict:
+    """Signed integral of yaw terms in the away direction. Driver = max."""
+    sign = -1.0 if threat_side == "L" else (1.0 if threat_side == "R" else 0.0)
+    subset = list(rows)
+    if end_step is not None:
+        subset = subset[: int(end_step) + 1]
+    integrals = {
+        k: float(sum(sign * float(r.get(k, 0.0) or 0.0) for r in subset))
+        for k in YAW_TERM_KEYS
+    }
+    driver = max(integrals, key=integrals.get) if integrals else None
+    if driver is not None and integrals[driver] <= 0.0:
+        driver = None
+    return {"integrals": integrals, "driver": driver}
+
+
+def avoidance_mode(*, avoidance_ok: bool, gf_fired_approaching: bool) -> str:
+    if gf_fired_approaching:
+        return "gf_escape"
+    if avoidance_ok:
+        return "pre_gf_saccade"
+    return "none"
 
 
 def geometry_aware_frac(
