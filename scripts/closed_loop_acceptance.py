@@ -1127,14 +1127,16 @@ def main(argv=None) -> int:
                 "open-loop DNp01 rise 0.20 is ~90°. Do not retune the brain for them."
             ),
             "known_limitations": (
-                "Hex-native open-loop centered discs at l/v=0.04 fire DNp01 rise "
-                "0.20 at 38–49°. The same l/v as a 3D camera disc on a collision "
-                "course (20 ms tick) peaks at ~0.06–0.11 while approaching — too "
-                "few hex-dark frames for GF. Slow 3D collision-course (l/v~0.3) "
-                "can fire on the way in but at 75–120°, matching the late "
-                "eccentric GF. Room coverage stays ~0.06 after VPN rest (false "
-                "left kicks gone). Do not retune the controller to chase either."
+                "No sim object pose/radius reaches stereo_to_hex or the "
+                "controller (rendered pixels + 5° FWHM Gaussian + p80 "
+                "luminance shift only). Camera-vs-hex at az=35° l/v=0.04 "
+                "without paint: disc 0.11/0.10/0.09 vs 0.00; LPLC2 peak "
+                "err 25%; DNp01 peak 0.37 vs 1.72, 0.20 onset 175° vs 62°. "
+                "Gray-hex DNp01 L−R is 0.0004 (brain, not eye mask). "
+                "150° eyes see room walls as expanding texture — that is "
+                "the walls/no-object leftover, not a hidden oracle."
             ),
+            "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
             "ms_per_step_mean": room.get("ms_per_step_brain_flyvis_mean"),
             "ms_flyvis_frame_median": room.get("ms_flyvis_frame_median"),
