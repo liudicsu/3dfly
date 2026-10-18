@@ -161,12 +161,13 @@ class FlyvisEye:
         self,
         checkpoint: str = FLYVIS_CHECKPOINT,
         dt: float = DT,
-        torch_threads: int = 2,
+        torch_threads: int = 1,
         network=None,
     ):
         if network is None and not flyvis_available():
             raise ImportError("flyvis is required for FlyvisEye. pip install 'threedfly[brain]'")
         configure_threads(torch_threads=torch_threads)
+        self._torch_threads = int(torch_threads)
         self.dt = float(dt)
         self.checkpoint = checkpoint
         self._net = network
@@ -183,7 +184,13 @@ class FlyvisEye:
         import torch
         from flyvis import NetworkView
 
-        torch.set_num_threads(max(1, int(getattr(torch, "get_num_threads", lambda: 2)())))
+        n_th = max(1, int(getattr(self, "_torch_threads", 1) or 1))
+        torch.set_num_threads(n_th)
+        if hasattr(torch, "set_num_interop_threads"):
+            try:
+                torch.set_num_interop_threads(min(n_th, 2))
+            except RuntimeError:
+                pass
         net = NetworkView(self.checkpoint).init_network()
         self._bind_network(net)
 
@@ -226,6 +233,45 @@ class FlyvisEye:
         out = {t: act[:, idx] for t, idx in self.type_index.items() if idx.size}
         return out, float(ms)
 
+    def step_pair_batched(self, hex_L, hex_R, state_L, state_R):
+        """One flyvis forward for both eyes (batch=2). Returns vL, vR, sL, sR."""
+        import torch
+
+        fL = np.asarray(hex_L, dtype=np.float32).reshape(-1)
+        fR = np.asarray(hex_R, dtype=np.float32).reshape(-1)
+        if fL.size != N_HEX or fR.size != N_HEX:
+            raise ValueError(f"hex frames must have {N_HEX} cells")
+        if state_L is None or state_R is None:
+            raise RuntimeError("batched step needs both eye states")
+        # Stack *nodes/edges only* on dim 0, then rebuild sources/targets as
+        # RefTensors. Concatenating already-dereferenced sources.activity
+        # along the last axis makes weight (n_edges,) vs activity (2 n_edges).
+        stacked = stack_flyvis_states(state_L, state_R, self._net)
+        x = torch.as_tensor(np.stack([fL, fR], axis=0)[:, None, None, :], dtype=torch.float32)
+        with torch.inference_mode():
+            states = self._net.simulate(
+                x, self.dt, initial_state=stacked, as_states=True
+            )
+        if isinstance(states, (list, tuple)):
+            last = states[-1]
+        else:
+            last = states
+        sL, sR = split_flyvis_state(last, self._net)
+        act = _activity_from_state(last)
+        if act is None:
+            raise RuntimeError("flyvis batched state has no nodes.activity")
+        act = np.asarray(act)
+        if act.ndim == 1:
+            raise RuntimeError("batched activity is not (2, n)")
+        if act.shape[0] != 2:
+            raise RuntimeError(
+                f"batched activity shape {act.shape} is not (2, n_nodes); "
+                "refusing to flatten (that was the weight vs 2×activity bug)"
+            )
+        def _volts(row):
+            return {t: row[idx] for t, idx in self.type_index.items() if idx.size}
+        return _volts(act[0].reshape(-1)), _volts(act[1].reshape(-1)), sL, sR
+
     def step(self, hex_frame: np.ndarray) -> Dict[str, np.ndarray]:
         """Advance one frame, keeping network state. ``hex_frame`` is (721,) in [0, 1]."""
         import torch
@@ -235,8 +281,8 @@ class FlyvisEye:
             raise ValueError(f"hex frame must have {N_HEX} cells, got {frame.size}")
         if self._state is None:
             self.reset()
-        x = torch.as_tensor(frame.reshape(1, 1, 1, -1))
-        with torch.no_grad():
+        x = torch.as_tensor(frame.reshape(1, 1, 1, -1), dtype=torch.float32)
+        with torch.inference_mode():
             states = self._net.simulate(
                 x, self.dt, initial_state=self._state, as_states=True
             )
@@ -278,6 +324,101 @@ class FlyvisEye:
         return FlyvisCalibration(V_gray=V_gray, p99=p99, uv=self.uv, rmax=RMAX)
 
 
+def _raw_group(state, group: str):
+    """``nodes`` / ``edges`` mapping without AutoDeref-dereferencing RefTensors."""
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        return dict.get(state, group)
+    return getattr(state, group, None)
+
+
+def _raw_tensor(group, key: str):
+    import torch
+    from flyvis.utils.tensor_utils import RefTensor
+
+    if group is None:
+        return None
+    if isinstance(group, dict):
+        val = dict.get(group, key)
+    else:
+        val = getattr(group, key, None)
+    if isinstance(val, RefTensor):
+        val = val.values
+    if isinstance(val, torch.Tensor) and val.ndim == 1:
+        val = val.unsqueeze(0)
+    return val
+
+
+def stack_node_tensors(state_L, state_R):
+    """Batch-cat ``nodes`` / ``edges`` on dim 0. Does not touch sources/targets."""
+    import torch
+    from flyvis.utils.tensor_utils import AutoDeref
+
+    out = AutoDeref(nodes=AutoDeref(), edges=AutoDeref())
+    for group in ("nodes", "edges"):
+        a = _raw_group(state_L, group)
+        b = _raw_group(state_R, group)
+        if a is None or b is None:
+            continue
+        keys = list(a.keys()) if hasattr(a, "keys") else []
+        for k in keys:
+            va, vb = _raw_tensor(a, k), _raw_tensor(b, k)
+            if not isinstance(va, torch.Tensor) or not isinstance(vb, torch.Tensor):
+                continue
+            if va.shape[0] < 1 or vb.shape[0] < 1:
+                raise ValueError(f"{group}.{k} empty batch: {tuple(va.shape)}")
+            out[group][k] = torch.cat([va[:1], vb[:1]], dim=0)
+    return out
+
+
+def split_node_tensors(state):
+    """Split a batch-2 ``nodes`` / ``edges`` state into two batch-1 states."""
+    import torch
+    from flyvis.utils.tensor_utils import AutoDeref
+
+    left = AutoDeref(nodes=AutoDeref(), edges=AutoDeref())
+    right = AutoDeref(nodes=AutoDeref(), edges=AutoDeref())
+    for group in ("nodes", "edges"):
+        g = _raw_group(state, group)
+        if g is None:
+            continue
+        keys = list(g.keys()) if hasattr(g, "keys") else []
+        for k in keys:
+            v = _raw_tensor(g, k)
+            if not isinstance(v, torch.Tensor):
+                continue
+            if v.shape[0] != 2:
+                raise ValueError(f"{group}.{k} expected batch 2, got {tuple(v.shape)}")
+            left[group][k] = v[0:1].contiguous()
+            right[group][k] = v[1:2].contiguous()
+    return left, right
+
+
+def stack_flyvis_states(state_L, state_R, net):
+    """Batch=2 flyvis state with sources/targets rebuilt as RefTensors."""
+    raw = stack_node_tensors(state_L, state_R)
+    if hasattr(net, "_state_api"):
+        return net._state_api(raw)
+    return raw
+
+
+def split_flyvis_state(state, net):
+    left, right = split_node_tensors(state)
+    if hasattr(net, "_state_api"):
+        return net._state_api(left), net._state_api(right)
+    return left, right
+
+
+# Kept for tests that imported the old walk-everything stack.
+def _stack_autoderef(a, b):
+    return stack_node_tensors(a, b)
+
+
+def _split_autoderef(state):
+    return split_node_tensors(state)
+
+
 def _activity_from_state(state) -> Optional[np.ndarray]:
     try:
         act = state.nodes.activity
@@ -298,6 +439,8 @@ class HandoffPlan:
     v_gray: np.ndarray
     p99: np.ndarray
     rmax: float = RMAX
+    # Contiguous [start, end) per flyvis type — avoids np.unique + object masks.
+    type_ranges: Dict[str, tuple] = field(default_factory=dict)
 
 
 def compile_handoff_plan(
@@ -307,6 +450,8 @@ def compile_handoff_plan(
     remap: Optional[np.ndarray] = None,
 ) -> HandoffPlan:
     idx_all, typ_all, col_all, vg_all, p_all = [], [], [], [], []
+    type_ranges: Dict[str, tuple] = {}
+    off = 0
     for t in HANDOFF_FLYVIS_TYPES:
         key = f"{t}|{side}"
         if key not in hmap.index or t not in calib.uv or t not in calib.V_gray:
@@ -322,11 +467,16 @@ def compile_handoff_plan(
             mapped = remap[cidx]
             ok = mapped >= 0
             cidx, col, vg = mapped[ok], col[ok], vg[ok]
+        n = int(len(cidx))
+        if n == 0:
+            continue
+        type_ranges[t] = (off, off + n)
+        off += n
         idx_all.append(cidx)
-        typ_all.append(np.full(len(cidx), t, dtype=object))
+        typ_all.append(np.full(n, t, dtype=object))
         col_all.append(col)
         vg_all.append(np.asarray(vg, dtype=np.float32))
-        p_all.append(np.full(len(cidx), float(calib.p99[t]), dtype=np.float32))
+        p_all.append(np.full(n, float(calib.p99[t]), dtype=np.float32))
     if not idx_all:
         return HandoffPlan(
             idx=np.zeros(0, dtype=np.int64),
@@ -335,6 +485,7 @@ def compile_handoff_plan(
             v_gray=np.zeros(0, dtype=np.float32),
             p99=np.zeros(0, dtype=np.float32),
             rmax=calib.rmax,
+            type_ranges={},
         )
     return HandoffPlan(
         idx=np.concatenate(idx_all).astype(np.int64),
@@ -343,7 +494,27 @@ def compile_handoff_plan(
         v_gray=np.concatenate(vg_all),
         p99=np.concatenate(p_all),
         rmax=float(calib.rmax),
+        type_ranges=type_ranges,
     )
+
+
+# T4/T5 drive LPLC2/LC4/DNp01. Calibration p99 comes from high-contrast
+# hex movies; a compact room object sits well below that, so GF waits
+# until ~80°. A modest type gain restores biological 40–60° sensitivity
+# without a geometry oracle. Wide-field HS is subtracted in the controller.
+# Identity: amplifying T4/T5 to chase 40–60° also amplifies room flow
+# (LPLC2 0.43 in no-object yaw0) and false-escapes. Closed-loop LC4/LPLC2
+# stay near 0 until ~60–70° of disk on this hex/FOV; report that window.
+EXPANSION_HANDOFF_GAIN = {
+    "T4a": 1.0,
+    "T4b": 1.0,
+    "T4c": 1.0,
+    "T4d": 1.0,
+    "T5a": 1.0,
+    "T5b": 1.0,
+    "T5c": 1.0,
+    "T5d": 1.0,
+}
 
 
 def apply_handoff_plan(
@@ -353,15 +524,29 @@ def apply_handoff_plan(
     if plan.idx.size == 0:
         return plan.idx, np.zeros(0, dtype=np.float32)
     V = np.zeros(plan.idx.size, dtype=np.float32)
-    for t in np.unique(plan.types):
+    ranges = plan.type_ranges
+    if ranges:
+        items = ranges.items()
+    else:
+        items = ((t, None) for t in np.unique(plan.types))
+    for t, sl in items:
         if t not in voltages:
             continue
-        m = plan.types == t
         src = np.asarray(voltages[t], dtype=np.float32)
-        V[m] = src[plan.cols[m]]
+        if sl is None:
+            m = plan.types == t
+            V[m] = src[plan.cols[m]]
+        else:
+            a, b = sl
+            V[a:b] = src[plan.cols[a:b]]
     rates = (plan.rmax * np.clip(np.maximum(V - plan.v_gray, 0.0) / (plan.p99 + 1e-6), 0.0, 1.0)).astype(
         np.float32
     )
+    if ranges:
+        for t, (a, b) in ranges.items():
+            g = EXPANSION_HANDOFF_GAIN.get(t)
+            if g is not None and g != 1.0:
+                rates[a:b] *= float(g)
     return plan.idx, rates
 
 
@@ -380,8 +565,22 @@ def handoff_rates_for_frame(
     return apply_handoff_plan(compile_handoff_plan(hmap, calib, side, remap=remap), voltages)
 
 
+def halt_name_mask(values) -> np.ndarray:
+    """True where a type / subclass / extra annotation mentions a haltere."""
+    arr = np.asarray(values, dtype=object).reshape(-1)
+    return np.fromiter(("halt" in str(v).lower() for v in arr), dtype=bool, count=arr.size)
+
+
 def haltere_indices(connectome: ConnectomeData, remap: Optional[np.ndarray] = None) -> np.ndarray:
-    idx = np.flatnonzero(connectome.subclass == "haltere")
+    """Search type, subclass, superclass, and extras for ``halt`` (not exact 'haltere')."""
+    mask = halt_name_mask(connectome.subclass)
+    mask |= halt_name_mask(connectome.typ)
+    extras = getattr(connectome, "extras", None) or {}
+    for key in extras:
+        extra = np.asarray(extras[key], dtype=object)
+        if extra.shape == mask.shape:
+            mask |= halt_name_mask(extra)
+    idx = np.flatnonzero(mask)
     if remap is not None:
         mapped = remap[idx]
         return mapped[mapped >= 0]

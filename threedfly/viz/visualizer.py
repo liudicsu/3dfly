@@ -3,10 +3,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-import open3d as o3d
 from typing import Optional, Dict
 import threading
 import time
+
+try:
+    import open3d as o3d
+except ImportError:  # optional; matplotlib / viz_mode=none do not need it
+    o3d = None
 
 
 class Visualizer:
@@ -56,6 +60,8 @@ class Visualizer:
         
         # Open3D visualizer
         if mode in ["open3d", "both"]:
+            if o3d is None:
+                raise ImportError("open3d is required for viz_mode='open3d' / 'both'")
             self.o3d_vis = o3d.visualization.Visualizer()
             self.o3d_vis.create_window(window_name="3dfly Point Cloud", width=800, height=600)
             self.o3d_cloud = o3d.geometry.PointCloud()

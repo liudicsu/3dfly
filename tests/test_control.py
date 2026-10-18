@@ -55,6 +55,7 @@ def test_exploration_policy_init():
 
 def test_exploration_signal():
     """Test exploration signal computation."""
+    pytest.importorskip("open3d")
     from threedfly.vision import PointCloudMapper
     
     policy = ExplorationPolicy(exploration_weight=0.5, random_exploration_prob=0.0)
@@ -70,6 +71,7 @@ def test_exploration_signal():
 
 def test_frontier_directions():
     """Test frontier direction identification."""
+    pytest.importorskip("open3d")
     from threedfly.vision import PointCloudMapper
     
     policy = ExplorationPolicy()
@@ -235,6 +237,7 @@ def test_biological_controller_does_not_add_exploration_to_action():
 
 def test_exploration_policy_biases_luminance_not_world_heading():
     """Turn signal is a heading error in [-1, 1]; apply_visual_bias shifts L vs R."""
+    pytest.importorskip("open3d")
     from threedfly.vision import PointCloudMapper
 
     policy = ExplorationPolicy(exploration_weight=1.0, random_exploration_prob=0.0)

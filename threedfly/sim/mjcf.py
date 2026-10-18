@@ -14,7 +14,44 @@ a 200 Hz wingbeat.
 from pathlib import Path
 
 # Get path to assets directory
-ASSETS_DIR = Path(__file__).parent.parent.parent / "assets" / "fly_meshes"
+ASSETS_ROOT = Path(__file__).parent.parent.parent / "assets"
+ASSETS_DIR = ASSETS_ROOT / "fly_meshes"
+
+
+def write_one_over_f_png(path: Path, n: int = 256, contrast: float = 0.05, seed: int = 2) -> Path:
+    """Natural-like 1/f wall texture (real-fly test backgrounds, not hard checkers)."""
+    import struct
+    import zlib
+
+    import numpy as np
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(int(seed))
+    spec = rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n))
+    fy = np.fft.fftfreq(n)[:, None]
+    fx = np.fft.fftfreq(n)[None, :]
+    freq = np.sqrt(fx * fx + fy * fy)
+    freq[0, 0] = 1.0
+    img = np.fft.ifft2(spec / freq).real
+    img = (img - float(img.mean())) / max(float(img.std()), 1e-9)
+    # L/R- and U/D-even so every inward wall face is camera-symmetric.
+    # An unsymmetric 1/f made the left half of every view brighter and
+    # produced a body-frame rightward HS/DNa02 bias at every heading.
+    img = 0.5 * (img + np.fliplr(img))
+    img = 0.5 * (img + np.flipud(img))
+    img = np.clip(0.5 + float(contrast) * img, 0.0, 1.0)
+    u8 = (img * 255.0).astype(np.uint8)
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + u8[i].tobytes() for i in range(n))
+    ihdr = struct.pack(">IIBBBBB", n, n, 8, 0, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw, 9)) + _chunk(b"IEND", b"")
+    )
+    return path
 
 # OBJ millimetres → metres (10× life-size). Keep this literal so tests can exec this file.
 MESH_SCALE = 0.01
@@ -22,18 +59,37 @@ _S = f"{MESH_SCALE} {MESH_SCALE} {MESH_SCALE}"
 
 FLY_MJCF = """
 <mujoco model="fruit_fly">
-  <compiler angle="radian" coordinate="local" meshdir="{meshdir}"/>
+  <compiler angle="radian" coordinate="local" meshdir="{meshdir}" texturedir="{texturedir}"/>
   
   <option timestep="0.002" gravity="0 0 -9.81"/>
+  <visual>
+    <headlight ambient="0.40 0.40 0.40" diffuse="0.80 0.80 0.80" specular="0 0 0"/>
+    <rgba haze="0 0 0 0"/>
+    <map fogstart="50" fogend="80"/>
+  </visual>
   
   <asset>
+    <!-- Mid-gray sky so frontal hexes rest at flyvis gray=0.5 (loom() bg). -->
+    <texture name="sky" type="skybox" builtin="flat" rgb1="0.5 0.5 0.5" rgb2="0.5 0.5 0.5"
+             width="16" height="16"/>
     <texture name="grid" type="2d" builtin="checker" width="512" height="512" 
-             rgb1="0.2 0.3 0.4" rgb2="0.3 0.4 0.5"/>
-    <material name="grid_mat" texture="grid" texrepeat="10 10" reflectance="0.1"/>
+             rgb1="0.38 0.38 0.40" rgb2="0.62 0.61 0.58"/>
+    <material name="grid_mat" texture="grid" texrepeat="8 8" reflectance="0.04"/>
     
-    <texture name="wall" type="2d" builtin="flat" width="512" height="512"
-             rgb1="0.8 0.75 0.7"/>
-    <material name="wall_mat" texture="wall" reflectance="0.2"/>
+    <!-- Natural 1/f walls (Klapoetke / von Reyn test backgrounds), not
+         hard checkers that T4/T5 treat as a full-field loom. -->
+    <texture name="wall_nat" type="2d" file="{wall_tex}"/>
+    <material name="wall_mat" texture="wall_nat" texrepeat="3 2" reflectance="0.03"/>
+    <texture name="obs_nat" type="2d" file="{wall_tex}"/>
+    <material name="obs_mat" texture="obs_nat" texrepeat="2 2" reflectance="0.03"/>
+    <!-- Solid dark loom: flyvis loom() and Klapoetke/von Reyn discs are
+         dark-on-bright. texrepeat 8–16 checkers are <1 hex (~5.8°) at
+         40–60° angular size and average to gray — DNp01 then fires on
+         the hide/disappearance, not the loom. -->
+    <!-- Klapoetke / von Reyn: matte black, no spec, no emission.
+         rgba=0 so headlight ambient/diffuse cannot lift the disc. -->
+    <material name="loom_mat" rgba="0 0 0 1" reflectance="0" specular="0"
+              shininess="0" emission="0"/>
     
     <!-- flybody mesh assets (Apache-2.0). Scale: millimetres × 0.01 → metres (10× life-size). -->
     <mesh name="thorax_mesh" file="thorax_body.obj" scale=""" + f'"{_S}"' + """/>
@@ -59,27 +115,45 @@ FLY_MJCF = """
     
     <!-- Room walls -->
     <body name="wall_north" pos="5 0 2">
-      <geom type="box" size="0.1 5 2" material="wall_mat" rgba="0.8 0.8 0.9 1"/>
+      <geom type="box" size="0.1 5 2" material="wall_mat"/>
     </body>
     <body name="wall_south" pos="-5 0 2">
-      <geom type="box" size="0.1 5 2" material="wall_mat" rgba="0.8 0.9 0.8 1"/>
+      <geom type="box" size="0.1 5 2" material="wall_mat"/>
     </body>
     <body name="wall_east" pos="0 5 2">
-      <geom type="box" size="5 0.1 2" material="wall_mat" rgba="0.9 0.8 0.8 1"/>
+      <geom type="box" size="5 0.1 2" material="wall_mat"/>
     </body>
     <body name="wall_west" pos="0 -5 2">
-      <geom type="box" size="5 0.1 2" material="wall_mat" rgba="0.9 0.9 0.8 1"/>
+      <geom type="box" size="5 0.1 2" material="wall_mat"/>
     </body>
     
-    <!-- Some obstacles for exploration -->
+    <!-- Obstacles in L/R-mirrored pairs so open-space optic flow is even. -->
     <body name="obstacle_1" pos="2 2 0.5">
-      <geom type="box" size="0.3 0.3 0.5" rgba="0.6 0.3 0.2 1"/>
+      <geom type="box" size="0.3 0.3 0.5" material="obs_mat"/>
+    </body>
+    <body name="obstacle_1m" pos="2 -2 0.5">
+      <geom type="box" size="0.3 0.3 0.5" material="obs_mat"/>
     </body>
     <body name="obstacle_2" pos="-2 -2 0.3">
-      <geom type="cylinder" size="0.2 0.3" rgba="0.3 0.5 0.3 1"/>
+      <geom type="cylinder" size="0.2 0.3" material="obs_mat"/>
+    </body>
+    <body name="obstacle_2m" pos="-2 2 0.3">
+      <geom type="cylinder" size="0.2 0.3" material="obs_mat"/>
+    </body>
+    <body name="sky" pos="0 0 4.2">
+      <geom type="box" size="6 6 0.05" rgba="0.70 0.80 0.92 1" contype="0" conaffinity="0"/>
     </body>
     <body name="obstacle_3" pos="-1 3 0.4">
-      <geom type="sphere" size="0.4" rgba="0.4 0.4 0.6 1"/>
+      <geom type="sphere" size="0.4" material="obs_mat"/>
+    </body>
+    <body name="obstacle_3m" pos="-1 -3 0.4">
+      <geom type="sphere" size="0.4" material="obs_mat"/>
+    </body>
+    <!-- Compact solid-dark loom (mocap). Hidden at z=−8 until a scenario
+         places it. Radius 0.58 m: 40° at ~1.6 m, 60° at ~1.0 m. -->
+    <body name="loom_target" mocap="true" pos="0 0 -8">
+      <geom name="loom_geom" type="sphere" size="0.58" material="loom_mat"
+            contype="0" conaffinity="0"/>
     </body>
     
     <!-- Fruit fly: flybody topology (head / thorax / abdomen / wings / legs / halteres).
@@ -99,12 +173,21 @@ FLY_MJCF = """
         <geom name="head_geom" type="mesh" mesh="head_mesh" 
               material="fly_body_mat" mass="0.0002" contype="0" conaffinity="0"/>
         
-        <camera name="left_eye" pos="0.003 0.006 0.002" 
-                xyaxes="0 -1 0  0.342 0 0.940"
-                fovy="90" mode="fixed"/>
+        <!-- Forward 150° + ipsilateral 150° side camera. One pinhole
+         cannot cover −15°…+165°. Lattice centre = body-frontal.
+         Image-right = −Y on the forward pair; side cameras look ±Y. -->
+        <camera name="left_eye" pos="0.003 0.006 0.002"
+                xyaxes="0.000 -1.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
+        <camera name="left_eye_side" pos="0.003 0.006 0.002"
+                xyaxes="1.000 0.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
         <camera name="right_eye" pos="0.003 -0.006 0.002"
-                xyaxes="0 1 0  0.342 0 0.940"
-                fovy="90" mode="fixed"/>
+                xyaxes="0.000 -1.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
+        <camera name="right_eye_side" pos="0.003 -0.006 0.002"
+                xyaxes="-1.000 0.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
       </body>
       
       <!-- Wings: stroke hinge for visual flapping; aero force is applied in Python. -->
@@ -223,7 +306,94 @@ FLY_MJCF = """
 """
 
 
-def get_fly_mjcf() -> str:
-    """Get MJCF XML string for fly environment."""
+def _flip_world_y_xml(xml: str) -> str:
+    """Negate world-Y of named obstacle / wall bodies (mirrored-scene test)."""
+    import re
+
+    def _flip(m):
+        name, x, y, z = m.group(1), m.group(2), m.group(3), m.group(4)
+        return f'<body name="{name}" pos="{x} {-float(y):g} {z}">'
+
+    return re.sub(
+        r'<body name="((?:obstacle|wall)[^"]*)" pos="([^\s"]+) ([^\s"]+) ([^\s"]+)">',
+        _flip,
+        xml,
+    )
+
+
+def get_fly_mjcf(*, mirror_y: bool = False) -> str:
+    """Get MJCF XML string for fly environment.
+
+    ``mirror_y`` flips obstacle/wall world-Y for the open-space bias test.
+    The official room is already L/R-paired; the flip is the control.
+    """
     meshdir = str(ASSETS_DIR.absolute())
-    return FLY_MJCF.format(meshdir=meshdir)
+    texdir = str(ASSETS_ROOT.absolute())
+    wall = write_one_over_f_png(
+        ASSETS_ROOT / ("room_natural_my.png" if mirror_y else "room_natural.png")
+    )
+    xml = FLY_MJCF.format(meshdir=meshdir, texturedir=texdir, wall_tex=wall.name)
+    if mirror_y:
+        xml = _flip_world_y_xml(xml)
+    return xml
+
+
+# Forward + ipsilateral side cameras. Hex rays set laterality.
+# 40° outward / 20° down / 120° packed UV put frontal 0–70° on the periphery.
+EYE_CANT_DEG = 0.0
+EYE_DOWN_DEG = 0.0
+EYE_SIDE_CANT_DEG = 90.0
+EYE_FOVY_DEG = 150.0
+# 320 px @ 150° → 0.47°/px ≪ 5° acceptance (160 px was already ~1° AA).
+EYE_PIXELS = 320
+
+
+def eye_xyaxes(side: str, cant_deg: float = EYE_CANT_DEG, down_deg: float = EYE_DOWN_DEG):
+    """6-float MuJoCo xyaxes. Both eyes look +X; hex rays provide L/R.
+
+    Image-right is body −Y. ``stereo_to_hex`` projects each hex's body-frame
+    direction through this camera (no U-flip).
+    """
+    import numpy as np
+
+    if side not in ("L", "R"):
+        raise ValueError(f"side must be L or R, got {side!r}")
+    a = np.deg2rad(float(cant_deg))
+    d = np.deg2rad(float(down_deg))
+    sgn = 1.0 if side == "L" else -1.0
+    look = np.array(
+        [np.cos(d) * np.cos(a), sgn * np.cos(d) * np.sin(a), -np.sin(d)],
+        dtype=float,
+    )
+    look = look / float(np.linalg.norm(look))
+    z = -look
+    x = np.cross(np.array([0.0, 0.0, 1.0]), z)
+    n = float(np.linalg.norm(x))
+    x = x / n if n > 1e-8 else np.array([0.0, -1.0, 0.0])
+    y = np.cross(z, x)
+    y = y / float(np.linalg.norm(y))
+    return [float(v) for v in np.concatenate([x, y])]
+
+
+def camera_look_direction(xyaxes) -> "object":
+    """World-frame look direction. MuJoCo cameras look along −Z; Z = X × Y."""
+    import numpy as np
+
+    a = np.asarray(xyaxes, dtype=float).reshape(6)
+    z = np.cross(a[:3], a[3:])
+    look = -z
+    nrm = float(np.linalg.norm(look))
+    return look / nrm if nrm > 0 else look
+
+
+def parse_eye_xyaxes(xml: str, name: str):
+    """Read the 6 ``xyaxes`` floats for ``camera name=...`` from an MJCF string."""
+    import re
+
+    m = re.search(
+        rf'<camera name="{re.escape(name)}"[^>]*xyaxes="([^"]+)"',
+        xml,
+    )
+    if m is None:
+        raise ValueError(f"camera {name} xyaxes not found")
+    return [float(x) for x in m.group(1).split()]

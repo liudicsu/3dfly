@@ -27,6 +27,21 @@ class DNReadout:
     dng02_L: float = 0.0
     dng02_R: float = 0.0
     dng02_amp: float = 0.0  # mean(L, R) wing-amplitude proxy; NO L−R yaw term
+    lplc2_L: float = 0.0
+    lplc2_R: float = 0.0
+    lplc1_L: float = 0.0
+    lplc1_R: float = 0.0
+    lc4_L: float = 0.0
+    lc4_R: float = 0.0
+    # Local-column peaks: a compact loom drives a few LC4/LPLC2 hard; the
+    # mean is diluted by silent columns and only moves after ~80° of disk.
+    lc4_p90_L: float = 0.0
+    lc4_p90_R: float = 0.0
+    lplc2_p90_L: float = 0.0
+    lplc2_p90_R: float = 0.0
+    # Hex means (diagnostics / opt-in engineered eye laterality only).
+    eye_L: float = 0.0
+    eye_R: float = 0.0
 
     def as_dict(self) -> Dict[str, float]:
         return self.__dict__.copy()
@@ -50,6 +65,12 @@ def _mean(rates: np.ndarray, idx: np.ndarray) -> float:
     if idx is None or len(idx) == 0:
         return 0.0
     return float(np.mean(rates[idx]))
+
+
+def _p90(rates: np.ndarray, idx: np.ndarray) -> float:
+    if idx is None or len(idx) == 0:
+        return 0.0
+    return float(np.percentile(rates[idx], 90))
 
 
 def _select(typ: np.ndarray, side: np.ndarray, name: str, s: str, prefix: bool = False) -> np.ndarray:
@@ -88,6 +109,7 @@ def build_readout_index(
         g[f"HSE|{s}"] = _select(typ, side, "HSE", s)
         g[f"DNg02|{s}"] = _select(typ, side, "DNg02", s, prefix=True)
         g[f"LPLC2|{s}"] = _select(typ, side, "LPLC2", s)
+        g[f"LPLC1|{s}"] = _select(typ, side, "LPLC1", s)
         g[f"LC4|{s}"] = _select(typ, side, "LC4", s)
         g[f"LPi43|{s}"] = _select(typ, side, "LPi43", s)
     return ReadoutIndex(groups=g)
@@ -111,6 +133,16 @@ def read_dns(rates: np.ndarray, index: ReadoutIndex) -> DNReadout:
         dng02_L=L,
         dng02_R=R,
         dng02_amp=0.5 * (L + R),
+        lplc2_L=_mean(rates, index.groups.get("LPLC2|L", np.zeros(0, dtype=int))),
+        lplc2_R=_mean(rates, index.groups.get("LPLC2|R", np.zeros(0, dtype=int))),
+        lplc1_L=_mean(rates, index.groups.get("LPLC1|L", np.zeros(0, dtype=int))),
+        lplc1_R=_mean(rates, index.groups.get("LPLC1|R", np.zeros(0, dtype=int))),
+        lc4_L=_mean(rates, index.groups.get("LC4|L", np.zeros(0, dtype=int))),
+        lc4_R=_mean(rates, index.groups.get("LC4|R", np.zeros(0, dtype=int))),
+        lc4_p90_L=_p90(rates, index.groups.get("LC4|L", np.zeros(0, dtype=int))),
+        lc4_p90_R=_p90(rates, index.groups.get("LC4|R", np.zeros(0, dtype=int))),
+        lplc2_p90_L=_p90(rates, index.groups.get("LPLC2|L", np.zeros(0, dtype=int))),
+        lplc2_p90_R=_p90(rates, index.groups.get("LPLC2|R", np.zeros(0, dtype=int))),
     )
 
 

@@ -1,6 +1,7 @@
 """Tests for collision recovery functionality."""
 
 import numpy as np
+import pytest
 from threedfly.sim import FlyEnvironment
 
 
@@ -123,6 +124,7 @@ def test_soft_recovery_extends_flight():
     """Test that soft recovery allows fly to continue flying longer."""
     from threedfly.connectome import ConnectomeLoader
     from threedfly.connectome.simulator import RateSimulator
+    pytest.importorskip("open3d")
     from threedfly.vision import StereoVision, PointCloudMapper
     from threedfly.control import FlightController, ExplorationPolicy
     

@@ -44,6 +44,9 @@ output/m1/
 
 # Optional full flybody menagerie fetch (~140 MB)
 assets/flybody/full/
+# Generated 1/f room texture
+assets/room_natural.png
+assets/room_natural_my.png
 
 # MuJoCo recordings
 recordings/

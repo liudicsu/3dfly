@@ -177,6 +177,37 @@ S2 scaling defaults to the research full-matrix radius (`0.9 / 4085.83`), the
 same denominator r3sim uses on subgraphs. `--rho-mode subgraph` rescales the
 coreTplus slice itself to ρ=0.9 (~3× stronger recurrence; HS saturates).
 
+### Closed-loop flight (M2–M4)
+
+Default `threedfly run` / `run-interactive` use the M1 stack when connectome +
+flyvis are present: rendered MuJoCo eyes → 721-hex BoxEye sample → flyvis
+(state kept across steps) → handoff → coreTplus `RateCore` → DN readouts →
+`DNFlightController`. The old 976-input full-brain path is `--legacy-brain`.
+
+Engineered parameters live in **`threedfly/control/flight_params.py`** (gains
+and thresholds only). Absolute DNp01 rates are low by design of the M1
+`0.9/ρ_full` scale (loom Δ ≈ 2.17 Hz, rotation max ≈ 0.33 Hz), so escape
+fires when DNp01 **rises ≥ 0.85 Hz over an EMA rest** — between rotation
+and loom, not an unreachable 12 Hz gate. Direction is DNp03 (ipsi loom →
+contralateral turn; no 2 Hz gate). Yaw is tanh-normalised DNa02 + DNp15
+L−R plus continuous DNp03, using the M1 peak-delta scales. Thrust / wing
+amplitude is DNg02 mean(L,R) — **no DNg02 L−R yaw**. The hand-coded
+looming residual is **off** (`--engineered-looming-residual` for ablations).
+Wall-contact scoring is **per 100 steps** vs PR #16's 81/2000 = 4.05.
+Acceptance runs a true lateral loom from the left **and** right (heading
++X, wall on +Y / −Y) plus open-space (no false escape).
+
+```bash
+# 3.12 venv with flyvis + data/full_connectome.npz
+python scripts/export_core_bundle.py              # box: write data/core_bundle.npz (<50 MB)
+python scripts/closed_loop_acceptance.py          # 2000-step room + L/R lateral loom + open-space
+python scripts/closed_loop_acceptance.py --quick
+threedfly run --headless --steps 400              # auto coreTplus when available
+threedfly run-interactive                         # viser UI on the new brain
+```
+
+`--quick` / unit tests skip the real stack when data or flyvis is missing.
+
 ---
 
 ## Quick Start

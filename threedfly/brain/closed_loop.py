@@ -1,0 +1,503 @@
+"""Persistent closed-loop brain: MuJoCo eyes → flyvis → handoff → RateCore.
+
+State (flyvis network + RateCore rates) is kept across steps. Call
+``reset()`` only when the simulation itself is reset.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Optional, Tuple
+
+import numpy as np
+
+from threedfly.brain.connectome_matrix import build_signed_matrix
+from threedfly.brain.constants import (
+    DNG02_BIAS_DEFAULT,
+    G_GAP_DEFAULT,
+    G_INH_DEFAULT,
+    HALTERE_RATE,
+    N_HEX,
+    RHO_FULL_SIGNED_REFERENCE,
+    cache_dir,
+    configure_threads,
+    connectome_available,
+    flyvis_available,
+)
+from threedfly.brain.core_bundle import (
+    core_bundle_available,
+    core_bundle_path,
+    load_core_bundle,
+)
+from threedfly.brain.core_subgraph import select_core_tplus, slice_connectome
+from threedfly.brain.eyes import (
+    init_luminance_rest_from_images,
+    reset_luminance_rest,
+    stereo_to_hex,
+)
+from threedfly.brain.handoff import (
+    FlyvisCalibration,
+    FlyvisEye,
+    HandoffPlan,
+    apply_handoff_plan,
+    build_handoff_map,
+    compile_handoff_plan,
+    haltere_indices,
+)
+from threedfly.brain.rate_core import RateCore
+from threedfly.brain.readouts import DNReadout, ReadoutIndex, build_readout_index, read_dns
+from threedfly.control.flight_params import FlightParams
+
+logger = logging.getLogger(__name__)
+
+
+def core_stack_available(data_dir=None) -> bool:
+    return bool(
+        flyvis_available()
+        and (connectome_available(data_dir) or core_bundle_available(data_dir))
+    )
+
+
+class DualFlyvisEyes:
+    """Two persistent flyvis eyes (independent state; do not reset per sim step).
+
+    Prefer ``DualFlyvisEyes.share(eye)``: one pretrained network, two states.
+    Loading two ``FlyvisEye`` copies doubles init cost and cache pressure on
+    a 2-core box.
+    """
+
+    def __init__(self, eye_L, eye_R=None):
+        self.eye_L = eye_L
+        self.eye_R = eye_R if eye_R is not None else eye_L
+        self._shared = eye_R is None or eye_R is eye_L
+        self._state_L = None
+        self._state_R = None
+
+    @classmethod
+    def share(cls, eye) -> "DualFlyvisEyes":
+        return cls(eye, None)
+
+    def reset(self) -> None:
+        self.eye_L.reset()
+        if self._shared:
+            self._state_L = self.eye_L._state
+            self.eye_L.reset()
+            self._state_R = self.eye_L._state
+        else:
+            self.eye_R.reset()
+            self._state_L = None
+            self._state_R = None
+
+    def step_pair(
+        self, hex_L: np.ndarray, hex_R: np.ndarray
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+        if not self._shared:
+            return self.eye_L.step(hex_L), self.eye_R.step(hex_R)
+        if getattr(self, "_batch_ok", True) and hasattr(self.eye_L, "step_pair_batched"):
+            try:
+                vL, vR, sL, sR = self.eye_L.step_pair_batched(
+                    hex_L, hex_R, self._state_L, self._state_R
+                )
+                self._state_L, self._state_R = sL, sR
+                return vL, vR
+            except Exception as exc:
+                self._batch_ok = False
+                self._batch_error = f"{type(exc).__name__}: {exc}"
+                logger.exception("flyvis batched two-eye step failed; sequential fallback")
+                print(
+                    f"WARNING: flyvis batch path failed ({type(exc).__name__}: {exc}); "
+                    "falling back to sequential two-eye steps",
+                    flush=True,
+                )
+        eye = self.eye_L
+        eye._state = self._state_L
+        vL = eye.step(hex_L)
+        self._state_L = eye._state
+        eye._state = self._state_R
+        vR = eye.step(hex_R)
+        self._state_R = eye._state
+        return vL, vR
+
+
+class FakeDualEyes:
+    """Deterministic stand-in for tests (no flyvis)."""
+
+    def __init__(
+        self,
+        fn: Optional[Callable[[np.ndarray, np.ndarray], Tuple[dict, dict]]] = None,
+    ):
+        self.fn = fn
+        self.n_steps = 0
+
+    def reset(self) -> None:
+        self.n_steps = 0
+
+    def step_pair(self, hex_L, hex_R):
+        self.n_steps += 1
+        if self.fn is not None:
+            return self.fn(hex_L, hex_R)
+        empty = {}
+        return empty, empty
+
+
+@dataclass
+class BrainStep:
+    readout: DNReadout
+    rates: np.ndarray
+    hex_L: np.ndarray
+    hex_R: np.ndarray
+    ms: Dict[str, float] = field(default_factory=dict)
+
+    def population(self) -> Dict[str, float]:
+        r = self.rates
+        ro = self.readout
+        return {
+            "mean_rate": float(r.mean()) if r.size else 0.0,
+            "max_rate": float(r.max()) if r.size else 0.0,
+            "active_fraction": float((r > 0.01).mean()) if r.size else 0.0,
+            "dnp01": float(max(ro.dnp01_L, ro.dnp01_R)),
+            "dnp03_L": float(ro.dnp03_L),
+            "dnp03_R": float(ro.dnp03_R),
+        }
+
+
+class ClosedLoopBrain:
+    """Streaming flyvis + coreTplus RateCore. Do not reset between sim steps."""
+
+    def __init__(
+        self,
+        core: RateCore,
+        index: ReadoutIndex,
+        plans: Dict[str, HandoffPlan],
+        eyes,
+        halt_idx: Optional[np.ndarray] = None,
+        params: Optional[FlightParams] = None,
+    ):
+        self.core = core
+        self.index = index
+        self.plans = plans
+        self.eyes = eyes
+        self.halt_idx = np.asarray(halt_idx if halt_idx is not None else [], dtype=np.int64)
+        self.params = params or FlightParams()
+        self.visual_dt = float(getattr(self.params, "visual_dt", 0.02))
+        self.last_ms: Dict[str, float] = {}
+        self.n_steps = 0
+        self._flyvis_hold: Optional[Tuple[dict, dict]] = None
+        self.flyvis_path: Dict[str, object] = {}
+        n_l = int(self.plans.get("L", _empty_plan()).idx.size)
+        n_r = int(self.plans.get("R", _empty_plan()).idx.size)
+        n_h = int(self.halt_idx.size)
+        self._n_clamp = n_l + n_r + n_h
+        self._split = (n_l, n_l + n_r)
+        self._clamp_idx = np.empty(self._n_clamp, dtype=np.int64)
+        self._clamp_val = np.empty(self._n_clamp, dtype=np.float32)
+        if n_l:
+            self._clamp_idx[:n_l] = self.plans["L"].idx
+        if n_r:
+            self._clamp_idx[n_l : n_l + n_r] = self.plans["R"].idx
+        if n_h:
+            self._clamp_idx[n_l + n_r :] = self.halt_idx
+
+    @property
+    def n(self) -> int:
+        return int(self.core.n)
+
+    def reset(self) -> None:
+        self.core.reset()
+        if hasattr(self.eyes, "reset"):
+            self.eyes.reset()
+        reset_luminance_rest()
+        self.n_steps = 0
+        self._flyvis_hold = None
+
+    def get_population_activity(self) -> Dict[str, float]:
+        r = self.core.r
+        return {
+            "mean_rate": float(r.mean()),
+            "max_rate": float(r.max()),
+            "active_fraction": float((r > 0.01).mean()),
+        }
+
+    def _haltere_rates(self, angular_velocity: Optional[np.ndarray]) -> np.ndarray:
+        n = int(self.halt_idx.size)
+        if n == 0:
+            return np.zeros(0, dtype=np.float32)
+        amp = float(HALTERE_RATE)
+        if angular_velocity is not None:
+            w = np.atleast_1d(np.asarray(angular_velocity, dtype=float)).ravel()
+            wz = float(w[2]) if w.size >= 3 else float(w[-1])
+            amp = HALTERE_RATE * (0.5 + 0.5 * np.tanh(abs(wz) / max(self.params.haltere_omega_hz, 1e-6)))
+        return np.full(n, amp, dtype=np.float32)
+
+    def step(
+        self,
+        left_img: np.ndarray,
+        right_img: np.ndarray,
+        angular_velocity: Optional[np.ndarray] = None,
+        hex_L: Optional[np.ndarray] = None,
+        hex_R: Optional[np.ndarray] = None,
+        left_side_img: Optional[np.ndarray] = None,
+        right_side_img: Optional[np.ndarray] = None,
+    ) -> BrainStep:
+        t0 = time.perf_counter()
+        if hex_L is None or hex_R is None:
+            # Rendered pixels only. No mocap / object pose / radius.
+            hex_L, hex_R = stereo_to_hex(
+                left_img,
+                right_img,
+                left_side_img=left_side_img,
+                right_side_img=right_side_img,
+                dt=float(getattr(self, "visual_dt", 0.02)),
+            )
+        t1 = time.perf_counter()
+        stride = max(1, int(getattr(self.params, "flyvis_stride", 1)))
+        flyvis_ran = self._flyvis_hold is None or (self.n_steps % stride) == 0
+        if flyvis_ran:
+            vL, vR = self.eyes.step_pair(hex_L, hex_R)
+            self._flyvis_hold = (vL, vR)
+        else:
+            vL, vR = self._flyvis_hold
+        t2 = time.perf_counter()
+
+        _idxL, rL = apply_handoff_plan(self.plans.get("L", _empty_plan()), vL)
+        _idxR, rR = apply_handoff_plan(self.plans.get("R", _empty_plan()), vR)
+        a, b = self._split
+        if rL.size:
+            self._clamp_val[:a] = rL
+        if rR.size:
+            self._clamp_val[a:b] = rR
+        if self.halt_idx.size:
+            self._clamp_val[b:] = self._haltere_rates(angular_velocity)
+
+        if self._n_clamp:
+            self.core.step(clamp_idx=self._clamp_idx, clamp_val=self._clamp_val)
+        else:
+            self.core.step()
+        t3 = time.perf_counter()
+
+        ro = read_dns(self.core.r, self.index)
+        ro.eye_L = float(np.mean(hex_L)) if hex_L is not None else 0.0
+        ro.eye_R = float(np.mean(hex_R)) if hex_R is not None else 0.0
+        ms = {
+            "sample": 1000.0 * (t1 - t0),
+            "flyvis": 1000.0 * (t2 - t1),
+            "brain": 1000.0 * (t3 - t2),
+            "total": 1000.0 * (t3 - t0),
+            "flyvis_ran": 1.0 if flyvis_ran else 0.0,
+        }
+        self.last_ms = ms
+        self.n_steps += 1
+        return BrainStep(readout=ro, rates=self.core.r.copy(), hex_L=hex_L, hex_R=hex_R, ms=ms)
+
+    def prewarm(
+        self,
+        left_img: np.ndarray,
+        right_img: np.ndarray,
+        angular_velocity: Optional[np.ndarray] = None,
+        n: Optional[int] = None,
+        left_side_img: Optional[np.ndarray] = None,
+        right_side_img: Optional[np.ndarray] = None,
+        dc_init: bool = True,
+    ) -> Optional[BrainStep]:
+        """Settle flyvis + RateCore on the initial images before takeoff.
+
+        Runs at least ``n`` steps (default ``prewarm_steps``) and continues
+        until DNp01's last-8 std is below ``prewarm_settle_std`` or
+        ``prewarm_max_steps`` is hit. Same schedule for every scenario.
+
+        ``dc_init`` (default True) initialises photoreceptor rest to this
+        frame — the τ→∞ limit of the 5 s LMC high-pass — so flyvis/DNp01
+        settle on a DC-free field. Pass False when a large standing disc
+        must remain visible (recede): initialising would gray it out and
+        the first trial frame would look like an onset. Images only; no
+        object pose/radius.
+        """
+        n = int(self.params.prewarm_steps if n is None else n)
+        max_n = int(getattr(self.params, "prewarm_max_steps", n))
+        max_n = max(n, max_n)
+        tol = float(getattr(self.params, "prewarm_settle_std", 0.0))
+        drop = float(getattr(self.params, "prewarm_peak_drop_hz", 0.12))
+        if dc_init:
+            init_luminance_rest_from_images(
+                left_img, right_img, left_side_img, right_side_img
+            )
+        # Flyvis hold-stride would freeze the settle on the DNp01 peak.
+        prev_stride = int(self.params.flyvis_stride)
+        self.params.flyvis_stride = 1
+        last = None
+        window: list[float] = []
+        try:
+            for i in range(max_n):
+                last = self.step(
+                    left_img,
+                    right_img,
+                    angular_velocity,
+                    left_side_img=left_side_img,
+                    right_side_img=right_side_img,
+                )
+                d01 = max(float(last.readout.dnp01_L), float(last.readout.dnp01_R))
+                window.append(d01)
+                if i + 1 >= n and tol > 0.0 and len(window) >= 8:
+                    peak = float(max(window))
+                    if float(np.std(window[-8:])) <= tol and d01 <= peak - drop:
+                        break
+        finally:
+            self.params.flyvis_stride = prev_stride
+        return last
+
+    @classmethod
+    def build(
+        cls,
+        data_dir=None,
+        params: Optional[FlightParams] = None,
+        quick: bool = False,
+        eyes=None,
+        calib: Optional[FlyvisCalibration] = None,
+        torch_threads: Optional[int] = None,
+    ) -> "ClosedLoopBrain":
+        """Load coreTplus from the full connectome or ``data/core_bundle.npz``."""
+        params = params or FlightParams()
+        threads = int(torch_threads if torch_threads is not None else params.flyvis_torch_threads)
+        configure_threads(scipy_threads=1, torch_threads=max(1, threads))
+        hmap = None
+        halt = np.zeros(0, dtype=np.int64)
+        remap = None
+        if connectome_available(data_dir):
+            print("Building signed connectome + coreTplus…", flush=True)
+            conn = build_signed_matrix(data_dir, cache=True)
+            core_sel = select_core_tplus(conn)
+            halt_full = haltere_indices(conn, remap=None)
+            keep = np.unique(np.concatenate([core_sel.keep, halt_full])).astype(np.int64)
+            remap = -np.ones(conn.n, dtype=np.int64)
+            remap[keep] = np.arange(len(keep))
+            sub = slice_connectome(conn, keep)
+            from threedfly.brain.core_bundle import remap_handoff_map
+
+            hmap = remap_handoff_map(build_handoff_map(conn), remap)
+            halt = remap[halt_full]
+            halt = halt[halt >= 0]
+            print(
+                f"  core n={sub.n} (recipe {core_sel.n_neurons} + halt {halt.size})",
+                flush=True,
+            )
+        elif core_bundle_available(data_dir):
+            path = core_bundle_path(data_dir)
+            print(f"Loading core bundle {path}…", flush=True)
+            sub, hmap, halt, meta = load_core_bundle(path)
+            print(f"  bundle n={sub.n} halt={halt.size} meta={meta.get('recipe', '')}", flush=True)
+        else:
+            raise FileNotFoundError(
+                "Need data/full_connectome.npz or data/core_bundle.npz "
+                "(export on the box with scripts/export_core_bundle.py)"
+            )
+        index = build_readout_index(sub.typ, sub.side, sub.body_ids)
+        core = RateCore.from_connectome(
+            sub,
+            g_inh=G_INH_DEFAULT,
+            g_gap=G_GAP_DEFAULT,
+            dng02_bias=DNG02_BIAS_DEFAULT,
+            rho=float(getattr(sub, "rho_full_reference", RHO_FULL_SIGNED_REFERENCE)),
+        )
+        print(f"  RateCore n={core.n} scale={core.scale:.6g}", flush=True)
+        if eyes is None:
+            if not flyvis_available():
+                raise ImportError("flyvis is required for ClosedLoopBrain.build")
+            print("Init flyvis (one net, two eye states)…", flush=True)
+            eye = FlyvisEye(torch_threads=max(1, threads))
+            eyes = DualFlyvisEyes.share(eye)
+            cache = cache_dir(data_dir) / "flyvis_cal.npz"
+            if calib is None and cache.is_file():
+                calib = FlyvisCalibration.load(cache)
+                print(f"  loaded calibration {cache}", flush=True)
+            if calib is None:
+                calib = eye.calibrate()
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                calib.save(cache)
+                print(f"  wrote calibration {cache}", flush=True)
+            eyes.reset()
+            timing = probe_eye_paths(eyes)
+            print(
+                f"  flyvis path={timing.get('path')} "
+                f"seq={timing.get('seq_ms')} ms/pair batch={timing.get('batch_ms')} ms/pair "
+                f"err={timing.get('error')}",
+                flush=True,
+            )
+        if calib is None:
+            raise ValueError("FlyvisCalibration is required")
+        if hmap is None:
+            hmap = build_handoff_map(sub)
+        plans = {
+            "L": compile_handoff_plan(hmap, calib, "L", remap=None),
+            "R": compile_handoff_plan(hmap, calib, "R", remap=None),
+        }
+        print(
+            f"  handoff L={plans['L'].idx.size} R={plans['R'].idx.size} halt={halt.size}",
+            flush=True,
+        )
+        brain = cls(
+            core=core,
+            index=index,
+            plans=plans,
+            eyes=eyes,
+            halt_idx=halt,
+            params=params,
+        )
+        if isinstance(eyes, DualFlyvisEyes):
+            brain.flyvis_path = getattr(eyes, "_path_probe", {})
+        return brain
+
+
+def probe_eye_paths(eyes: DualFlyvisEyes, n: int = 3) -> Dict[str, object]:
+    """Time sequential vs batched two-eye flyvis; keep the faster path."""
+    gray = np.full(N_HEX, 0.5, dtype=np.float32)
+    eyes.reset()
+    eyes._batch_ok = False
+    t0 = time.perf_counter()
+    for _ in range(int(n)):
+        eyes.step_pair(gray, gray)
+    seq_ms = 1000.0 * (time.perf_counter() - t0) / max(int(n), 1)
+    eyes.reset()
+    eyes._batch_ok = True
+    batch_ms = None
+    batch_err = None
+    try:
+        t0 = time.perf_counter()
+        for _ in range(int(n)):
+            eyes.step_pair(gray, gray)
+        if not getattr(eyes, "_batch_ok", True):
+            raise RuntimeError(getattr(eyes, "_batch_error", "batch disabled mid-probe"))
+        batch_ms = 1000.0 * (time.perf_counter() - t0) / max(int(n), 1)
+    except Exception as exc:
+        batch_err = f"{type(exc).__name__}: {exc}"
+        eyes._batch_ok = False
+        logger.error("flyvis batch probe failed: %s", batch_err)
+        print(f"WARNING: flyvis batch probe failed ({batch_err})", flush=True)
+    if batch_ms is not None and float(batch_ms) < float(seq_ms):
+        eyes._batch_ok = True
+        path = "batch"
+    else:
+        eyes._batch_ok = False
+        path = "sequential"
+        eyes.reset()
+    probe = {
+        "path": path,
+        "seq_ms": float(seq_ms),
+        "batch_ms": None if batch_ms is None else float(batch_ms),
+        "error": batch_err,
+        "torch_threads": int(getattr(getattr(eyes, "eye_L", None), "_torch_threads", 0) or 0),
+    }
+    eyes._path_probe = probe
+    return probe
+
+
+def _empty_plan() -> HandoffPlan:
+    return HandoffPlan(
+        idx=np.zeros(0, dtype=np.int64),
+        types=np.zeros(0, dtype=object),
+        cols=np.zeros(0, dtype=np.int64),
+        v_gray=np.zeros(0, dtype=np.float32),
+        p99=np.zeros(0, dtype=np.float32),
+        type_ranges={},
+    )

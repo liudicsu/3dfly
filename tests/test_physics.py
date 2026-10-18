@@ -155,3 +155,49 @@ def test_collision_uses_fly_body_geoms_not_geom_zero():
     assert thorax_id in env._fly_geom_ids
     assert floor_id not in env._fly_geom_ids
     env.close()
+
+
+def test_set_pose_places_fly():
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.set_pose((1.5, -2.0, 1.6), yaw=np.pi / 2)
+    pos = env.get_fly_position()
+    assert pos[0] == pytest.approx(1.5, abs=1e-6)
+    assert pos[1] == pytest.approx(-2.0, abs=1e-6)
+    assert pos[2] == pytest.approx(1.6, abs=1e-6)
+    env.close()
+
+
+def test_positive_yaw_command_increases_heading():
+    """Body +Y is left; +action[4] / L>R stroke must increase heading."""
+    from threedfly.control.exploration import heading_from_quaternion
+
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.set_pose((0.0, 0.0, 1.5), yaw=0.0)
+    hover = env.hover_action
+    h0 = heading_from_quaternion(env.get_fly_orientation())
+    env.step(np.array([0.0, hover, 0.0, 0.0, 1.0]))
+    wz = float(env.get_fly_angular_velocity()[2])
+    h1 = heading_from_quaternion(env.get_fly_orientation())
+    env.close()
+    d = float(np.arctan2(np.sin(h1 - h0), np.cos(h1 - h0)))
+    assert wz > 0.5, f"+yaw should give +ωz (left), got ωz={wz:.3f}"
+    assert d > 0.05, f"+yaw should increase heading (left), got Δ={d:.3f}"
+
+
+def test_left_minus_right_stroke_increases_heading():
+    from threedfly.control.exploration import heading_from_quaternion
+
+    env = FlyEnvironment(render_mode=None)
+    env.reset(seed=0)
+    env.set_pose((0.0, 0.0, 1.5), yaw=0.0)
+    hover = env.hover_action
+    h0 = heading_from_quaternion(env.get_fly_orientation())
+    env.step(np.array([0.0, hover, 0.0, 0.0, 0.0]), wing_strokes=(0.85, 0.15))
+    wz = float(env.get_fly_angular_velocity()[2])
+    h1 = heading_from_quaternion(env.get_fly_orientation())
+    env.close()
+    d = float(np.arctan2(np.sin(h1 - h0), np.cos(h1 - h0)))
+    assert wz > 0.5, f"L>R stroke should give +ωz, got ωz={wz:.3f}"
+    assert d > 0.05, f"L>R stroke should increase heading, got Δ={d:.3f}"

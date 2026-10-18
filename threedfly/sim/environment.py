@@ -6,7 +6,7 @@ from typing import Tuple, Optional, Dict
 import tempfile
 from pathlib import Path
 
-from threedfly.sim.mjcf import get_fly_mjcf
+from threedfly.sim.mjcf import EYE_PIXELS, get_fly_mjcf
 from threedfly.sim.wings import stroke_averaged_forces, visual_wing_angles
 
 # Engineered aero: linear+quadratic drag sized for ~1 m/s cruise, not a CFD model.
@@ -22,9 +22,11 @@ ROOM_Z_MIN = 0.25
 ROOM_Z_MAX = 3.70
 # Visual-only wingbeat (stroke-averaged forces, not a 200 Hz aero sim).
 WINGBEAT_HZ = 200.0
-# Stroke-difference torques sized for the ~1.5 g, 2.5 cm scaled body.
-WING_YAW_GAIN = 8e-6      # N·m per unit (L−R) stroke
-WING_ROLL_GAIN = 3e-6     # N·m per unit (L−R) stroke
+# Stroke-difference torques. Frozen by scripts/calibrate_saccade_plant.py
+# (unit DNa02 L−R → 90° in 50–80 ms, peak 1000–5000 °/s; ×12 vs the
+# torque-limited 8e-6 / 3e-6 / 5e-6 plant). Izz is not the limiter.
+WING_YAW_GAIN = 9.6e-5    # N·m per unit (L−R) stroke
+WING_ROLL_GAIN = 3.6e-5   # N·m per unit (L−R) stroke
 # Minimal engineered angular-rate damping kept as a safety net. Primary
 # haltere path is the connectome mapping (see select_haltere_afferent_neurons).
 SAFETY_HALTERE_KD = 2e-6  # N·m / (rad/s)
@@ -41,8 +43,9 @@ class FlyEnvironment:
     def __init__(
         self,
         render_mode: Optional[str] = "rgb_array",
-        camera_width: int = 160,
-        camera_height: int = 120,
+        camera_width: Optional[int] = None,
+        camera_height: Optional[int] = None,
+        mjcf_xml: Optional[str] = None,
     ):
         """
         Initialize environment.
@@ -53,27 +56,51 @@ class FlyEnvironment:
             camera_height: Eye camera height in pixels
         """
         self.render_mode = render_mode
-        self.camera_width = camera_width
-        self.camera_height = camera_height
+        self.camera_width = int(camera_width) if camera_width else int(EYE_PIXELS)
+        self.camera_height = int(camera_height) if camera_height else int(EYE_PIXELS)
         
         # Load MJCF model
-        mjcf_xml = get_fly_mjcf()
+        mjcf_xml = get_fly_mjcf() if mjcf_xml is None else mjcf_xml
         self.model = mujoco.MjModel.from_xml_string(mjcf_xml)
         self.data = mujoco.MjData(self.model)
         
         # Camera IDs
         self.left_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_eye")
         self.right_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_eye")
+        self.left_eye_side_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_eye_side"
+        )
+        self.right_eye_side_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_eye_side"
+        )
+        self.last_side_images: Tuple[Optional[np.ndarray], Optional[np.ndarray]] = (None, None)
+        self._loom_mocap = -1
+        self._loom_geom_id = -1
+        try:
+            self._loom_geom_id = int(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "loom_geom")
+            )
+        except Exception:
+            self._loom_geom_id = -1
+        self._loom_radius0 = (
+            float(self.model.geom_size[self._loom_geom_id, 0]) if self._loom_geom_id >= 0 else 0.58
+        )
+        try:
+            loom_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "loom_target")
+            if loom_bid >= 0:
+                self._loom_mocap = int(self.model.body_mocapid[loom_bid])
+        except Exception:
+            self._loom_mocap = -1
         
         # Renderer for cameras
         if render_mode is not None:
-            self.renderer = mujoco.Renderer(self.model, camera_height, camera_width)
+            self.renderer = mujoco.Renderer(self.model, self.camera_height, self.camera_width)
         else:
             self.renderer = None
         
         # Control bounds in SI units (gainprm=1). Max lift ~3x body weight (~0.016 N).
         self.thrust_max = 0.05
-        self.torque_max = 5e-6
+        self.torque_max = 6.0e-5
         self.lift_max = self.thrust_max  # peak combined wing lift; hover = weight/lift_max
         # Minimal engineered damping (safety). Brain haltere afferents are the primary path.
         self.haltere_kd = SAFETY_HALTERE_KD
@@ -156,13 +183,49 @@ class FlyEnvironment:
         self.data.qpos[3:7] = [np.cos(angle/2), 0, 0, np.sin(angle/2)]  # quaternion
         
         mujoco.mj_forward(self.model, self.data)
+        self.hide_loom_object()
         
         self.time = 0.0
         self.step_count = 0
         self._wing_phase = 0.0
         
         return self.get_eye_images()
-    
+
+    def set_pose(
+        self,
+        xyz,
+        yaw: float = 0.0,
+        vel=None,
+    ) -> None:
+        """Place the fly at ``xyz`` with heading ``yaw`` (rad about +Z)."""
+        xyz = np.asarray(xyz, dtype=np.float64).reshape(3)
+        self.data.qpos[0:3] = xyz
+        self.data.qpos[3:7] = [np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)]
+        self.data.qvel[:] = 0.0
+        if vel is not None:
+            self.data.qvel[0:3] = np.asarray(vel, dtype=np.float64).reshape(3)
+        mujoco.mj_forward(self.model, self.data)
+
+    def set_loom_radius(self, radius: Optional[float] = None) -> None:
+        """Set the loom sphere radius (metres). None restores the MJCF default."""
+        if self._loom_geom_id < 0:
+            return
+        r = self._loom_radius0 if radius is None else float(radius)
+        self.model.geom_size[self._loom_geom_id, 0] = max(r, 1e-4)
+
+    def set_loom_object(self, xyz, radius: Optional[float] = None) -> None:
+        """Place the compact dark loom mocap (metres). Hidden at z=−8 by default."""
+        if self._loom_mocap < 0:
+            return
+        if radius is not None:
+            self.set_loom_radius(radius)
+        self.data.mocap_pos[self._loom_mocap] = np.asarray(xyz, dtype=np.float64).reshape(3)
+        mujoco.mj_forward(self.model, self.data)
+
+    def hide_loom_object(self) -> None:
+        self.set_loom_radius(None)
+        self.set_loom_object((0.0, 0.0, -8.0))
+
     def step(
         self,
         action: np.ndarray,
@@ -279,17 +342,42 @@ class FlyEnvironment:
         if self.renderer is None:
             # Headless mode: return dummy images
             shape = (self.camera_height, self.camera_width, 3)
-            return np.zeros(shape, dtype=np.uint8), np.zeros(shape, dtype=np.uint8)
+            blank = np.zeros(shape, dtype=np.uint8)
+            self.last_side_images = (blank, blank)
+            return blank, blank
         
-        # Render left eye
-        self.renderer.update_scene(self.data, camera=self.left_eye_id)
-        left_img = self.renderer.render()
-        
-        # Render right eye
-        self.renderer.update_scene(self.data, camera=self.right_eye_id)
-        right_img = self.renderer.render()
-        
+        # The 150° eyes sit on the head; hide the fly mesh so self-body
+        # does not paint a static dark blob onto ventral/central hexes.
+        fly_ids = np.fromiter(self._fly_geom_ids, dtype=np.int32)
+        saved = None
+        if fly_ids.size:
+            saved = self.model.geom_rgba[fly_ids].copy()
+            self.model.geom_rgba[fly_ids, 3] = 0.0
+        try:
+            left_img = self._render_eye(self.left_eye_id)
+            right_img = self._render_eye(self.right_eye_id)
+            left_side = (
+                self._render_eye(self.left_eye_side_id) if self.left_eye_side_id >= 0 else None
+            )
+            right_side = (
+                self._render_eye(self.right_eye_side_id) if self.right_eye_side_id >= 0 else None
+            )
+            self.last_side_images = (left_side, right_side)
+        finally:
+            if saved is not None:
+                self.model.geom_rgba[fly_ids] = saved
         return left_img.copy(), right_img.copy()
+
+    def _render_eye(self, camera_id: int) -> np.ndarray:
+        """One eye camera. Two-sided, no fog/haze/shadow (Klapoetke black)."""
+        self.renderer.update_scene(self.data, camera=int(camera_id))
+        fl = self.renderer.scene.flags
+        fl[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_FOG)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_HAZE)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_REFLECTION)] = False
+        return self.renderer.render()
     
     def get_fly_position(self) -> np.ndarray:
         """Get fly body position (x, y, z)."""
