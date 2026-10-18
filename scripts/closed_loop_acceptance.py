@@ -334,6 +334,7 @@ def _run_scenario(
                 geo_at_fire_visible = bool(visible_now)
                 n_esc_seen = int(ctl.brain_escape_count)
             if rise_now >= 0.08:
+                rise_L, rise_R = ctl._dnp01_rises(res.readout)
                 rise_geometry.append(
                     {
                         "step": int(step),
@@ -342,9 +343,20 @@ def _run_scenario(
                         "distance_m": float(geo["distance_m"]),
                         "class": geo["class"],
                         "rise": float(rise_now),
+                        "rise_L": float(rise_L),
+                        "rise_R": float(rise_R),
+                        "lc4_L": float(res.readout.lc4_L),
+                        "lc4_R": float(res.readout.lc4_R),
+                        "lplc2_L": float(res.readout.lplc2_L),
+                        "lplc2_R": float(res.readout.lplc2_R),
+                        "dnp03_L": float(res.readout.dnp03_L),
+                        "dnp03_R": float(res.readout.dnp03_R),
                         "lat": float(ctl.last_lat_integrated),
                         "threat": ctl._loom_threat or "",
                         "course_frozen": float(terms.get("course_frozen", 0.0)),
+                        "bilateral_brake": float(terms.get("bilateral_brake", 0.0)),
+                        "yaw": float(action[4]),
+                        "forward": float(action[0]),
                         "visible": bool(visible_now),
                     }
                 )
@@ -446,7 +458,36 @@ def _run_scenario(
             rec["azimuth_deg"] = g["azimuth_deg"]
             rec["angular_size_deg"] = g["angular_size_deg"]
             rec["loom_class"] = g["class"]
+            rec["rise_L"] = g.get("rise_L")
+            rec["rise_R"] = g.get("rise_R")
+            rec["lc4_L"] = g.get("lc4_L")
+            rec["lc4_R"] = g.get("lc4_R")
+            rec["lplc2_L"] = g.get("lplc2_L")
+            rec["lplc2_R"] = g.get("lplc2_R")
+            rec["dnp03_L"] = g.get("dnp03_L")
+            rec["dnp03_R"] = g.get("dnp03_R")
+            rec["bilateral_brake"] = g.get("bilateral_brake")
+            rec["yaw"] = g.get("yaw")
+            rec["forward"] = g.get("forward")
         events.append(rec)
+    fire_diag = None
+    if events:
+        fire_diag = {k: events[0].get(k) for k in (
+            "threat_side", "azimuth_deg", "rise_L", "rise_R",
+            "lc4_L", "lc4_R", "lplc2_L", "lplc2_R", "dnp03_L", "dnp03_R",
+            "bilateral_brake", "yaw", "forward",
+        )}
+    wall_dist = float("nan")
+    wall_ttc = float("nan")
+    if traj.size and name.startswith("ctrl_noobj_"):
+        last = traj[-1]
+        wall_dist = float(min(5.0 - abs(last[0]), 5.0 - abs(last[1])))
+        if fire_step is not None and 0 <= int(fire_step) < len(traj):
+            fp = traj[int(fire_step)]
+            wall_dist = float(min(5.0 - abs(fp[0]), 5.0 - abs(fp[1])))
+            if vel is not None:
+                speed = float(np.linalg.norm(np.asarray(vel, dtype=float)[:2]))
+                wall_ttc = wall_dist / max(speed, 1e-6)
     return {
         "name": name,
         "steps": int(n_steps),
@@ -471,6 +512,9 @@ def _run_scenario(
         "visible_at_fire": bool(geo_at_fire_visible),
         "approaching_at_fire": bool(va_ok),
         "threat_locked": None if geo_lock is None else geo_lock.get("threat"),
+        "fire_diag": fire_diag,
+        "wall_dist_m": None if np.isnan(wall_dist) else float(wall_dist),
+        "wall_ttc_s": None if np.isnan(wall_ttc) else float(wall_ttc),
         "pre_escape_yaw_toward": bool(pre_toward),
         "braked": bool(braked),
         "false_escapes": int(ctl.brain_escape_count) if name == "open_space" else 0,
@@ -524,6 +568,8 @@ def _noobj_heading_summary(scenarios: dict) -> dict:
             "would_fire": sc.get("would_fire"),
             "rise_max": sc.get("dnp01_rise_max"),
             "steps": sc.get("steps"),
+            "wall_dist_m": sc.get("wall_dist_m"),
+            "wall_ttc_s": sc.get("wall_ttc_s"),
         }
         fires += n
     return {
@@ -583,6 +629,8 @@ def _frontolat_gate(scenarios: dict) -> dict:
             "brain_escapes": sc.get("brain_escapes"),
             "threat_locked": sc.get("threat_locked"),
             "dnp01_rise_max": sc.get("dnp01_rise_max"),
+            "true_side": "L" if name.startswith("fl_L") else ("R" if name.startswith("fl_R") else None),
+            "fire_diag": sc.get("fire_diag"),
         }
         scores.append(ok)
     mean = float(np.mean(scores)) if scores else None
@@ -852,7 +900,7 @@ def main(argv=None) -> int:
     )
     print("Building closed-loop brain…", flush=True)
     brain = ClosedLoopBrain.build(params=params, quick=args.quick)
-    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
+    env = FlyEnvironment(render_mode="rgb_array")
     ctl = DNFlightController(params)
     ctl.bind_hover(env.hover_action)
 
@@ -1128,14 +1176,12 @@ def main(argv=None) -> int:
             ),
             "known_limitations": (
                 "No sim object pose/radius reaches stereo_to_hex or the "
-                "controller. Factorial (still fly, az 35°, l/v 0.04): "
-                "A gray room DNp01 −0.02 (washed disc 0.41); B checkers "
-                "0.37 onset 175°; C +cruise 0.44; D hard hex on B's "
-                "bg/std 1.60 onset 90°; hex_ref 1.72 onset 62°. Soft "
-                "camera disc, not checkers or self-motion. flyvis p80+"
-                "gain 1.35, 1/f walls, bilateral (both-eye) climb → "
-                "brake. Walls 0.25/100 (was 5.25). Frontolat laterality "
-                "and no-object 4/6 remain."
+                "controller. Matte-black loom (rgba 0, no spec/haze), "
+                "320 px so camera AA ≪ 5° FWHM. 1/f RMS 0.08. Laterality "
+                "is per-side DNp01 rise (camera LC4 L−R can flip). "
+                "Bilateral brake = both GF and both VPN, not a huge "
+                "one-sided disc. Right-side fires can land after pass "
+                "(dCA>0) when DNp01 climbs late."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
@@ -1176,6 +1222,23 @@ def _print_variant_tables(summary: dict) -> None:
                 flush=True,
             )
         print(f"frontolat mean={fl.get('mean')} n={fl.get('n')} pass={fl.get('pass')}", flush=True)
+        print(
+            f"{'scenario':<28} {'true':>4} {'lock':>4} {'bino':>4} "
+            f"{'rL':>6} {'rR':>6} {'lc4L':>6} {'lc4R':>6} {'l2L':>6} {'l2R':>6} {'yaw':>6}",
+            flush=True,
+        )
+        for name, d in fl["details"].items():
+            fd = d.get("fire_diag") or {}
+            print(
+                f"{name:<28} {str(d.get('true_side') or '-'):>4} "
+                f"{str(d.get('threat_locked') or fd.get('threat_side') or '-'):>4} "
+                f"{_fmt(fd.get('bilateral_brake')):>4} "
+                f"{_fmt(fd.get('rise_L')):>6} {_fmt(fd.get('rise_R')):>6} "
+                f"{_fmt(fd.get('lc4_L')):>6} {_fmt(fd.get('lc4_R')):>6} "
+                f"{_fmt(fd.get('lplc2_L')):>6} {_fmt(fd.get('lplc2_R')):>6} "
+                f"{_fmt(fd.get('yaw')):>6}",
+                flush=True,
+            )
     fr = summary.get("frontal_gate") or {}
     if fr.get("details"):
         print("\nFrontal GATE (|az0|<20°, must fire, either side / brake ok):", flush=True)
@@ -1218,6 +1281,14 @@ def _print_variant_tables(summary: dict) -> None:
         flush=True,
     )
     noobj = summary.get("ctrl_noobj_headings") or {}
+    if noobj.get("per_scenario"):
+        print("\nOpen-space no-object (wall TTC at fire; <1 s is a real wall):", flush=True)
+        for name, d in noobj["per_scenario"].items():
+            print(
+                f"  {name} esc={d.get('escapes')} rise={_fmt(d.get('rise_max'))} "
+                f"wall_m={_fmt(d.get('wall_dist_m'))} ttc={_fmt(d.get('wall_ttc_s'))}s",
+                flush=True,
+            )
     print(
         f"OFFICIAL pass={(summary.get('official_pass') or {}).get('pass')} gates={(summary.get('official_pass') or {}).get('gates')} | "
         f"frontolat gate mean={summary.get('frontolat_gate', {}).get('mean')} pass={summary.get('frontolat_gate', {}).get('pass')} | "

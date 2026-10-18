@@ -247,12 +247,12 @@ def main(argv=None) -> int:
     table = {}
     for lv in args.lv:
         print(f"\n=== l/v={lv} ===", flush=True)
-        env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
+        env = FlyEnvironment(render_mode="rgb_array")
         env.reset(seed=0)
         env.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
 
         # B first so D can match its camera bg (current closed-loop room).
-        env_b = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
+        env_b = FlyEnvironment(render_mode="rgb_array")
         env_b.reset(seed=0)
         env_b.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
         hL_b, hR_b, th_b, room_b = camera_movie(env_b, lv, DIST0, DT, PRE_S, STIM_S, translate=False)
@@ -272,7 +272,7 @@ def main(argv=None) -> int:
         print(f"  A gray     {table[f'A_gray_lv{lv:g}']}", flush=True)
         env.close()
 
-        env_c = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
+        env_c = FlyEnvironment(render_mode="rgb_array")
         env_c.reset(seed=0)
         hL_c, hR_c, th_c, room_c = camera_movie(env_c, lv, DIST0, DT, PRE_S, STIM_S, translate=True)
         stats_c = hex_stats(hL_c[int(round(PRE_S / DT)) + 10])

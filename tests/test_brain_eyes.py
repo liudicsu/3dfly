@@ -76,7 +76,8 @@ def test_walls_use_natural_one_over_f():
     assert 'mocap="true"' in xml
     assert 'size="0.58"' in xml
     assert "loom_mat" in xml
-    assert 'rgba="0.02 0.02 0.03 1"' in xml
+    assert 'rgba="0 0 0 1"' in xml
+    assert "specular=\"0\"" in xml
     assert "loom_check" not in xml
     path = mjcf_mod.write_one_over_f_png(mjcf_mod.ASSETS_ROOT / "room_natural.png")
     assert path.is_file() and path.stat().st_size > 100

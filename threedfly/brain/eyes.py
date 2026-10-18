@@ -52,7 +52,12 @@ FLYVIS_CONTRAST_GAIN = 1.35
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
-    """Bilinear-sample gray/first-channel image at UV in [0, 1]."""
+    """Bilinear-sample gray/first-channel image at UV in [0, 1].
+
+    Official cameras are 320 px / 150° (0.47°/px). Bilinear then adds
+    ≪1° — the 5° FWHM Gaussian is the acceptance, not a second blur
+    on a 1° raster. Nearest-neighbor at 160 px broke L/R hex symmetry.
+    """
     if image.ndim == 3:
         gray = image.mean(axis=2)
     else:

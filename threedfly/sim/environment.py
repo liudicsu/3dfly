@@ -6,7 +6,7 @@ from typing import Tuple, Optional, Dict
 import tempfile
 from pathlib import Path
 
-from threedfly.sim.mjcf import get_fly_mjcf
+from threedfly.sim.mjcf import EYE_PIXELS, get_fly_mjcf
 from threedfly.sim.wings import stroke_averaged_forces, visual_wing_angles
 
 # Engineered aero: linear+quadratic drag sized for ~1 m/s cruise, not a CFD model.
@@ -41,8 +41,8 @@ class FlyEnvironment:
     def __init__(
         self,
         render_mode: Optional[str] = "rgb_array",
-        camera_width: int = 160,
-        camera_height: int = 160,
+        camera_width: Optional[int] = None,
+        camera_height: Optional[int] = None,
     ):
         """
         Initialize environment.
@@ -53,8 +53,8 @@ class FlyEnvironment:
             camera_height: Eye camera height in pixels
         """
         self.render_mode = render_mode
-        self.camera_width = camera_width
-        self.camera_height = camera_height
+        self.camera_width = int(camera_width) if camera_width else int(EYE_PIXELS)
+        self.camera_height = int(camera_height) if camera_height else int(EYE_PIXELS)
         
         # Load MJCF model
         mjcf_xml = get_fly_mjcf()
@@ -74,7 +74,7 @@ class FlyEnvironment:
         
         # Renderer for cameras
         if render_mode is not None:
-            self.renderer = mujoco.Renderer(self.model, camera_height, camera_width)
+            self.renderer = mujoco.Renderer(self.model, self.camera_height, self.camera_width)
         else:
             self.renderer = None
         
@@ -325,10 +325,21 @@ class FlyEnvironment:
             self.renderer.update_scene(self.data, camera=self.left_eye_id)
             # Generic two-sided raster: single-sided culling drops interiors
             # of any closed geom (walls, objects) once the camera is inside.
-            self.renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+            # No fog/haze/spec — a black loom must stay black (Klapoetke).
+            fl = self.renderer.scene.flags
+            fl[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_FOG)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_HAZE)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_REFLECTION)] = False
             left_img = self.renderer.render()
             self.renderer.update_scene(self.data, camera=self.right_eye_id)
-            self.renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+            fl = self.renderer.scene.flags
+            fl[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_FOG)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_HAZE)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = False
+            fl[int(mujoco.mjtRndFlag.mjRND_REFLECTION)] = False
             right_img = self.renderer.render()
         finally:
             if saved is not None:

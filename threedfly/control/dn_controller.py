@@ -237,27 +237,51 @@ class DNFlightController:
             "escape_kick": 0.0,
         }
 
-    def _bilateral_expansion(self) -> bool:
-        """Frontal / wall: *both* eyes climb — brake, do not yaw.
+    def _vpn_sides(self, ro: DNReadout) -> tuple[float, float]:
+        """LC4 / LPLC2 amplitudes. On camera frames these are nearly binocular."""
+        return (
+            max(0.0, float(ro.lc4_L), float(ro.lplc2_L)),
+            max(0.0, float(ro.lc4_R), float(ro.lplc2_R)),
+        )
 
-        ``not lateral`` alone is too broad: a 35° loom plus a little
-        contralateral leak would freeze VPN laterality. Require a real
-        rise on both sides.
-        """
+    def _dnp01_laterality(self) -> tuple[float, float]:
         if self._last_readout is None:
-            return False
-        rise_L, rise_R = self._dnp01_rises(self._last_readout)
-        both = min(float(rise_L), float(rise_R)) >= 0.08
-        return bool(both) and not self._lateral_dnp01_climb()
+            return 0.0, 0.0
+        return self._dnp01_rises(self._last_readout)
+
+    def _lateral_vpn_climb(self, ro: DNReadout) -> bool:
+        left, right = self._vpn_sides(ro)
+        return abs(float(left) - float(right)) >= 0.08
+
+    def _bilateral_expansion(self, ro: Optional[DNReadout] = None) -> bool:
+        """Wall: both GF sides climb together. A 35° loom is DNp01-lateral.
+
+        Camera-path LC4/LPLC2 are nearly binocular (and can flip). Per-side
+        DNp01 rise is the reliable laterality; bilateral means *not* that.
+        """
+        if ro is None:
+            if self._last_readout is None:
+                return False
+            ro = self._centered(self._last_readout) if self._base is not None else self._last_readout
+        rise_L, rise_R = self._dnp01_laterality()
+        vpn_L, vpn_R = self._vpn_sides(ro)
+        both_gf = min(float(rise_L), float(rise_R)) >= 0.08
+        both_vpn = min(float(vpn_L), float(vpn_R)) >= 0.08
+        # A huge side disc raises both GF; LC4/LPLC2 stay one-sided.
+        # A wall raises both. Require both, and neither lateral.
+        return (
+            bool(both_gf)
+            and bool(both_vpn)
+            and not self._lateral_dnp01_climb()
+            and not self._lateral_vpn_climb(ro)
+        )
 
     def _steer_yaw(self, ro: DNReadout) -> float:
         t = self._steer_terms(ro)
-        # Side loom: freeze course so DNa02/HS cannot yaw INTO the object.
-        # Bilateral / frontal wall: freeze *all* yaw (including VPN L−R)
-        # and let loom_brake do the work — wide-FOV wall expansion is a
-        # collision in depth, not a turn.
+        # Side loom: DNp01 laterality — freeze course, keep loom yaw.
+        # Bilateral wall (both GF): freeze all yaw and brake.
         side = self.last_rise >= 0.08 and self._lateral_dnp01_climb()
-        bino = self._bilateral_expansion()
+        bino = self._bilateral_expansion(ro)
         if side or bino:
             t["dna02"] = 0.0
             t["dnp15"] = 0.0
@@ -271,6 +295,9 @@ class DNFlightController:
         t["steer"] = float(yaw)
         t["course_frozen"] = 1.0 if (side or bino) else 0.0
         t["bilateral_brake"] = 1.0 if bino else 0.0
+        vpn_L, vpn_R = self._vpn_sides(ro)
+        t["vpn_L"] = float(vpn_L)
+        t["vpn_R"] = float(vpn_R)
         self.last_yaw_terms = t
         return float(yaw)
 
@@ -303,6 +330,10 @@ class DNFlightController:
     def _loom_yaw_parts(self, ro: DNReadout) -> tuple[float, float]:
         p = self.params
         d03, vpn = self._loom_lr(ro)
+        rise_L, rise_R = self._dnp01_laterality()
+        if abs(float(rise_L) - float(rise_R)) >= 0.08:
+            # Camera LC4 L−R can flip; per-side DNp01 rise does not.
+            vpn = float(rise_L) - float(rise_R)
         raw = float(d03 + vpn)
         if abs(raw) < float(getattr(p, "loom_yaw_deadzone", 0.0)):
             return 0.0, 0.0
@@ -433,7 +464,16 @@ class DNFlightController:
                 and (self.last_rise >= lock_rise or expanding)
                 and abs(integ) >= lat_min
             ):
-                self._loom_threat = "L" if integ > 0.0 else "R"
+                # Lock from monocular VPNs. DNp01 / mixed DNp03 can flip
+                # a 35° loom to the wrong side (GF is binocular).
+                vpn_L, vpn_R = self._vpn_sides(ro)
+                rise_L, rise_R = self._dnp01_laterality()
+                if abs(float(rise_L) - float(rise_R)) >= 0.08:
+                    self._loom_threat = "L" if float(rise_L) > float(rise_R) else "R"
+                elif abs(float(vpn_L) - float(vpn_R)) >= 0.08:
+                    self._loom_threat = "L" if float(vpn_L) > float(vpn_R) else "R"
+                else:
+                    self._loom_threat = "L" if integ > 0.0 else "R"
                 self.last_lock_step = int(self.steps)
         return integ
 
@@ -444,6 +484,14 @@ class DNFlightController:
             eye = self._raw_eye_lr()
             if abs(eye) >= float(self.params.eye_threat_min):
                 return "L" if eye > 0.0 else "R"
+        if self._base is not None:
+            rise_L, rise_R = self._dnp01_laterality()
+            d01 = float(rise_L) - float(rise_R)
+            if abs(d01) >= 0.08:
+                return "L" if d01 > 0.0 else "R"
+        vpn_L, vpn_R = self._vpn_sides(ro)
+        if abs(float(vpn_L) - float(vpn_R)) >= 0.08:
+            return "L" if float(vpn_L) > float(vpn_R) else "R"
         if self._loom_threat:
             return self._loom_threat
         d = float(self.last_lat_integrated)

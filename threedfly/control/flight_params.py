@@ -189,8 +189,10 @@ class FlightParams:
             "Gaussian acceptance lobe over rendered pixels (lattice centre "
             "= frontal). Drosophila envelope (−15°…+170° ipsilateral, ~15° "
             "overlap). flyvis-style luminance: p80 background → 0.5, then "
-            "fixed contrast gain (ContrastBrightness). 1/f room walls, not "
-            "hard checkers. Bilateral expansion → brake, not HS yaw. "
+            "fixed contrast gain (ContrastBrightness). Matte-black loom "
+            "(rgba 0, no spec/haze). 320 px so camera AA ≪ 5° FWHM. "
+            "1/f walls (RMS 0.08). Laterality is per-side DNp01 rise "
+            "(camera LC4 L−R can flip). Bilateral = both GF sides. "
             "Eye input is rendered pixels only — no sim object pose/radius. "
             "No U-flip, no 40° cant."
         ),

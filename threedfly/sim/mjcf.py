@@ -18,7 +18,7 @@ ASSETS_ROOT = Path(__file__).parent.parent.parent / "assets"
 ASSETS_DIR = ASSETS_ROOT / "fly_meshes"
 
 
-def write_one_over_f_png(path: Path, n: int = 256, contrast: float = 0.12, seed: int = 2) -> Path:
+def write_one_over_f_png(path: Path, n: int = 256, contrast: float = 0.08, seed: int = 2) -> Path:
     """Natural-like 1/f wall texture (real-fly test backgrounds, not hard checkers)."""
     import struct
     import zlib
@@ -58,8 +58,9 @@ FLY_MJCF = """
   
   <option timestep="0.002" gravity="0 0 -9.81"/>
   <visual>
-    <headlight ambient="0.40 0.40 0.40" diffuse="0.80 0.80 0.80" specular="0.05 0.05 0.05"/>
-    <rgba haze="0.5 0.5 0.5 1"/>
+    <headlight ambient="0.40 0.40 0.40" diffuse="0.80 0.80 0.80" specular="0 0 0"/>
+    <rgba haze="0 0 0 0"/>
+    <map fogstart="50" fogend="80"/>
   </visual>
   
   <asset>
@@ -80,7 +81,10 @@ FLY_MJCF = """
          dark-on-bright. texrepeat 8–16 checkers are <1 hex (~5.8°) at
          40–60° angular size and average to gray — DNp01 then fires on
          the hide/disappearance, not the loom. -->
-    <material name="loom_mat" rgba="0.02 0.02 0.03 1" reflectance="0.0"/>
+    <!-- Klapoetke / von Reyn: matte black, no spec, no emission.
+         rgba=0 so headlight ambient/diffuse cannot lift the disc. -->
+    <material name="loom_mat" rgba="0 0 0 1" reflectance="0" specular="0"
+              shininess="0" emission="0"/>
     
     <!-- flybody mesh assets (Apache-2.0). Scale: millimetres × 0.01 → metres (10× life-size). -->
     <mesh name="thorax_mesh" file="thorax_body.obj" scale=""" + f'"{_S}"' + """/>
@@ -296,6 +300,8 @@ def get_fly_mjcf() -> str:
 EYE_CANT_DEG = 0.0
 EYE_DOWN_DEG = 0.0
 EYE_FOVY_DEG = 150.0
+# 320 px @ 150° → 0.47°/px ≪ 5° acceptance (160 px was already ~1° AA).
+EYE_PIXELS = 320
 
 
 def eye_xyaxes(side: str, cant_deg: float = EYE_CANT_DEG, down_deg: float = EYE_DOWN_DEG):

@@ -461,12 +461,15 @@ def test_course_steer_frozen_during_dnp01_climb():
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=8)
     rest = DNReadout(dnp01_L=1.80, dna02_L=0.2, dna02_R=0.2, dng02_amp=5.0)
     c.capture_baseline(rest)
-    climb = DNReadout(dnp01_L=2.00, dna02_L=8.0, dna02_R=0.0, dng02_amp=5.0)
+    climb = DNReadout(
+        dnp01_L=2.00, dna02_L=8.0, dna02_R=0.0, lc4_L=1.4, lc4_R=0.1, dng02_amp=5.0
+    )
     c.compute(climb)
     assert c.last_rise >= 0.08
     assert c.last_yaw_terms.get("course_frozen") == pytest.approx(1.0)
     assert c.last_yaw_terms.get("dna02") == pytest.approx(0.0)
     assert c.last_yaw_terms.get("hse") == pytest.approx(0.0)
+    assert c.last_yaw_terms.get("bilateral_brake") == pytest.approx(0.0)
 
 
 def test_bilateral_expansion_brakes_not_yaws():
@@ -504,6 +507,39 @@ def test_one_sided_climb_is_not_bilateral():
     c.compute(climb)
     assert c.last_yaw_terms.get("bilateral_brake") == pytest.approx(0.0)
     assert c.last_yaw_terms.get("course_frozen") == pytest.approx(1.0)
+
+
+def test_binocular_gf_monocular_vpn_is_not_bilateral():
+    """Equal DNp01 on both sides is a wall; LC4 flip must not pick the side."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=8)
+    rest = DNReadout(dnp01_L=1.80, dnp01_R=1.80, lc4_L=0.1, lc4_R=0.1, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    wall = DNReadout(
+        dnp01_L=2.05,
+        dnp01_R=2.04,
+        lc4_L=1.3,
+        lc4_R=1.25,
+        lplc2_L=0.9,
+        lplc2_R=0.88,
+        dng02_amp=5.0,
+    )
+    c.compute(wall)
+    assert c.last_yaw_terms.get("bilateral_brake") == pytest.approx(1.0)
+    assert c.last_yaw_terms.get("vpn_loom") == pytest.approx(0.0)
+
+    c.reset()
+    c.capture_baseline(rest)
+    # Camera LC4 can flip; DNp01 laterality must still say L.
+    loom = DNReadout(
+        dnp01_L=2.10,
+        dnp01_R=1.82,
+        lc4_L=0.4,
+        lc4_R=1.5,
+        dng02_amp=5.0,
+    )
+    c.compute(loom)
+    assert c.last_yaw_terms.get("bilateral_brake") == pytest.approx(0.0)
+    assert c._threat_side(c._centered(loom)) == "L"
 
 
 def test_brief_slope_bump_does_not_latch_through_slow_open_climb():
