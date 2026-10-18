@@ -30,12 +30,16 @@ if str(ROOT) not in sys.path:
 from threedfly.control.closed_loop_metrics import (
     LOOM_RADIUS_M,
     LOOM_START_ANG_MAX_DEG,
+    MISS_SURFACE_M,
+    PLANT_PEAK_YAW_DEG_S,
     PR16_STEPS,
     PR16_WALLS,
     PR16_WALLS_PER_100,
     ROOM_XY,
     angular_size_deg,
+    avoidance_feasibility,
     avoidance_mode,
+    behavioural_response,
     closest_approach_step,
     collision_course_object,
     coverage,
@@ -46,6 +50,7 @@ from threedfly.control.closed_loop_metrics import (
     flight_avoidance_ok,
     geometry_aware_frac,
     loom_geometry,
+    max_lateral_accel_mps2,
     mean_abs_yaw_rate_rad_s,
     min_center_distance_m,
     min_surface_clearance_m,
@@ -58,6 +63,7 @@ from threedfly.control.closed_loop_metrics import (
     visible_loom_placement,
     wall_ttc_s,
     walls_per_100,
+    wander_yaw_threshold,
     yaw_term_away_integrals,
     wrap_heading_delta,
     xy_extent,
@@ -699,6 +705,10 @@ def _run_scenario(
         "would_fire": int(ctl.would_fire_count),
         "rise_geometry": rise_geometry,
         "escape_events": events,
+        # Raw series for the post-run behavioural / feasibility scoring.
+        "azimuth_series": [None if a is None else float(a) for a in az_series],
+        "loom_speed_mps": None if loom_v is None else float(np.linalg.norm(loom_v[:2])),
+        "gf_step": next((int(e.step) for e in ctl.escape_events if not getattr(e, "engineered", False)), None),
     }
 
 
@@ -1033,9 +1043,176 @@ def _unseen_gate(scenarios: dict) -> dict:
     }
 
 
+def _measure_plant(env, params) -> dict:
+    """Calibrated plant numbers for the feasibility model (no vision).
+
+    Peak yaw rate: official unit DNa02 L−R step (calibrate_saccade_plant).
+    Lateral accel: forward thrust + all spare lift (upper bound). Cruise:
+    drag-limited speed at forward_bias. Constant fallback if the step fails.
+    """
+    rec = {"source": "constant", "peak_yaw_deg_s": float(PLANT_PEAK_YAW_DEG_S), "t90_s": None}
+    try:
+        from threedfly.control.saccade_plant import measure_unit_dn_step
+
+        r = measure_unit_dn_step(env, side="L", params=params)
+        rec.update({"source": "measured", "peak_yaw_deg_s": float(r["peak_yaw_deg_s"]), "t90_s": r["t90_s"]})
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        rec["error"] = repr(exc)
+    mass = float(env.model.body_subtreemass[env._fly_body_id])
+    g = abs(float(env.model.opt.gravity[2]))
+    a_lat = max_lateral_accel_mps2(float(env.thrust_max), float(env.lift_max), mass, g)
+    f = float(params.forward_bias) * float(env.thrust_max)
+    b, c = float(env.drag_linear), float(env.drag_quadratic)
+    v_cruise = (-b + float(np.sqrt(b * b + 4.0 * c * f))) / (2.0 * c) if c > 0 else f / max(b, 1e-9)
+    rec.update({
+        "mass_kg": mass,
+        "a_lat_max_mps2": float(a_lat),
+        "cruise_speed_mps": float(v_cruise),
+    })
+    return rec
+
+
+def _noobj_wander(scenarios: dict) -> Optional[dict]:
+    """Yaw-rate wander from the official 6-heading no-object runs."""
+    runs, dts = [], []
+    for name, sc in scenarios.items():
+        if not name.startswith("ctrl_noobj_"):
+            continue
+        h = sc.get("headings")
+        if h is None or len(h) < 2:
+            continue
+        runs.append(np.asarray(h, dtype=float))
+        dts.append(float(sc.get("control_dt_s") or 0.02))
+    return wander_yaw_threshold(runs, dts)
+
+
+def _speed_at(traj, step: Optional[int], dt: float) -> float:
+    t = np.asarray(traj, dtype=float)
+    if step is None or t.ndim != 2 or t.shape[0] < 2:
+        return 0.0
+    i = int(np.clip(step, 1, t.shape[0] - 1))
+    return float(np.hypot(*(t[i, :2] - t[i - 1, :2]))) / max(float(dt), 1e-9)
+
+
+def _score_behaviour(sc: dict, name: str, wander: dict, plant: dict) -> None:
+    """Attach response-window behaviour + kinematic feasibility to a loom case."""
+    side = _true_side(name, sc)
+    dt = float(sc.get("control_dt_s") or 0.01)
+    ca = sc.get("closest_approach_step")
+    resp = behavioural_response(
+        headings=sc.get("headings") if sc.get("headings") is not None else [],
+        dt=dt,
+        ca_step=ca,
+        gf_step=sc.get("gf_step"),
+        threat_side=side or "",
+        wander_rad_s=float(wander["threshold_rad_s"]),
+    )
+    resp["above_peak_wander"] = bool(
+        resp["peak_yaw_rate_rad_s"] > float(wander["peak_threshold_rad_s"])
+    )
+    dec = resp.get("decision_step")
+    az_ser = sc.get("azimuth_series") or []
+    az_dec = None
+    if dec is not None and az_ser:
+        a = az_ser[int(np.clip(dec, 0, len(az_ser) - 1))]
+        az_dec = None if a is None else float(a)
+    v_meas = _speed_at(sc.get("trajectory"), dec, dt)
+    v0 = max(v_meas, float(plant["cruise_speed_mps"]))
+    feas = avoidance_feasibility(
+        decision_step=dec,
+        ca_step=ca,
+        dt=dt,
+        approach_speed_mps=float(sc.get("loom_speed_mps") or 0.0),
+        azimuth_decision_deg=az_dec,
+        v0_mps=v0,
+        a_lat_mps2=float(plant["a_lat_max_mps2"]),
+        yaw_rate_max_rad_s=float(np.radians(plant["peak_yaw_deg_s"])),
+    )
+    feas["v0_measured_mps"] = float(v_meas)
+    feas["azimuth_decision_deg"] = az_dec
+    surf = sc.get("min_surface_m")
+    feas["cleared"] = bool(surf is not None and float(surf) > MISS_SURFACE_M)
+    sc["true_side"] = side
+    sc["behaviour"] = resp
+    sc["feasibility"] = feas
+
+
+def _behaviour_gate(scenarios: dict, pred, *, gate: bool = True) -> dict:
+    """Frontolat flight gate scored in the response window.
+
+    success = on-time (GF fire or saccade onset before closest approach)
+    AND peak |yaw rate| > no-object wander (mean + 2 sd) AND heading change
+    over the 100 ms window away from the TRUE side. ≥80% to pass.
+    Clearance (surface > 0.1 m) is required at ≥80% only on the subset
+    that is kinematically feasible given the observed decision time.
+    """
+    details, scores = {}, []
+    feas_names, clear_scores = [], []
+    modes = {"gf": 0, "saccade": 0, "none": 0}
+    n_toward = 0
+    for name, sc in scenarios.items():
+        if not pred(name) or "behaviour" not in sc:
+            continue
+        b, f = sc["behaviour"], sc["feasibility"]
+        ok = 1.0 if b["ok"] else 0.0
+        scores.append(ok)
+        modes[b.get("decision_source") or "none"] = modes.get(b.get("decision_source") or "none", 0) + 1
+        if b.get("toward"):
+            n_toward += 1
+        if f.get("feasible"):
+            feas_names.append(name)
+            clear_scores.append(1.0 if f.get("cleared") else 0.0)
+        details[name] = {
+            "ok": ok,
+            "true_side": sc.get("true_side"),
+            "decision_source": b.get("decision_source"),
+            "decision_step": b.get("decision_step"),
+            "ca_step": sc.get("closest_approach_step"),
+            "on_time": b.get("on_time"),
+            "peak_yaw_rate_rad_s": b.get("peak_yaw_rate_rad_s"),
+            "above_wander": b.get("above_wander"),
+            "above_peak_wander": b.get("above_peak_wander"),
+            "window_heading_rad": b.get("window_heading_rad"),
+            "away": b.get("away"),
+            "toward": b.get("toward"),
+            "min_surface_m": sc.get("min_surface_m"),
+            "feasible": f.get("feasible"),
+            "feasible_at_gf50": f.get("feasible_at_gf50"),
+            "t_avail_s": f.get("t_avail_s"),
+            "max_lateral_m": f.get("max_lateral_m"),
+            "latest_decision_angle_deg": f.get("latest_decision_angle_deg"),
+            "azimuth_decision_deg": f.get("azimuth_decision_deg"),
+            "required_lead_s": f.get("required_lead_s"),
+            "feasibility_label": f.get("label"),
+            "approach_speed_mps": f.get("approach_speed_mps"),
+            "cleared": f.get("cleared"),
+            "lv_s": sc.get("lv_s"),
+            "az_design_deg": sc.get("az_design_deg"),
+        }
+    mean = float(np.mean(scores)) if scores else None
+    clear_mean = float(np.mean(clear_scores)) if clear_scores else None
+    beh_pass = bool(scores) and float(mean) >= 0.80
+    clear_pass = (not clear_scores) or float(clear_mean) >= 0.80
+    return {
+        "details": details,
+        "mean": mean,
+        "n": int(len(scores)),
+        "n_ok": int(sum(scores)),
+        "decision_sources": modes,
+        "n_toward": int(n_toward),
+        "behaviour_pass": bool(beh_pass),
+        "feasible_subset": feas_names,
+        "n_feasible": int(len(feas_names)),
+        "clearance_mean_feasible": clear_mean,
+        "clearance_pass": bool(clear_pass),
+        "pass": bool(beh_pass and clear_pass),
+        "gate": bool(gate),
+    }
+
+
 def _official_pass(summary: dict, params) -> dict:
     """Gates that still decide acceptance. Eccentric L/R and yaw-2.20 do not."""
-    fl = summary.get("frontolat_gate") or {}
+    fl = summary.get("frontolat_behaviour_gate") or {}
     fr = summary.get("frontal_gate") or {}
     no = summary.get("ctrl_noobj_headings") or {}
     st = summary.get("static_onset_gate") or {}
@@ -1053,7 +1230,11 @@ def _official_pass(summary: dict, params) -> dict:
     return {
         "pass": all(gates.values()),
         "gates": gates,
-        "report_only": {"static_onset": bool(st.get("pass"))},
+        "report_only": {
+            "static_onset": bool(st.get("pass")),
+            "frontolat_surface_away": bool((summary.get("frontolat_gate") or {}).get("pass")),
+            "unseen_behaviour": bool((summary.get("unseen_behaviour") or {}).get("pass")),
+        },
     }
 
 
@@ -1271,6 +1452,8 @@ def main(argv=None) -> int:
     env = FlyEnvironment(render_mode="rgb_array")
     ctl = DNFlightController(params)
     ctl.bind_hover(env.hover_action)
+    plant = _measure_plant(env, params)
+    print(f"Plant (feasibility model): {json.dumps(plant)}", flush=True)
 
     print("Scenario room…", flush=True)
     room = _run_scenario(
@@ -1479,6 +1662,13 @@ def main(argv=None) -> int:
         )
     env.close()
 
+    wander = _noobj_wander(scenarios) or {
+        "threshold_rad_s": float("inf"), "peak_threshold_rad_s": float("inf"), "n_runs": 0,
+    }
+    for name, sc in scenarios.items():
+        if _is_frontolat(name) or _is_unseen(name) or _is_frontal(name):
+            _score_behaviour(sc, name, wander, plant)
+
     side_l = scenarios["side_loom_left"]
     side_r = scenarios["side_loom_right"]
     out = Path(args.output)
@@ -1490,7 +1680,7 @@ def main(argv=None) -> int:
         return {
             k: v
             for k, v in sc.items()
-            if k not in ("trajectory", "headings", "dnp01", "dnp01_rise")
+            if k not in ("trajectory", "headings", "dnp01", "dnp01_rise", "azimuth_series")
         }
 
     room_w100 = walls_per_100(room["wall_contacts"], room["steps"])
@@ -1552,6 +1742,10 @@ def main(argv=None) -> int:
             "side_R_fire_minus_closest": side_r.get("fire_minus_closest"),
             "side_L_visible_at_fire": side_l.get("visible_at_fire"),
             "side_R_visible_at_fire": side_r.get("visible_at_fire"),
+            "frontolat_behaviour_gate": _behaviour_gate(scenarios, _is_frontolat),
+            "unseen_behaviour": _behaviour_gate(scenarios, _is_unseen, gate=False),
+            "noobj_wander": wander,
+            "plant": plant,
             "frontolat_gate": _frontolat_gate(scenarios),
             "frontal_gate": _frontal_gate(scenarios),
             "static_onset_gate": _zero_fire_gate(scenarios, _is_static_onset),
@@ -1574,9 +1768,15 @@ def main(argv=None) -> int:
                 "field. Receding large discs stay visible and skip that "
                 "initialisation so the standing disc is not an onset. "
                 "GF readout is frozen (calibrate_gf_readout.py; von "
-                "Reyn 2014/2017). Frontolat flight gate is surface "
-                "clearance d−0.58 > 0.1 m + far-side/heading-away "
-                "(Tammero 2002; Muijres 2014), not GF fire. Static "
+                "Reyn 2014/2017). Frontolat flight gate is behavioural, "
+                "scored in a 100 ms response window: on-time decision "
+                "(GF fire or saccade onset before closest approach), "
+                "peak |yaw rate| above no-object wander (mean+2sd) and "
+                "turn away from the true side (Tammero 2002; Muijres "
+                "2014). Surface clearance >0.1 m is required only on "
+                "the kinematically feasible subset (calibrated plant "
+                "upper bound given the observed decision time); "
+                "surface+away is report-only. Static "
                 "30–40° onset is report-only. Recede must be 0 fires. "
                 "Frontal both-GF takeoff. DN→yaw plant is frozen "
                 "(calibrate_saccade_plant.py; Fry 2003). 1/f walls "
@@ -1616,7 +1816,38 @@ def main(argv=None) -> int:
     return 0
 
 
+def _print_behaviour_table(summary: dict) -> None:
+    bg = summary.get("frontolat_behaviour_gate") or {}
+    if not bg:
+        return
+    w = summary.get("noobj_wander") or {}
+    print(
+        f"\n=== Frontolat behavioural gate (response window) {bg.get('n_ok')}/{bg.get('n')} "
+        f"pass={bg.get('pass')} | wander |w|>{w.get('threshold_rad_s', float('nan')):.2f} rad/s | "
+        f"feasible {bg.get('n_feasible')} clearance_pass={bg.get('clearance_pass')} ==="
+    )
+    print(
+        f"{'case':34s} {'ok':>3s} {'src':>7s} {'dec-CA':>6s} {'az@dec':>6s} {'peak|w|':>7s} "
+        f"{'away':>4s} {'lead_s':>6s} {'need_s':>6s} {'smax':>5s} {'feas':>11s} {'az_ok':>5s} {'@50':>4s} {'surf':>6s}"
+    )
+    for name, d in sorted((bg.get("details") or {}).items()):
+        b = f = d
+        dec = b.get("decision_step")
+        ca = d.get("ca_step")
+        az = f.get("azimuth_decision_deg")
+        print(
+            f"{name:34s} {('Y' if b.get('ok') else 'n'):>3s} {str(b.get('decision_source')):>7s} "
+            f"{(dec - ca) if (dec is not None and ca is not None) else '-':>6} "
+            f"{(f'{az:.0f}' if az is not None else '-'):>6s} {(b.get('peak_yaw_rate_rad_s') or 0.0):7.1f} "
+            f"{('Y' if b.get('away') else 'n'):>4s} {f.get('t_avail_s') if d.get('t_avail_s') is not None else float('nan'):6.3f} "
+            f"{f.get('required_lead_s') if d.get('required_lead_s') is not None else float('nan'):6.3f} {f.get('max_lateral_m') if d.get('max_lateral_m') is not None else float('nan'):5.2f} "
+            f"{str(f.get('feasibility_label')):>11s} {f.get('latest_decision_angle_deg') if d.get('latest_decision_angle_deg') is not None else float('nan'):5.1f} "
+            f"{('Y' if f.get('feasible_at_gf50') else 'n'):>4s} {d.get('min_surface_m') if d.get('min_surface_m') is not None else float('nan'):6.2f}"
+        )
+
+
 def _print_variant_tables(summary: dict) -> None:
+    _print_behaviour_table(summary)
     fl = summary.get("frontolat_gate") or {}
     if fl.get("details"):
         print(

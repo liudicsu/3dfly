@@ -350,7 +350,8 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert gate["yaw_drivers"]["dnp03"] == 1
     official = mod._official_pass(
         {
-            "frontolat_gate": {"pass": True},
+            "frontolat_behaviour_gate": {"pass": True},
+            "frontolat_gate": {"pass": False},
             "frontal_gate": {"pass": True},
             "ctrl_noobj_headings": {"pass": True},
             "static_onset_gate": {"pass": False},
@@ -360,9 +361,12 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     )
     assert official["pass"] is True
     assert "static_onset" not in official["gates"]
+    # Surface+away is report-only now; the behavioural gate decides.
+    assert official["report_only"]["frontolat_surface_away"] is False
     official_fail = mod._official_pass(
         {
-            "frontolat_gate": {"pass": False},
+            "frontolat_behaviour_gate": {"pass": False},
+            "frontolat_gate": {"pass": True},
             "frontal_gate": {"pass": True},
             "ctrl_noobj_headings": {"pass": True},
             "static_onset_gate": {"pass": True},
@@ -488,3 +492,28 @@ def test_far_disc_hidden_for_dnp01_baseline_large_recede_stays():
     assert dnp01_baseline_shows_loom(
         present_at_prewarm=False, appear_after_prewarm=True, start_ang_deg=34.0
     ) is False
+
+
+def test_behaviour_gate_feasible_subset_clearance():
+    mod = _load_acceptance()
+    def case(ok, feas, cleared):
+        return {
+            "behaviour": {"ok": ok, "decision_source": "saccade" if ok else None, "toward": False},
+            "feasibility": {"feasible": feas, "cleared": cleared},
+        }
+    sc = {f"fl_c{i}": case(True, False, False) for i in range(4)}
+    sc["fl_c4"] = case(False, False, False)
+    g = mod._behaviour_gate(sc, mod._is_frontolat)
+    assert g["n"] == 5 and g["n_ok"] == 4 and g["behaviour_pass"]
+    assert g["n_feasible"] == 0 and g["clearance_pass"] and g["pass"]
+    sc["fl_c0"] = case(True, True, False)
+    g2 = mod._behaviour_gate(sc, mod._is_frontolat)
+    assert g2["n_feasible"] == 1 and not g2["clearance_pass"] and not g2["pass"]
+
+
+def _load_acceptance():
+    path = ROOT / "scripts" / "closed_loop_acceptance.py"
+    spec = importlib.util.spec_from_file_location("cla_behaviour", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod

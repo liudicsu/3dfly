@@ -401,10 +401,17 @@ def min_surface_clearance_m(distances, radius: float = LOOM_RADIUS_M) -> Optiona
 
 
 def net_heading_delta(headings) -> float:
+    """Cumulative (unwrapped) heading change, first → last sample.
+
+    Summing wrapped per-step deltas keeps a >180° away turn signed as
+    away. The old end-minus-start wrap scored a 300° right turn from a
+    left loom as a 60° *left* turn (box r11: "L az30 turned toward").
+    """
     h = np.asarray(list(headings), dtype=float)
     if h.size < 2:
         return 0.0
-    return wrap_heading_delta(float(h[-1]), float(h[0]))
+    d = np.diff(h)
+    return float(np.sum(np.arctan2(np.sin(d), np.cos(d))))
 
 
 def heading_away_from_side(
@@ -545,3 +552,219 @@ def geometry_aware_frac(
         if geometry_aware_event_ok(headings, step, threat_side, azimuth_onset_deg, window=window):
             ok += 1
     return float(ok) / float(len(evs))
+
+
+# --- Avoidance feasibility (frontolat flight gate) ---------------------------
+# Kinematic *upper bound* on how far the fly can move perpendicular to a
+# collision-course object's approach line between its decision (first GF
+# fire or saccade onset) and closest approach. Generous on purpose so an
+# "infeasible" label is robust:
+#   * the fly's whole current speed counts as already lateral (v0·T),
+#   * forward thrust *plus* all spare banked lift accelerate it laterally,
+#   * the only delay is rotating the thrust axis to perpendicular at the
+#     calibrated peak saccade yaw rate (no smoothing / sensorimotor lag),
+#   * drag is ignored.
+# A centre miss of r + 0.1 m is needed for 0.1 m surface clearance because
+# the object is aimed at the fly (impact parameter 0) and it is ~10–40×
+# faster than the fly, so only fly motion perpendicular to the object's
+# velocity changes the miss distance.
+# Calibrated plant: scripts/calibrate_saccade_plant.py (unit DNa02 L−R,
+# 90° in ~80 ms, peak ~2011 °/s at ×12). Used only if the run does not
+# re-measure it.
+PLANT_PEAK_YAW_DEG_S = 2011.0
+GF_WINDOW_DEG = 50.0  # von Reyn 2014: GF spike ~40–60° subtense
+RESPONSE_WINDOW_S = 0.10
+MIN_AWAY_RAD = 0.02
+
+
+def max_lateral_accel_mps2(
+    thrust_max_n: float, lift_max_n: float, mass_kg: float, g: float = 9.81
+) -> float:
+    """Upper bound: full forward thrust + all lift not needed for weight."""
+    w = float(mass_kg) * float(g)
+    spare = float(np.sqrt(max(float(lift_max_n) ** 2 - w * w, 0.0)))
+    return (float(thrust_max_n) + spare) / max(float(mass_kg), 1e-12)
+
+
+def max_lateral_displacement_m(
+    t_avail_s: float,
+    *,
+    v0_mps: float,
+    a_lat_mps2: float,
+    turn_rad: float,
+    yaw_rate_max_rad_s: float,
+) -> float:
+    t = max(0.0, float(t_avail_s))
+    t_turn = max(0.0, float(turn_rad)) / max(float(yaw_rate_max_rad_s), 1e-9)
+    t_acc = max(0.0, t - t_turn)
+    return float(v0_mps) * t + 0.5 * float(a_lat_mps2) * t_acc * t_acc
+
+
+def required_decision_lead_s(
+    *,
+    need_m: float,
+    v0_mps: float,
+    a_lat_mps2: float,
+    turn_rad: float,
+    yaw_rate_max_rad_s: float,
+) -> float:
+    """Smallest decision→closest-approach time that reaches ``need_m``."""
+    lo, hi = 0.0, 10.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        s = max_lateral_displacement_m(
+            mid, v0_mps=v0_mps, a_lat_mps2=a_lat_mps2, turn_rad=turn_rad,
+            yaw_rate_max_rad_s=yaw_rate_max_rad_s,
+        )
+        if s >= need_m:
+            hi = mid
+        else:
+            lo = mid
+    return float(hi)
+
+
+def avoidance_feasibility(
+    *,
+    decision_step: Optional[int],
+    ca_step: Optional[int],
+    dt: float,
+    approach_speed_mps: float,
+    azimuth_decision_deg: Optional[float],
+    v0_mps: float,
+    a_lat_mps2: float,
+    yaw_rate_max_rad_s: float,
+    radius: float = LOOM_RADIUS_M,
+    miss_surface_m: float = MISS_SURFACE_M,
+) -> dict:
+    """Can 0.1 m surface clearance be reached at all after this decision?
+
+    Also reports the latest decision (as object angular size) that would
+    have allowed it, and feasibility had the decision come at the GF
+    window (50°).
+    """
+    need = float(radius) + float(miss_surface_m)
+    az = 45.0 if azimuth_decision_deg is None or not np.isfinite(float(azimuth_decision_deg)) else float(azimuth_decision_deg)
+    turn = np.radians(max(0.0, 90.0 - abs(az)))
+    kw = dict(v0_mps=v0_mps, a_lat_mps2=a_lat_mps2, turn_rad=turn, yaw_rate_max_rad_s=yaw_rate_max_rad_s)
+    t_req = required_decision_lead_s(need_m=need, **kw)
+    u = max(float(approach_speed_mps), 1e-6)
+    # Object centre distance at the latest workable decision.
+    d_req = u * t_req + 0.0
+    ang_req = angular_size_deg(max(d_req, float(radius) * 1.0001), radius)
+    d50 = start_distance_for_angular_size(GF_WINDOW_DEG, radius)
+    t50 = d50 / u
+    s50 = max_lateral_displacement_m(t50, **kw)
+    out = {
+        "need_center_m": need,
+        "approach_speed_mps": float(u),
+        "v0_mps": float(v0_mps),
+        "a_lat_max_mps2": float(a_lat_mps2),
+        "yaw_rate_max_deg_s": float(np.degrees(yaw_rate_max_rad_s)),
+        "turn_needed_deg": float(np.degrees(turn)),
+        "required_lead_s": float(t_req),
+        "latest_decision_angle_deg": float(ang_req),
+        "lead_at_gf50_s": float(t50),
+        "max_lateral_at_gf50_m": float(s50),
+        "feasible_at_gf50": bool(s50 >= need),
+        "decision_step": None if decision_step is None else int(decision_step),
+        "ca_step": None if ca_step is None else int(ca_step),
+    }
+    if decision_step is None or ca_step is None:
+        out.update({"t_avail_s": None, "max_lateral_m": None, "feasible": False, "label": "no_decision"})
+        return out
+    t_av = max(0.0, (int(ca_step) - int(decision_step)) * float(dt))
+    s = max_lateral_displacement_m(t_av, **kw)
+    feas = bool(s >= need)
+    out.update({
+        "t_avail_s": float(t_av),
+        "max_lateral_m": float(s),
+        "feasible": feas,
+        "label": "feasible" if feas else "infeasible",
+    })
+    return out
+
+
+def wander_yaw_threshold(headings_runs, dts) -> Optional[dict]:
+    """No-object wander: pooled per-step |yaw rate| mean + 2 sd (rad/s).
+
+    Also mean + 2 sd of per-run *peak* |yaw rate| (stricter, reported).
+    """
+    pooled, peaks = [], []
+    for h, dt in zip(headings_runs, dts):
+        w = np.abs(yaw_rates(h, dt))
+        if w.size:
+            pooled.append(w)
+            peaks.append(float(np.max(w)))
+    if not pooled:
+        return None
+    allw = np.concatenate(pooled)
+    return {
+        "pooled_mean": float(np.mean(allw)),
+        "pooled_std": float(np.std(allw)),
+        "threshold_rad_s": float(np.mean(allw) + 2.0 * np.std(allw)),
+        "peak_mean": float(np.mean(peaks)),
+        "peak_std": float(np.std(peaks)),
+        "peak_threshold_rad_s": float(np.mean(peaks) + 2.0 * np.std(peaks)),
+        "n_runs": int(len(pooled)),
+    }
+
+
+def behavioural_response(
+    *,
+    headings,
+    dt: float,
+    ca_step: Optional[int],
+    gf_step: Optional[int],
+    threat_side: str,
+    wander_rad_s: float,
+    window_s: float = RESPONSE_WINDOW_S,
+    min_away_rad: float = MIN_AWAY_RAD,
+    first_step: int = 0,
+) -> dict:
+    """Response-window score (not the wrapped end-of-trial heading).
+
+    decision = first GF fire or first |yaw rate| > no-object wander
+    (whichever is earlier, searched up to closest approach).
+    ok = decision before closest approach AND peak |yaw rate| in
+    [decision, decision + window] > wander AND heading change over that
+    window is away from the TRUE side.
+    """
+    h = np.asarray(list(headings), dtype=float)
+    w = yaw_rates(h, dt)
+    sacc = None
+    if ca_step is not None and w.size:
+        end = min(int(ca_step), int(w.size) - 1)
+        for i in range(max(0, int(first_step)), end + 1):
+            if abs(float(w[i])) > float(wander_rad_s):
+                sacc = int(i)
+                break
+    cands = [s for s in (gf_step, sacc) if s is not None]
+    decision = int(min(cands)) if cands else None
+    source = None
+    if decision is not None:
+        source = "gf" if (gf_step is not None and int(gf_step) == decision) else "saccade"
+    on_time = decision is not None and ca_step is not None and int(decision) < int(ca_step)
+    peak = 0.0
+    dh = 0.0
+    if decision is not None and h.size >= 2:
+        n = max(1, int(round(float(window_s) / max(float(dt), 1e-9))))
+        i0 = int(np.clip(decision, 0, h.size - 1))
+        i1 = int(np.clip(decision + n, 0, h.size - 1))
+        seg = w[i0: max(i0 + 1, i1)] if w.size else np.zeros(0)
+        peak = float(np.max(np.abs(seg))) if seg.size else 0.0
+        dh = net_heading_delta(h[i0: i1 + 1])
+    away = heading_away_from_side(dh, threat_side, min_abs=min_away_rad)
+    above = peak > float(wander_rad_s)
+    return {
+        "ok": bool(on_time and above and away),
+        "decision_step": decision,
+        "decision_source": source,
+        "saccade_onset_step": sacc,
+        "gf_step": None if gf_step is None else int(gf_step),
+        "on_time": bool(on_time),
+        "peak_yaw_rate_rad_s": float(peak),
+        "above_wander": bool(above),
+        "window_heading_rad": float(dh),
+        "away": bool(away),
+        "toward": bool(heading_away_from_side(-dh, threat_side, min_abs=min_away_rad)),
+    }
