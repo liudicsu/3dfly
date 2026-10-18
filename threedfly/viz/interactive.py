@@ -13,6 +13,13 @@ from PIL import Image
 from pathlib import Path
 import trimesh
 
+from threedfly.viz.brain_panel import (
+    BrainPanelModel,
+    DN_TRACES,
+    WING_TRACES,
+    top_active_indices,
+)
+
 
 class InteractiveVisualizer:
     """
@@ -45,6 +52,10 @@ class InteractiveVisualizer:
             port: Server port
         """
         self.server = viser.ViserServer(host=host, port=port)
+        try:
+            self.server.gui.configure_theme(control_width="large")
+        except Exception:  # older viser
+            pass
         print(f"\n🌐 Interactive 3D visualization server started!")
         print(f"   Open your browser to: http://localhost:{port}")
         print(f"   Use mouse to orbit/pan/zoom the 3D scene")
@@ -60,6 +71,8 @@ class InteractiveVisualizer:
         self.right_img: Optional[np.ndarray] = None
         
         self.brain_activity: Optional[np.ndarray] = None
+        self.brain_model = BrainPanelModel(types=None)
+        self.sim_time = 0.0
         self.control_action: Optional[np.ndarray] = None
         self.brain_stats: Dict = {}
         self.control_stats: Dict = {}
@@ -90,6 +103,7 @@ class InteractiveVisualizer:
         # Setup scene
         self._setup_environment()
         self._setup_ui_controls()
+        self._setup_brain_panel()
         self._setup_dashboard_panels()
         
     def _setup_environment(self):
@@ -240,6 +254,48 @@ class InteractiveVisualizer:
             disabled=True,
         )
     
+    def _setup_brain_panel(self):
+        """Native viser widgets fed by the real closed-loop rate vector."""
+        self._brain_folder = self.server.gui.add_folder("🧠 Brain Activity")
+        with self._brain_folder:
+            self._brain_stats_md = self.server.gui.add_markdown(self.brain_model.stats_markdown())
+            self._brain_groups_html = self.server.gui.add_html(self.brain_model.groups_html())
+            axes = ({"stroke": "#666"}, {"stroke": "#666", "size": 60})
+            self._brain_dn_plot = self.server.gui.add_uplot(
+                data=self.brain_model.trace_arrays("dn"),
+                series=({"label": "t (s)"},)
+                + tuple({"label": lab, "stroke": col, "width": 1.5} for lab, _, col in DN_TRACES),
+                title="DN / LPLC2 readouts (Hz)",
+                scales={"x": {"time": False, "auto": True}, "y": {"auto": True}},
+                axes=axes,
+                legend={"show": True, "live": False},
+                aspect=1.6,
+            )
+            self._brain_wing_plot = self.server.gui.add_uplot(
+                data=self.brain_model.trace_arrays("wing"),
+                series=({"label": "t (s)"},)
+                + tuple({"label": lab, "stroke": col, "width": 1.5} for lab, _, col in WING_TRACES),
+                title="DNg02 wing-amplitude drive (Hz)",
+                scales={"x": {"time": False, "auto": True}, "y": {"auto": True}},
+                axes=axes,
+                legend={"show": True, "live": False},
+                aspect=2.4,
+            )
+            self._brain_top_html = self.server.gui.add_html(self.brain_model.top_types_html())
+
+    def set_brain_metadata(self, types=None, history: int = 300):
+        """Give the panel per-neuron cell types (coreTplus ``core.typ``)."""
+        self.brain_model = BrainPanelModel(types=types, history=history)
+
+    def _render_brain_panel(self):
+        m = self.brain_model
+        self._brain_stats_md.content = m.stats_markdown()
+        self._brain_groups_html.content = m.groups_html()
+        self._brain_top_html.content = m.top_types_html()
+        if len(m.t):
+            self._brain_dn_plot.data = m.trace_arrays("dn")
+            self._brain_wing_plot.data = m.trace_arrays("wing")
+
     def _setup_dashboard_panels(self):
         """Setup dashboard panel folder for images."""
         # Create a collapsible folder for dashboard
@@ -259,6 +315,8 @@ class InteractiveVisualizer:
         brain_stats: Optional[Dict] = None,
         control_stats: Optional[Dict] = None,
         wing_angles: Optional[np.ndarray] = None,
+        brain_readout=None,
+        sim_time: Optional[float] = None,
     ):
         """
         Update visualization with new data.
@@ -291,8 +349,11 @@ class InteractiveVisualizer:
             self.right_img = right_img
         
         # Update brain and control data
+        if sim_time is not None:
+            self.sim_time = float(sim_time)
         if brain_activity is not None:
-            self.brain_activity = brain_activity
+            self.brain_activity = np.asarray(brain_activity)
+            self.brain_model.update(self.sim_time, self.brain_activity, brain_readout)
         if control_action is not None:
             self.control_action = control_action
             
@@ -322,6 +383,7 @@ class InteractiveVisualizer:
         self._render_fly()
         self._render_trajectory()
         self._render_point_cloud()
+        self._render_brain_panel()
         self._render_dashboard_panels()
         self._render_status()
         
@@ -572,17 +634,27 @@ class InteractiveVisualizer:
         ax_traj.grid(True, alpha=0.3)
         ax_traj.tick_params(labelsize=8)
         
-        # Brain activity
+        # Brain activity: real rates. Cell-type family means (log x) when
+        # types are known; otherwise the 200 most active neurons (a stride
+        # sample of a sparse 45k-vector is mostly zeros → looked empty).
         ax_brain.set_title("Brain Activity", fontweight='bold', fontsize=10)
-        if self.brain_activity is not None:
-            # Sample for visualization (show subset)
-            n_sample = min(200, len(self.brain_activity))
-            indices = np.linspace(0, len(self.brain_activity)-1, n_sample, dtype=int)
-            ax_brain.bar(indices, self.brain_activity[indices], width=1, alpha=0.7, color='steelblue')
-        ax_brain.set_xlabel("Neuron Index", fontsize=9)
-        ax_brain.set_ylabel("Activity", fontsize=9)
+        gm = self.brain_model.group_means()
+        if gm:
+            labels = list(gm.keys())[::-1]
+            vals = np.array([gm[k] for k in labels])
+            ax_brain.barh(labels, np.maximum(vals, 1e-6), color='steelblue', alpha=0.8)
+            ax_brain.set_xscale('log')
+            ax_brain.set_xlim(1e-6, max(1.0, float(vals.max()) * 2))
+            ax_brain.set_xlabel("Mean rate (Hz, log)", fontsize=9)
+            ax_brain.tick_params(axis='y', labelsize=6)
+        elif self.brain_activity is not None and len(self.brain_activity):
+            idx = top_active_indices(self.brain_activity, 200)
+            ax_brain.vlines(idx, 0, self.brain_activity[idx], color='steelblue', linewidth=1.2)
+            ax_brain.set_xlim(0, len(self.brain_activity))
+            ax_brain.set_xlabel("Neuron index (top-200 active)", fontsize=9)
+            ax_brain.set_ylabel("Rate", fontsize=9)
         ax_brain.tick_params(labelsize=8)
-        ax_brain.grid(True, alpha=0.3, axis='y')
+        ax_brain.grid(True, alpha=0.3, axis='x')
         
         # Flight commands
         ax_control.set_title("Flight Commands", fontweight='bold', fontsize=10)
@@ -627,9 +699,12 @@ class InteractiveVisualizer:
         plt.close(fig)
         
         # Display in viser GUI folder
+        # Update in place: remove+re-add raced the client ("Tried to update
+        # non-existent component") and re-sent the widget each frame.
+        if self._panel_left_eye is not None:
+            self._panel_left_eye.image = dashboard_img
+            return
         with self._dashboard_folder:
-            if self._panel_left_eye is not None:
-                self._panel_left_eye.remove()
             self._panel_left_eye = self.server.gui.add_image(
                 dashboard_img,
                 label="Dashboard Panels",
@@ -676,6 +751,7 @@ class InteractiveVisualizer:
     def reset_trajectory(self):
         """Clear trajectory visualization."""
         self.trajectory_points = []
+        self.brain_model.reset_history()
         if self._trajectory_handle is not None:
             self._trajectory_handle.remove()
             self._trajectory_handle = None
