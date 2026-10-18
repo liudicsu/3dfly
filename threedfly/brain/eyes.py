@@ -49,8 +49,9 @@ ACCEPT_N = 5
 # training log-normal (c≈1, std 0.2). Disc is matte black.
 FLYVIS_CONTRAST_GAIN = 1.10
 # Photoreceptor-like luminance rest: seconds, not frozen and not per-frame.
-# 2 s at 50 Hz control. A 0.5 s loom barely moves rest; standing 1/f is tracked.
-LUM_TAU_S = 2.0
+# 5 s at 50 Hz. A 0.5–0.7 s loom barely moves rest; 4 s of 1/f cruise is tracked.
+# 2 s was too fast: still-fly DNp01 0.20-onset slipped to 157°.
+LUM_TAU_S = 5.0
 LUM_DT_S = 0.02
 LUM_TAU_STEPS = LUM_TAU_S / LUM_DT_S
 

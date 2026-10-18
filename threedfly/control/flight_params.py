@@ -188,7 +188,7 @@ class FlightParams:
             "Forward 150° square-FOV cameras; flyvis BoxEye hex-box "
             "average (5.8° lattice, not a 5° Gaussian on top). Lattice "
             "centre = frontal. Drosophila envelope (−15°…+170° ipsilateral, "
-            "~15° overlap). Adaptive p80 (τ=2 s) → 0.5, fixed contrast "
+            "~15° overlap). Adaptive p80 (τ=5 s) → 0.5, fixed contrast "
             "gain. Matte-black loom. 320 px. 1/f RMS 0.05, gain 1.10. "
             "Laterality is per-side DNp01 rise. LPi (Glu/−) T4/T5→LPi→"
             "LPLC2 is in coreTplus. "
