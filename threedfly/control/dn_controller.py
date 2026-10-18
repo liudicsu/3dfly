@@ -237,21 +237,32 @@ class DNFlightController:
             "escape_kick": 0.0,
         }
 
+    def _bilateral_expansion(self) -> bool:
+        """Frontal / wall: both eyes climb together — brake, do not yaw."""
+        climbing = self.last_rise >= 0.08 or self._vpn_expanding()
+        return bool(climbing) and not self._lateral_dnp01_climb()
+
     def _steer_yaw(self, ro: DNReadout) -> float:
         t = self._steer_terms(ro)
-        # Course terms (DNa02/DNp15/HS) can yaw the fly INTO a side loom
-        # before DNp01 fires. Freeze them only on a *lateral* climb — a
-        # bilateral wall loom must keep HS / DNa02 so the fly can turn.
-        freeze = self.last_rise >= 0.08 and self._lateral_dnp01_climb()
-        if freeze:
+        # Side loom: freeze course so DNa02/HS cannot yaw INTO the object.
+        # Bilateral / frontal wall: freeze *all* yaw (including VPN L−R)
+        # and let loom_brake do the work — wide-FOV wall expansion is a
+        # collision in depth, not a turn.
+        side = self.last_rise >= 0.08 and self._lateral_dnp01_climb()
+        bino = self._bilateral_expansion()
+        if side or bino:
             t["dna02"] = 0.0
             t["dnp15"] = 0.0
             t["hse"] = 0.0
+        if bino:
+            t["dnp03"] = 0.0
+            t["vpn_loom"] = 0.0
         yaw = t["dna02"] + t["dnp15"] + t["hse"] + t["dnp03"] + t["vpn_loom"] + t["eye"]
         if abs(yaw) < float(getattr(self.params, "steer_deadzone", 0.0)):
             yaw = 0.0
         t["steer"] = float(yaw)
-        t["course_frozen"] = 1.0 if freeze else 0.0
+        t["course_frozen"] = 1.0 if (side or bino) else 0.0
+        t["bilateral_brake"] = 1.0 if bino else 0.0
         self.last_yaw_terms = t
         return float(yaw)
 

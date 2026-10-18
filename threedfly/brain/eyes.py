@@ -41,6 +41,11 @@ UNSEEN_GRAY = 0.5
 ACCEPT_FWHM_DEG = 5.0
 ACCEPT_SIGMA_DEG = ACCEPT_FWHM_DEG / 2.35482004503
 ACCEPT_N = 5
+# flyvis ContrastBrightness: pixel = c*(x − 0.5) + 0.5. Training c ≈ 1
+# (log-normal, std 0.2). We recenter the background (p80) to 0.5, then
+# apply a fixed gain in that band so a rendered dark disc reaches ~0
+# without stretching every wall texel to black.
+FLYVIS_CONTRAST_GAIN = 1.70
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
@@ -244,19 +249,18 @@ def _sample_image_hex_weighted(
 
 
 def _luminance_to_gray(hex_frame: np.ndarray, valid: np.ndarray) -> np.ndarray:
-    """Shift valid hexes so the background sits at flyvis gray=0.5.
+    """Match flyvis input stats: background → 0.5, fixed contrast gain.
 
-    Background is a high percentile, not the median: a growing dark
-    object must not lift the rest estimate. This is a shift, not a
-    contrast stretch — stretching p5→0 paints every dark wall checker
-    as a loom. Generic; no object geometry.
+    p80 is the background (a growing dark object must not set the rest).
+    Then ``0.5 + G*(x − p80)`` — same form as flyvis ContrastBrightness.
+    Generic; no object geometry.
     """
     out = np.asarray(hex_frame, dtype=np.float32).copy()
     m = np.asarray(valid, dtype=bool)
     if np.count_nonzero(m) < 8:
         return out
     bg = float(np.percentile(out[m], 80.0))
-    out[m] = np.clip(out[m] - bg + UNSEEN_GRAY, 0.0, 1.0)
+    out[m] = np.clip(UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - bg), 0.0, 1.0)
     return out
 
 
@@ -347,10 +351,9 @@ def stereo_to_hex(
     """Left and right rendered eye images → (721,), (721,) hex frames.
 
     Official path: each hex averages a 5° FWHM Gaussian acceptance lobe
-    over the rendered pixels, then valid hexes are shifted so the
-    background (80th percentile) sits at flyvis gray=0.5. Generic for
-    every geom (walls, object, sky). No sim object pose/radius is read
-    here — the camera image is the only scene input.
+    over the rendered pixels, then flyvis-style luminance (p80 → 0.5,
+    fixed contrast gain). Generic for every geom. No sim object
+    pose/radius is read here — the camera image is the only scene input.
     """
     left_img = np.asarray(left_img)
     right_img = np.asarray(right_img)

@@ -188,8 +188,9 @@ class FlightParams:
             "Forward 150° square-FOV cameras; each hex averages a 5° FWHM "
             "Gaussian acceptance lobe over rendered pixels (lattice centre "
             "= frontal). Drosophila envelope (−15°…+170° ipsilateral, ~15° "
-            "overlap). Background (p80) luminance shift → flyvis gray=0.5 "
-            "(no contrast stretch: that paints dark checkers as looms). "
+            "overlap). flyvis-style luminance: p80 background → 0.5, then "
+            "fixed contrast gain (ContrastBrightness). 1/f room walls, not "
+            "hard checkers. Bilateral expansion → brake, not HS yaw. "
             "Eye input is rendered pixels only — no sim object pose/radius. "
             "No U-flip, no 40° cant."
         ),

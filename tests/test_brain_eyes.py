@@ -64,23 +64,22 @@ def test_right_eye_looks_forward_not_backward():
     assert mjcf.EYE_CANT_DEG == pytest.approx(0.0)
 
 
-def test_walls_use_high_contrast_checker():
+def test_walls_use_natural_one_over_f():
     from threedfly.sim import mjcf as mjcf_mod
 
     xml = mjcf_mod.FLY_MJCF
-    assert "wall_check" in xml
-    assert 'builtin="checker"' in xml
-    assert 'texrepeat="48 20"' in xml
-    # Flat beige rgba must not wash out the texture on the room walls.
+    assert "wall_nat" in xml
+    assert "wall_check" not in xml
+    assert "room_natural" in xml or "{wall_tex}" in xml
     assert "rgba=\"0.8 0.8 0.9 1\"" not in xml
     assert 'name="loom_target"' in xml
     assert 'mocap="true"' in xml
     assert 'size="0.58"' in xml
-    # Solid dark disc (Klapoetke / flyvis loom). Fine checkers average
-    # to gray at hex resolution (~5.8°) until ~80° of disk.
     assert "loom_mat" in xml
     assert 'rgba="0.02 0.02 0.03 1"' in xml
     assert "loom_check" not in xml
+    path = mjcf_mod.write_one_over_f_png(mjcf_mod.ASSETS_ROOT / "room_natural.png")
+    assert path.is_file() and path.stat().st_size > 100
 
 
 def test_mirror_stereo_images_helper_removed():

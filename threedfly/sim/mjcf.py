@@ -14,7 +14,39 @@ a 200 Hz wingbeat.
 from pathlib import Path
 
 # Get path to assets directory
-ASSETS_DIR = Path(__file__).parent.parent.parent / "assets" / "fly_meshes"
+ASSETS_ROOT = Path(__file__).parent.parent.parent / "assets"
+ASSETS_DIR = ASSETS_ROOT / "fly_meshes"
+
+
+def write_one_over_f_png(path: Path, n: int = 256, contrast: float = 0.20, seed: int = 2) -> Path:
+    """Natural-like 1/f wall texture (real-fly test backgrounds, not hard checkers)."""
+    import struct
+    import zlib
+
+    import numpy as np
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(int(seed))
+    spec = rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n))
+    fy = np.fft.fftfreq(n)[:, None]
+    fx = np.fft.fftfreq(n)[None, :]
+    freq = np.sqrt(fx * fx + fy * fy)
+    freq[0, 0] = 1.0
+    img = np.fft.ifft2(spec / freq).real
+    img = (img - float(img.mean())) / max(float(img.std()), 1e-9)
+    img = np.clip(0.5 + float(contrast) * img, 0.0, 1.0)
+    u8 = (img * 255.0).astype(np.uint8)
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + u8[i].tobytes() for i in range(n))
+    ihdr = struct.pack(">IIBBBBB", n, n, 8, 0, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw, 9)) + _chunk(b"IEND", b"")
+    )
+    return path
 
 # OBJ millimetres → metres (10× life-size). Keep this literal so tests can exec this file.
 MESH_SCALE = 0.01
@@ -22,11 +54,11 @@ _S = f"{MESH_SCALE} {MESH_SCALE} {MESH_SCALE}"
 
 FLY_MJCF = """
 <mujoco model="fruit_fly">
-  <compiler angle="radian" coordinate="local" meshdir="{meshdir}"/>
+  <compiler angle="radian" coordinate="local" meshdir="{meshdir}" texturedir="{texturedir}"/>
   
   <option timestep="0.002" gravity="0 0 -9.81"/>
   <visual>
-    <headlight ambient="0.55 0.55 0.55" diffuse="0.85 0.85 0.85" specular="0.1 0.1 0.1"/>
+    <headlight ambient="0.40 0.40 0.40" diffuse="0.80 0.80 0.80" specular="0.05 0.05 0.05"/>
     <rgba haze="0.5 0.5 0.5 1"/>
   </visual>
   
@@ -35,17 +67,15 @@ FLY_MJCF = """
     <texture name="sky" type="skybox" builtin="flat" rgb1="0.5 0.5 0.5" rgb2="0.5 0.5 0.5"
              width="16" height="16"/>
     <texture name="grid" type="2d" builtin="checker" width="512" height="512" 
-             rgb1="0.28 0.28 0.30" rgb2="0.88 0.86 0.80"/>
-    <material name="grid_mat" texture="grid" texrepeat="16 16" reflectance="0.08"/>
+             rgb1="0.38 0.38 0.40" rgb2="0.62 0.61 0.58"/>
+    <material name="grid_mat" texture="grid" texrepeat="8 8" reflectance="0.04"/>
     
-    <!-- High-contrast ~20 cm checkers: LPLC2/LC4/DNp03 need expanding
-         edges, not a flat beige field. texrepeat on a 10 m × 4 m face. -->
-    <texture name="wall_check" type="2d" builtin="checker" width="256" height="256"
-             rgb1="0.08 0.08 0.10" rgb2="0.96 0.94 0.90"/>
-    <material name="wall_mat" texture="wall_check" texrepeat="48 20" reflectance="0.04"/>
-    <texture name="obs_check" type="2d" builtin="checker" width="128" height="128"
-             rgb1="0.05 0.04 0.04" rgb2="0.85 0.25 0.18"/>
-    <material name="obs_mat" texture="obs_check" texrepeat="6 6" reflectance="0.04"/>
+    <!-- Natural 1/f walls (Klapoetke / von Reyn test backgrounds), not
+         hard checkers that T4/T5 treat as a full-field loom. -->
+    <texture name="wall_nat" type="2d" file="{wall_tex}"/>
+    <material name="wall_mat" texture="wall_nat" texrepeat="3 2" reflectance="0.03"/>
+    <texture name="obs_nat" type="2d" file="{wall_tex}"/>
+    <material name="obs_mat" texture="obs_nat" texrepeat="2 2" reflectance="0.03"/>
     <!-- Solid dark loom: flyvis loom() and Klapoetke/von Reyn discs are
          dark-on-bright. texrepeat 8–16 checkers are <1 hex (~5.8°) at
          40–60° angular size and average to gray — DNp01 then fires on
@@ -256,7 +286,9 @@ FLY_MJCF = """
 def get_fly_mjcf() -> str:
     """Get MJCF XML string for fly environment."""
     meshdir = str(ASSETS_DIR.absolute())
-    return FLY_MJCF.format(meshdir=meshdir)
+    texdir = str(ASSETS_ROOT.absolute())
+    wall = write_one_over_f_png(ASSETS_ROOT / "room_natural.png")
+    return FLY_MJCF.format(meshdir=meshdir, texturedir=texdir, wall_tex=wall.name)
 
 
 # Forward wide-FOV cameras. Hex rays (not the optical axis) set laterality.
