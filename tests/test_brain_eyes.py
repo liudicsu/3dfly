@@ -66,8 +66,11 @@ def test_walls_use_high_contrast_checker():
     assert 'name="loom_target"' in xml
     assert 'mocap="true"' in xml
     assert 'size="0.58"' in xml
-    # Expanding-edge loom: black/light checkers, not a near-black blob.
-    assert 'rgb2="0.92 0.90 0.84"' in xml or "0.92 0.90 0.84" in xml
+    # Solid dark disc (Klapoetke / flyvis loom). Fine checkers average
+    # to gray at hex resolution (~5.8°) until ~80° of disk.
+    assert "loom_mat" in xml
+    assert 'rgba="0.02 0.02 0.03 1"' in xml
+    assert "loom_check" not in xml
 
 
 def test_mirror_stereo_images_helper_removed():

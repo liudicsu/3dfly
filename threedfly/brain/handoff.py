@@ -243,7 +243,10 @@ class FlyvisEye:
             raise ValueError(f"hex frames must have {N_HEX} cells")
         if state_L is None or state_R is None:
             raise RuntimeError("batched step needs both eye states")
-        stacked = _stack_autoderef(state_L, state_R)
+        # Stack *nodes/edges only* on dim 0, then rebuild sources/targets as
+        # RefTensors. Concatenating already-dereferenced sources.activity
+        # along the last axis makes weight (n_edges,) vs activity (2 n_edges).
+        stacked = stack_flyvis_states(state_L, state_R, self._net)
         x = torch.as_tensor(np.stack([fL, fR], axis=0)[:, None, None, :], dtype=torch.float32)
         with torch.inference_mode():
             states = self._net.simulate(
@@ -253,7 +256,7 @@ class FlyvisEye:
             last = states[-1]
         else:
             last = states
-        sL, sR = _split_autoderef(last)
+        sL, sR = split_flyvis_state(last, self._net)
         act = _activity_from_state(last)
         if act is None:
             raise RuntimeError("flyvis batched state has no nodes.activity")
@@ -261,7 +264,10 @@ class FlyvisEye:
         if act.ndim == 1:
             raise RuntimeError("batched activity is not (2, n)")
         if act.shape[0] != 2:
-            act = act.reshape(2, -1)
+            raise RuntimeError(
+                f"batched activity shape {act.shape} is not (2, n_nodes); "
+                "refusing to flatten (that was the weight vs 2×activity bug)"
+            )
         def _volts(row):
             return {t: row[idx] for t, idx in self.type_index.items() if idx.size}
         return _volts(act[0].reshape(-1)), _volts(act[1].reshape(-1)), sL, sR
@@ -318,43 +324,99 @@ class FlyvisEye:
         return FlyvisCalibration(V_gray=V_gray, p99=p99, uv=self.uv, rmax=RMAX)
 
 
-def _stack_autoderef(a, b):
-    """Stack two flyvis states on the batch axis."""
+def _raw_group(state, group: str):
+    """``nodes`` / ``edges`` mapping without AutoDeref-dereferencing RefTensors."""
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        return dict.get(state, group)
+    return getattr(state, group, None)
+
+
+def _raw_tensor(group, key: str):
     import torch
-    from flyvis.utils.tensor_utils import AutoDeref, RefTensor
+    from flyvis.utils.tensor_utils import RefTensor
 
-    if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
-        if a.shape[0] == 1 and b.shape[0] == 1:
-            return torch.cat([a, b], dim=0)
-        return torch.stack([a.reshape(-1), b.reshape(-1)], dim=0)
-    if isinstance(a, RefTensor) or isinstance(b, RefTensor):
-        raise TypeError("cannot stack RefTensor states")
-    if isinstance(a, dict) and isinstance(b, dict):
-        out = AutoDeref() if isinstance(a, AutoDeref) else {}
-        for k in a:
-            out[k] = _stack_autoderef(a[k], b[k])
-        return out
-    return a
+    if group is None:
+        return None
+    if isinstance(group, dict):
+        val = dict.get(group, key)
+    else:
+        val = getattr(group, key, None)
+    if isinstance(val, RefTensor):
+        val = val.values
+    if isinstance(val, torch.Tensor) and val.ndim == 1:
+        val = val.unsqueeze(0)
+    return val
 
 
-def _split_autoderef(state):
-    """Split a batch-2 flyvis state into two batch-1 states."""
+def stack_node_tensors(state_L, state_R):
+    """Batch-cat ``nodes`` / ``edges`` on dim 0. Does not touch sources/targets."""
     import torch
     from flyvis.utils.tensor_utils import AutoDeref
 
-    if isinstance(state, torch.Tensor):
-        if state.shape[0] != 2:
-            raise ValueError(f"expected batch 2, got {tuple(state.shape)}")
-        return state[0:1].contiguous(), state[1:2].contiguous()
-    if isinstance(state, dict):
-        cls = AutoDeref if isinstance(state, AutoDeref) else dict
-        left, right = cls(), cls()
-        for k, v in state.items():
-            a, b = _split_autoderef(v)
-            left[k] = a
-            right[k] = b
-        return left, right
-    return state, state
+    out = AutoDeref(nodes=AutoDeref(), edges=AutoDeref())
+    for group in ("nodes", "edges"):
+        a = _raw_group(state_L, group)
+        b = _raw_group(state_R, group)
+        if a is None or b is None:
+            continue
+        keys = list(a.keys()) if hasattr(a, "keys") else []
+        for k in keys:
+            va, vb = _raw_tensor(a, k), _raw_tensor(b, k)
+            if not isinstance(va, torch.Tensor) or not isinstance(vb, torch.Tensor):
+                continue
+            if va.shape[0] < 1 or vb.shape[0] < 1:
+                raise ValueError(f"{group}.{k} empty batch: {tuple(va.shape)}")
+            out[group][k] = torch.cat([va[:1], vb[:1]], dim=0)
+    return out
+
+
+def split_node_tensors(state):
+    """Split a batch-2 ``nodes`` / ``edges`` state into two batch-1 states."""
+    import torch
+    from flyvis.utils.tensor_utils import AutoDeref
+
+    left = AutoDeref(nodes=AutoDeref(), edges=AutoDeref())
+    right = AutoDeref(nodes=AutoDeref(), edges=AutoDeref())
+    for group in ("nodes", "edges"):
+        g = _raw_group(state, group)
+        if g is None:
+            continue
+        keys = list(g.keys()) if hasattr(g, "keys") else []
+        for k in keys:
+            v = _raw_tensor(g, k)
+            if not isinstance(v, torch.Tensor):
+                continue
+            if v.shape[0] != 2:
+                raise ValueError(f"{group}.{k} expected batch 2, got {tuple(v.shape)}")
+            left[group][k] = v[0:1].contiguous()
+            right[group][k] = v[1:2].contiguous()
+    return left, right
+
+
+def stack_flyvis_states(state_L, state_R, net):
+    """Batch=2 flyvis state with sources/targets rebuilt as RefTensors."""
+    raw = stack_node_tensors(state_L, state_R)
+    if hasattr(net, "_state_api"):
+        return net._state_api(raw)
+    return raw
+
+
+def split_flyvis_state(state, net):
+    left, right = split_node_tensors(state)
+    if hasattr(net, "_state_api"):
+        return net._state_api(left), net._state_api(right)
+    return left, right
+
+
+# Kept for tests that imported the old walk-everything stack.
+def _stack_autoderef(a, b):
+    return stack_node_tensors(a, b)
+
+
+def _split_autoderef(state):
+    return split_node_tensors(state)
 
 
 def _activity_from_state(state) -> Optional[np.ndarray]:

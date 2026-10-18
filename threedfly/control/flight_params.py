@@ -186,9 +186,10 @@ class FlightParams:
         "geometry": (
             "Lateral |az|≥30° at rise onset must turn away; frontal GF "
             "must escape/brake without turning into the object. "
-            "Report angular_size_fire_deg. flyvis LC4/LPLC2/DNp01 stay "
-            "near rest until ~80° of disk on 120° hex (real GF 40–60°); "
-            "amplifying T4/T5 to chase 40° also fires no-object room flow"
+            "Score only fires while the object is visible and approaching "
+            "(after closest approach = fail). Report true angular_size_fire_deg "
+            "and fire_minus_closest. Solid dark disc (not sub-hex checkers): "
+            "Klapoetke/von Reyn GF window 40–60°"
         ),
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })

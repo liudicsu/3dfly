@@ -86,6 +86,37 @@ def loom_geometry(obj_xyz, fly_xyz, heading_rad: float, radius: float = LOOM_RAD
     }
 
 
+def closest_approach_step(distances) -> Optional[int]:
+    """Step of minimum object–fly distance. None if there is no finite sample."""
+    d = np.asarray(list(distances), dtype=float)
+    if d.size == 0 or not np.any(np.isfinite(d)):
+        return None
+    return int(np.nanargmin(d))
+
+
+def fire_minus_closest(fire_step: Optional[int], closest_step: Optional[int]) -> Optional[int]:
+    """``fire_step - closest_approach_step``. Negative / zero = on the way in."""
+    if fire_step is None or closest_step is None:
+        return None
+    return int(fire_step) - int(closest_step)
+
+
+def visible_approaching_ok(
+    fire_step: Optional[int],
+    closest_step: Optional[int],
+    *,
+    visible: bool,
+) -> bool:
+    """True only for a fire while the object is still visible and closing.
+
+    An escape after closest approach is a fail: disappearance / recession
+    is not looming (Klapoetke / von Reyn GF window is on the approach).
+    """
+    if not visible or fire_step is None or closest_step is None:
+        return False
+    return int(fire_step) <= int(closest_step)
+
+
 def classify_loom(azimuth_deg: Optional[float], lateral_deg: float = LATERAL_AZ_DEG) -> str:
     if azimuth_deg is None or not np.isfinite(float(azimuth_deg)):
         return "unknown"

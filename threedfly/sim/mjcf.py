@@ -42,9 +42,11 @@ FLY_MJCF = """
     <texture name="obs_check" type="2d" builtin="checker" width="128" height="128"
              rgb1="0.05 0.04 0.04" rgb2="0.85 0.25 0.18"/>
     <material name="obs_mat" texture="obs_check" texrepeat="6 6" reflectance="0.04"/>
-    <texture name="loom_check" type="2d" builtin="checker" width="128" height="128"
-             rgb1="0.00 0.00 0.00" rgb2="0.92 0.90 0.84"/>
-    <material name="loom_mat" texture="loom_check" texrepeat="16 16" reflectance="0.0"/>
+    <!-- Solid dark loom: flyvis loom() and Klapoetke/von Reyn discs are
+         dark-on-bright. texrepeat 8–16 checkers are <1 hex (~5.8°) at
+         40–60° angular size and average to gray — DNp01 then fires on
+         the hide/disappearance, not the loom. -->
+    <material name="loom_mat" rgba="0.02 0.02 0.03 1" reflectance="0.0"/>
     
     <!-- flybody mesh assets (Apache-2.0). Scale: millimetres × 0.01 → metres (10× life-size). -->
     <mesh name="thorax_mesh" file="thorax_body.obj" scale=""" + f'"{_S}"' + """/>
@@ -95,12 +97,11 @@ FLY_MJCF = """
     <body name="obstacle_3" pos="-1 3 0.4">
       <geom type="sphere" size="0.4" material="obs_mat"/>
     </body>
-    <!-- Compact dark loom (mocap). Hidden at z=−8 until a scenario moves it. -->
-    <!-- Radius 0.58 m: compact enough that a 40°-cant right loom stays
-         ipsilateral, large enough to drive DNp01 ≥ 0.20 at stride 2–3. -->
+    <!-- Compact solid-dark loom (mocap). Hidden at z=−8 until a scenario
+         places it. Radius 0.58 m: 40° at ~1.6 m, 60° at ~1.0 m. -->
     <body name="loom_target" mocap="true" pos="0 0 -8">
       <geom name="loom_geom" type="sphere" size="0.58" material="loom_mat"
-            rgba="0.02 0.02 0.03 1" contype="0" conaffinity="0"/>
+            contype="0" conaffinity="0"/>
     </body>
     
     <!-- Fruit fly: flybody topology (head / thorax / abdomen / wings / legs / halteres).

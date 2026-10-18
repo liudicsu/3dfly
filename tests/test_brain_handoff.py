@@ -17,16 +17,53 @@ from threedfly.brain.handoff import (
     haltere_indices,
     handoff_rates_for_frame,
     impute_hex,
+    split_node_tensors,
+    stack_node_tensors,
     voltages_to_rates,
 )
 from threedfly.brain.stimuli import get_hex_coords, n_hex
 from tests.brain_fakes import tiny_signed_connectome
 
 
+def test_stack_node_tensors_is_batch_dim_not_concat_last():
+    """The old walk-everything stack flattened sources.activity to 2×n_edges."""
+    pytest.importorskip("flyvis")
+    torch = pytest.importorskip("torch")
+    from flyvis.utils.tensor_utils import AutoDeref
+
+    n_nodes, n_edges = 8, 20
+    a = AutoDeref(
+        nodes=AutoDeref(activity=torch.ones(1, n_nodes)),
+        edges=AutoDeref(dummy=torch.zeros(1, n_edges)),
+        sources=AutoDeref(activity=torch.ones(1, n_edges)),
+    )
+    b = AutoDeref(
+        nodes=AutoDeref(activity=2 * torch.ones(1, n_nodes)),
+        edges=AutoDeref(dummy=torch.zeros(1, n_edges)),
+        sources=AutoDeref(activity=2 * torch.ones(1, n_edges)),
+    )
+    stacked = stack_node_tensors(a, b)
+    assert stacked.nodes.activity.shape == (2, n_nodes)
+    assert stacked.edges.dummy.shape == (2, n_edges)
+    assert "sources" not in stacked or not stacked.get("sources")
+    left, right = split_node_tensors(stacked)
+    assert left.nodes.activity.shape == (1, n_nodes)
+    assert float(right.nodes.activity.mean()) == pytest.approx(2.0)
+
+
 def test_hex_lattice_has_721_cells():
     u, v = get_hex_coords(15)
     assert len(u) == N_HEX == 721
     assert n_hex(15) == 721
+
+
+def test_loom_theta_grows_with_time():
+    from threedfly.brain.stimuli import loom_theta_deg
+
+    th = loom_theta_deg(0.4, lv=0.04, th0=10.0, thmax=90.0, dt=0.02)
+    assert th[0] == pytest.approx(10.0, abs=0.5)
+    assert th[-1] > th[0]
+    assert th[-1] <= 90.0 + 1e-3
 
 
 def test_voltages_to_rates_matches_spec_formula():

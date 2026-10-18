@@ -34,11 +34,14 @@ from threedfly.control.closed_loop_metrics import (
     PR16_WALLS,
     PR16_WALLS_PER_100,
     ROOM_XY,
+    closest_approach_step,
     coverage,
     direction_correct_frac,
+    fire_minus_closest,
     geometry_aware_frac,
     loom_geometry,
     object_behind_fly,
+    visible_approaching_ok,
     walls_per_100,
     wrap_heading_delta,
     xy_extent,
@@ -188,8 +191,9 @@ def _run_scenario(
     rise_onset = None
     geo_lock = None
     geo_fire = None
-    last_visible_geo = None
+    geo_at_fire_visible = False
     n_esc_seen = 0
+    distances = []
     t_wall = time.perf_counter()
     left_img, right_img = env.get_eye_images()
     n_pre = int(ctl.params.prewarm_steps if prewarm is None else prewarm)
@@ -203,18 +207,11 @@ def _run_scenario(
     left_img, right_img = env.get_eye_images()
     for step in range(n_steps):
         if loom_pos is not None and loom_v is not None:
+            # Do not teleport/hide: sudden disappearance of a large dark
+            # object is itself a loom (every official R fire was 1–12
+            # steps after hide). The object continues past/away.
             loom_pos = loom_pos + loom_v * float(env.control_dt)
-            if headings:
-                fly_xy, hdg = traj[-1], headings[-1]
-            else:
-                fly_xy, hdg = (pose if pose is not None else (0.0, 0.0, 1.5)), yaw
-            # Hide once the object is behind the *fly*, not a world-x cut
-            # (off-origin starts otherwise keep a receding object visible).
-            if object_behind_fly(loom_pos, fly_xy, hdg):
-                env.hide_loom_object()
-                loom_pos = None
-            else:
-                env.set_loom_object(loom_pos)
+            env.set_loom_object(loom_pos)
         res = brain.step(left_img, right_img, env.get_fly_angular_velocity())
         action = ctl.compute(res.readout)
         left_img, right_img, info = env.step(action, wing_strokes=ctl.last_wing_strokes)
@@ -235,37 +232,50 @@ def _run_scenario(
         terms["y"] = float(pos[1])
         terms["near_wall"] = 1.0 if max(abs(pos[0]), abs(pos[1])) > 3.2 else 0.0
         geo = loom_geometry(loom_pos, pos, heading) if loom_pos is not None else None
+        behind = (
+            object_behind_fly(loom_pos, pos, heading)
+            if loom_pos is not None
+            else True
+        )
+        visible_now = geo is not None and not behind
+        distances.append(float(geo["distance_m"]) if geo is not None else float("nan"))
         if geo is not None:
-            last_visible_geo = geo
-        use_geo = geo if geo is not None else last_visible_geo
-        if use_geo is not None:
-            terms["azimuth_deg"] = float(use_geo["azimuth_deg"])
-            terms["angular_size_deg"] = float(use_geo["angular_size_deg"])
-            if rise_onset is None and rise_now >= 0.08:
-                rise_onset = {"step": int(step), **{k: use_geo[k] for k in use_geo}}
-            if geo_lock is None and ctl.last_lock_step is not None:
+            terms["azimuth_deg"] = float(geo["azimuth_deg"])
+            terms["angular_size_deg"] = float(geo["angular_size_deg"])
+            terms["visible"] = 1.0 if visible_now else 0.0
+            if rise_onset is None and rise_now >= 0.08 and visible_now:
+                rise_onset = {"step": int(step), **{k: geo[k] for k in geo}}
+            if geo_lock is None and ctl.last_lock_step is not None and visible_now:
                 geo_lock = {
                     "step": int(step),
                     "threat": ctl._loom_threat,
-                    **{k: use_geo[k] for k in use_geo},
+                    **{k: geo[k] for k in geo},
                 }
             if ctl.brain_escape_count > n_esc_seen:
-                geo_fire = {"step": int(step), **{k: use_geo[k] for k in use_geo}}
+                # True geometry at fire — never last-visible (that reported
+                # 85° after the object was already gone).
+                geo_fire = {"step": int(step), **{k: geo[k] for k in geo}}
+                geo_at_fire_visible = bool(visible_now)
                 n_esc_seen = int(ctl.brain_escape_count)
             if rise_now >= 0.08:
                 rise_geometry.append(
                     {
                         "step": int(step),
-                        "azimuth_deg": float(use_geo["azimuth_deg"]),
-                        "angular_size_deg": float(use_geo["angular_size_deg"]),
-                        "distance_m": float(use_geo["distance_m"]),
-                        "class": use_geo["class"],
+                        "azimuth_deg": float(geo["azimuth_deg"]),
+                        "angular_size_deg": float(geo["angular_size_deg"]),
+                        "distance_m": float(geo["distance_m"]),
+                        "class": geo["class"],
                         "rise": float(rise_now),
                         "lat": float(ctl.last_lat_integrated),
                         "threat": ctl._loom_threat or "",
                         "course_frozen": float(terms.get("course_frozen", 0.0)),
+                        "visible": bool(visible_now),
                     }
                 )
+        elif ctl.brain_escape_count > n_esc_seen:
+            geo_fire = None
+            geo_at_fire_visible = False
+            n_esc_seen = int(ctl.brain_escape_count)
         yaw_terms.append(terms)
         if env.check_collision():
             wall += 1
@@ -302,6 +312,18 @@ def _run_scenario(
         if threat_side
         else float("nan")
     )
+    ca_step = closest_approach_step(distances)
+    fire_step = None if geo_fire is None else int(geo_fire["step"])
+    if fire_step is None and ctl.escape_events:
+        fire_step = int(ctl.escape_events[0].step)
+    d_fire_ca = fire_minus_closest(fire_step, ca_step)
+    va_ok = visible_approaching_ok(
+        fire_step, ca_step, visible=bool(geo_at_fire_visible)
+    )
+    if threat_side and not va_ok:
+        # After closest approach, or fire with no visible object = fail.
+        dir_ok = 0.0
+        geo_ok = 0.0
     pre_toward = False
     if threat_side and rise_onset is not None and headings_arr.size:
         i0 = int(np.clip(rise_onset["step"], 0, headings_arr.size - 1))
@@ -346,6 +368,11 @@ def _run_scenario(
         "angular_size_lock_deg": None if geo_lock is None else float(geo_lock["angular_size_deg"]),
         "azimuth_fire_deg": None if geo_fire is None else float(geo_fire["azimuth_deg"]),
         "angular_size_fire_deg": None if geo_fire is None else float(geo_fire["angular_size_deg"]),
+        "closest_approach_step": ca_step,
+        "fire_step": fire_step,
+        "fire_minus_closest": d_fire_ca,
+        "visible_at_fire": bool(geo_at_fire_visible),
+        "approaching_at_fire": bool(va_ok),
         "threat_locked": None if geo_lock is None else geo_lock.get("threat"),
         "pre_escape_yaw_toward": bool(pre_toward),
         "braked": bool(braked),
@@ -453,6 +480,11 @@ def _variant_geometry_aware(scenarios: dict) -> dict:
             "azimuth_lock_deg": sc.get("azimuth_lock_deg"),
             "azimuth_fire_deg": sc.get("azimuth_fire_deg"),
             "angular_size_fire_deg": sc.get("angular_size_fire_deg"),
+            "closest_approach_step": sc.get("closest_approach_step"),
+            "fire_step": sc.get("fire_step"),
+            "fire_minus_closest": sc.get("fire_minus_closest"),
+            "visible_at_fire": sc.get("visible_at_fire"),
+            "approaching_at_fire": sc.get("approaching_at_fire"),
             "brain_escapes": sc.get("brain_escapes"),
             "threat_locked": sc.get("threat_locked"),
             "pre_escape_yaw_toward": sc.get("pre_escape_yaw_toward"),
@@ -764,6 +796,10 @@ def main(argv=None) -> int:
             "side_R_would_fire": side_r.get("would_fire"),
             "side_L_angular_size_fire_deg": side_l.get("angular_size_fire_deg"),
             "side_R_angular_size_fire_deg": side_r.get("angular_size_fire_deg"),
+            "side_L_fire_minus_closest": side_l.get("fire_minus_closest"),
+            "side_R_fire_minus_closest": side_r.get("fire_minus_closest"),
+            "side_L_visible_at_fire": side_l.get("visible_at_fire"),
+            "side_R_visible_at_fire": side_r.get("visible_at_fire"),
             "variant_direction_correct": _variant_direction(scenarios),
             "variant_geometry_aware": _variant_geometry_aware(scenarios),
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
@@ -795,7 +831,8 @@ def _print_variant_tables(summary: dict) -> None:
         return
     print("\nRaw direction (must turn away from scenario side):", flush=True)
     print(
-        f"{'scenario':<28} {'raw':>6} {'geo':>6} {'class':>8} {'az0':>7} {'angF':>6} {'esc':>4} {'lock':>4} {'toward':>6}",
+        f"{'scenario':<28} {'raw':>6} {'geo':>6} {'class':>8} {'az0':>7} {'angF':>6} "
+        f"{'dCA':>5} {'vis':>3} {'esc':>4} {'lock':>4} {'toward':>6}",
         flush=True,
     )
     for name in names:
@@ -805,6 +842,8 @@ def _print_variant_tables(summary: dict) -> None:
         print(
             f"{name:<28} {_fmt(r):>6} {_fmt(g):>6} {str(d.get('loom_class') or '-'):>8} "
             f"{_fmt(d.get('azimuth_onset_deg')):>7} {_fmt(d.get('angular_size_fire_deg')):>6} "
+            f"{_fmt(d.get('fire_minus_closest')):>5} "
+            f"{('Y' if d.get('visible_at_fire') else 'n'):>3} "
             f"{str(d.get('brain_escapes')):>4} "
             f"{str(d.get('threat_locked') or '-'):>4} {str(d.get('pre_escape_yaw_toward')):>6}",
             flush=True,
@@ -819,6 +858,7 @@ def _print_variant_tables(summary: dict) -> None:
         f"no-object headings fires={noobj.get('fires')} n={noobj.get('n')} pass={noobj.get('pass')} | "
         f"room sides={summary.get('room_escape_sides')} one_sided={summary.get('room_escape_one_sided')} | "
         f"ang_fire L/R={summary.get('side_L_angular_size_fire_deg')}/{summary.get('side_R_angular_size_fire_deg')} | "
+        f"dCA L/R={summary.get('side_L_fire_minus_closest')}/{summary.get('side_R_fire_minus_closest')} | "
         f"flyvis_frame={summary.get('ms_flyvis_frame_mean')} path={summary.get('flyvis_path')}",
         flush=True,
     )

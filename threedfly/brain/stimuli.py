@@ -61,6 +61,21 @@ def grating(
     ).astype(np.float32)
 
 
+def loom_theta_deg(
+    T: float,
+    lv: float = 0.04,
+    th0: float = 10.0,
+    thmax: float = 90.0,
+    dt: float = DT,
+) -> np.ndarray:
+    """Angular size (deg) of a constant-l/v looming disc (Gabbiani / von Reyn)."""
+    t = np.arange(int(round(T / dt))) * dt
+    t0 = lv / np.tan(np.deg2rad(th0) / 2.0)
+    t_hit = t0 - lv / np.tan(np.deg2rad(thmax) / 2.0)
+    tt = np.minimum(t, t_hit)
+    return (2.0 * np.rad2deg(np.arctan(lv / np.maximum(t0 - tt, 1e-9)))).astype(np.float32)
+
+
 def loom(
     T: float,
     lv: float = 0.04,
@@ -70,10 +85,7 @@ def loom(
     dt: float = DT,
 ) -> np.ndarray:
     _, _, xd, yd = hex_degrees()
-    t = np.arange(int(round(T / dt))) * dt
-    t0 = lv / np.tan(np.deg2rad(th0) / 2.0)
-    tt = np.minimum(t, t0 - lv / np.tan(np.deg2rad(thmax) / 2.0))
-    th = 2.0 * np.rad2deg(np.arctan(lv / (t0 - tt)))
+    th = loom_theta_deg(T, lv=lv, th0=th0, thmax=thmax, dt=dt)
     r = np.hypot(xd - x0, yd)
     return np.where(r[None, :] <= th[:, None] / 2.0, 0.0, 0.5).astype(np.float32)
 

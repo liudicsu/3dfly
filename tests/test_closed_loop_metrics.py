@@ -12,12 +12,15 @@ from threedfly.control.closed_loop_metrics import (
     PR16_WALLS_PER_100,
     body_azimuth_deg,
     classify_loom,
+    closest_approach_step,
     coverage,
     direction_correct_frac,
     escape_turned_away,
+    fire_minus_closest,
     geometry_aware_event_ok,
     geometry_aware_frac,
     object_behind_fly,
+    visible_approaching_ok,
     walls_per_100,
     wrap_heading_delta,
     xy_extent,
@@ -106,6 +109,21 @@ def test_geometry_aware_frontal_must_not_turn_into():
     assert not geometry_aware_event_ok(straight, 0, "L", azimuth_onset_deg=45.0)
 
 
+def test_closest_approach_and_visible_approaching_gate():
+    dists = [3.0, 2.0, 1.2, 0.8, 0.9, 1.5]
+    ca = closest_approach_step(dists)
+    assert ca == 3
+    assert fire_minus_closest(3, ca) == 0
+    assert fire_minus_closest(5, ca) == 2
+    assert visible_approaching_ok(2, ca, visible=True)
+    assert visible_approaching_ok(3, ca, visible=True)
+    assert not visible_approaching_ok(4, ca, visible=True)
+    assert not visible_approaching_ok(2, ca, visible=False)
+    assert not visible_approaching_ok(None, ca, visible=True)
+    assert closest_approach_step([]) is None
+    assert closest_approach_step([np.nan, np.nan]) is None
+
+
 def test_object_behind_fly_uses_body_x_not_world_x():
     # Object at world x=-1, fly at origin heading +X → behind.
     assert object_behind_fly((-1.0, 0.0, 1.5), (0.0, 0.0, 1.5), 0.0)
@@ -119,6 +137,14 @@ def test_geometry_aware_frac_frontal_brake_without_escape():
     assert geometry_aware_frac([], [], "L", 15.0, escaped=False, braked=True) == pytest.approx(1.0)
     assert geometry_aware_frac([], [], "L", 45.0, escaped=False, braked=True) == pytest.approx(0.0)
     assert geometry_aware_frac([], [], "L", 45.0, escaped=False, braked=False) == pytest.approx(0.0)
+
+
+def test_acceptance_does_not_teleport_or_reuse_last_visible_geo():
+    src = (ROOT / "scripts" / "closed_loop_acceptance.py").read_text()
+    assert "last_visible_geo" not in src
+    assert "Do not teleport/hide" in src
+    assert "fire_minus_closest" in src
+    assert "visible_approaching_ok" in src
 
 
 def test_noobj_heading_control_requires_zero_fires():
