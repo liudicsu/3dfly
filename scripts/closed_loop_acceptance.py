@@ -1177,11 +1177,12 @@ def main(argv=None) -> int:
             "known_limitations": (
                 "No sim object pose/radius reaches stereo_to_hex or the "
                 "controller. Matte-black loom (rgba 0, no spec/haze), "
-                "320 px so camera AA ≪ 5° FWHM. 1/f RMS 0.08. Laterality "
-                "is per-side DNp01 rise (camera LC4 L−R can flip). "
-                "Bilateral brake = both GF and both VPN, not a huge "
-                "one-sided disc. Right-side fires can land after pass "
-                "(dCA>0) when DNp01 climbs late."
+                "320 px so camera AA ≪ 5° FWHM, frozen p80 rest. "
+                "Still-fly az35 l/v0.04: disc~0.07/0.005, DNp01 peak "
+                "1.29 vs hex_ref 1.72, 0.20-onset 147° vs 61.5°. "
+                "Lock matches true side; bilateral_brake=0 on frontolat. "
+                "Leftover fails are late dCA>0. Open-space 1/f fires "
+                "have TTC 10–14 s (not real walls)."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
