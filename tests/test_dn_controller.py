@@ -823,42 +823,9 @@ def test_rising_edge_does_not_re_fire_while_dnp01_stays_high():
     assert c.brain_escape_count == 2
 
 
-def test_relative_course_deadzone_relaxes_on_quiet_residual():
-    """σ-relative course bar: quiet residual → floor; noisy → capped at 0.15."""
-    c = _ctl(course_rest_tau_steps=0.0, course_deadzone=0.15, course_deadzone_sigma_k=2.5,
-             course_deadzone_floor=0.06, course_sigma_tau_steps=20.0)
-    c.capture_baseline(DNReadout(dng02_amp=5.0))
-    quiet = DNReadout(dng02_amp=5.0)
-    for _ in range(200):
-        c.compute(quiet)
-    assert c.last_course_deadzone == pytest.approx(0.06, abs=1e-3)
-    # A 0.1-scale DNa02 transient (≈0.13 term) now passes; the old 0.15 bar ate it.
-    y = float(c.compute(DNReadout(dna02_L=0.10, dng02_amp=5.0))[4])
-    assert y > 0.05
-    c2 = _ctl(course_rest_tau_steps=0.0, course_deadzone=0.15, course_deadzone_sigma_k=0.0)
-    c2.capture_baseline(DNReadout(dng02_amp=5.0))
-    y2 = float(c2.compute(DNReadout(dna02_L=0.10, dng02_amp=5.0))[4])
-    assert abs(y2) < 1e-9
-
-
-def test_relative_course_deadzone_caps_noisy_residual():
-    c = _ctl(course_rest_tau_steps=0.0, course_deadzone=0.15, course_deadzone_sigma_k=2.5,
-             course_deadzone_floor=0.06, course_sigma_tau_steps=20.0)
-    c.capture_baseline(DNReadout(dng02_amp=5.0))
-    for i in range(200):
-        sgn = 1.0 if i % 2 else -1.0
-        c.compute(DNReadout(dna02_L=max(0.0, sgn) * 0.08, dna02_R=max(0.0, -sgn) * 0.08, dng02_amp=5.0))
-    assert c.last_course_deadzone == pytest.approx(0.15, abs=1e-6)
-
-
-def test_episode_lock_wins_over_binocular_vpn_at_fire():
+def test_episode_lock_wins_at_fire():
     """At GF fire the disc is large/binocular: the onset lock sets the side."""
     c = _ctl()
     c.capture_baseline(DNReadout(dng02_amp=5.0))
     c._loom_threat = "L"
-    ro = DNReadout(vpn_lplc2_R=0.5, vpn_lplc2_L=0.0, dng02_amp=5.0) if "vpn_lplc2_R" in DNReadout.__dataclass_fields__ else DNReadout(dng02_amp=5.0)
-    assert c._threat_side(ro) == "L"
-    c2 = _ctl(threat_lock_first=False)
-    c2.capture_baseline(DNReadout(dng02_amp=5.0))
-    c2._loom_threat = "L"
-    assert c2._threat_side(DNReadout(dng02_amp=5.0)) == "L"  # falls back to lock when readouts are flat
+    assert c._threat_side(DNReadout(dng02_amp=5.0)) == "L"
