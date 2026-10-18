@@ -196,6 +196,9 @@ def run_interactive_simulation(
     
     print("\n[7/8] Initializing interactive web interface...")
     viz = InteractiveVisualizer(host=host, port=port)
+    if use_core:
+        # Per-neuron cell types → real cell-type family means in the panel.
+        viz.set_brain_metadata(types=core_brain.core.typ)
     print("  ✓ Unified web interface ready (3D view + dashboard panels)")
     
     print("\n[8/8] Starting interactive simulation...")
@@ -321,11 +324,13 @@ def run_interactive_simulation(
 
             flow_features = np.zeros(8, dtype=np.float32)
             flow_info = {"flow_left": None, "flow_right": None, "flow_magnitude": 0.0}
+            brain_readout = None
             if use_core:
                 core_step = core_brain.step(
                     left_img, right_img, env.get_fly_angular_velocity()
                 )
                 brain_activity = core_step.rates
+                brain_readout = core_step.readout
                 if flight_params.use_engineered_looming_residual:
                     action = dn_controller.compute(
                         core_step.readout,
@@ -447,6 +452,8 @@ def run_interactive_simulation(
                     brain_stats=brain_stats,
                     control_stats=control_stats,
                     wing_angles=env.get_wing_angles(),
+                    brain_readout=brain_readout,
+                    sim_time=step * sim_dt,
                 )
             
             # Check collision
