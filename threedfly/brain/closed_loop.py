@@ -32,7 +32,7 @@ from threedfly.brain.core_bundle import (
     load_core_bundle,
 )
 from threedfly.brain.core_subgraph import select_core_tplus, slice_connectome
-from threedfly.brain.eyes import stereo_to_hex
+from threedfly.brain.eyes import reset_luminance_rest, stereo_to_hex
 from threedfly.brain.handoff import (
     FlyvisCalibration,
     FlyvisEye,
@@ -203,6 +203,7 @@ class ClosedLoopBrain:
         self.core.reset()
         if hasattr(self.eyes, "reset"):
             self.eyes.reset()
+        reset_luminance_rest()
         self.n_steps = 0
         self._flyvis_hold = None
 

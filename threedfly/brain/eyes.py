@@ -256,18 +256,50 @@ def _sample_image_hex_weighted(
     return out
 
 
-def _luminance_to_gray(hex_frame: np.ndarray, valid: np.ndarray) -> np.ndarray:
+class _BgRest:
+    """Per-eye p80 that a growing dark object cannot pull down."""
+
+    def __init__(self) -> None:
+        self.L: Optional[float] = None
+        self.R: Optional[float] = None
+
+    def reset(self) -> None:
+        self.L = None
+        self.R = None
+
+    def update(self, side: str, bg_now: float) -> float:
+        prev = self.L if side == "L" else self.R
+        rest = float(bg_now) if prev is None else max(float(prev), float(bg_now))
+        if side == "L":
+            self.L = rest
+        else:
+            self.R = rest
+        return rest
+
+
+BG_REST = _BgRest()
+
+
+def reset_luminance_rest() -> None:
+    """Call at brain reset / prewarm so each scenario starts clean."""
+    BG_REST.reset()
+
+
+def _luminance_to_gray(
+    hex_frame: np.ndarray, valid: np.ndarray, side: str = "L"
+) -> np.ndarray:
     """Match flyvis input stats: background → 0.5, fixed contrast gain.
 
-    p80 is the background (a growing dark object must not set the rest).
-    Then ``0.5 + G*(x − p80)`` — same form as flyvis ContrastBrightness.
-    Generic; no object geometry.
+    p80 is the background. A growing dark disc must not lower that rest
+    (per-frame p80 on a 60° disc collapses contrast). Then
+    ``0.5 + G*(x − rest)``. Generic; no object geometry.
     """
     out = np.asarray(hex_frame, dtype=np.float32).copy()
     m = np.asarray(valid, dtype=bool)
     if np.count_nonzero(m) < 8:
         return out
-    bg = float(np.percentile(out[m], 80.0))
+    bg_now = float(np.percentile(out[m], 80.0))
+    bg = BG_REST.update(side, bg_now)
     out[m] = np.clip(UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - bg), 0.0, 1.0)
     return out
 
@@ -348,7 +380,7 @@ def _image_to_hex_accept(image: np.ndarray, side: str) -> np.ndarray:
     uv, sample_ok, weights, hex_ok = hex_accept_uv(side, h, w)
     hex_frame = _sample_image_hex_weighted(image, uv, sample_ok, weights)
     hex_frame = np.where(hex_ok, hex_frame, UNSEEN_GRAY).astype(np.float32)
-    return _luminance_to_gray(hex_frame, hex_ok)
+    return _luminance_to_gray(hex_frame, hex_ok, side=side)
 
 
 def stereo_to_hex(

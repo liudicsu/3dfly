@@ -195,6 +195,7 @@ def test_camera_disc_lands_on_hex_disc_site():
     luminance shift keep the disc darker than the background, not 0.00.
     """
     pytest.importorskip("mujoco")
+    from threedfly.brain.eyes import reset_luminance_rest
     from threedfly.brain.stimuli import hex_degrees
     from threedfly.control.closed_loop_metrics import LOOM_RADIUS_M
     from threedfly.sim import FlyEnvironment
@@ -206,6 +207,7 @@ def test_camera_disc_lands_on_hex_disc_site():
     env.reset(seed=0)
     env.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
     env.set_loom_object((d * np.cos(az), d * np.sin(az), 1.5))
+    reset_luminance_rest()
     hL, hR = stereo_to_hex(*env.get_eye_images())
     env.close()
     _, _, xd, yd = hex_degrees()

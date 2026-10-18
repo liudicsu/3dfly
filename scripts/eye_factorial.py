@@ -25,7 +25,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from threedfly.brain.constants import DT, N_HEX
-from threedfly.brain.eyes import hex_body_azel_deg, hex_in_bio_envelope, stereo_to_hex
+from threedfly.brain.eyes import (
+    hex_body_azel_deg,
+    hex_in_bio_envelope,
+    reset_luminance_rest,
+    stereo_to_hex,
+)
 from threedfly.brain.stimuli import hex_degrees, loom, loom_theta_deg
 from threedfly.control.closed_loop_metrics import LOOM_RADIUS_M, angular_size_deg
 from threedfly.control.flight_params import FlightParams
@@ -158,6 +163,7 @@ def camera_movie(env, lv, dist0, dt, pre, stim, translate=False, cruise=CRUISE_M
     fly = np.array([0.0, 0.0, 1.5], dtype=float)
     env.set_pose(tuple(fly), yaw=0.0, vel=(cruise, 0.0, 0.0) if translate else (0.0, 0.0, 0.0))
     env.hide_loom_object()
+    reset_luminance_rest()
     room = stereo_to_hex(*env.get_eye_images())
     for _ in range(n_pre):
         if translate:
