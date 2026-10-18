@@ -167,6 +167,7 @@ class FlyvisEye:
         if network is None and not flyvis_available():
             raise ImportError("flyvis is required for FlyvisEye. pip install 'threedfly[brain]'")
         configure_threads(torch_threads=torch_threads)
+        self._torch_threads = int(torch_threads)
         self.dt = float(dt)
         self.checkpoint = checkpoint
         self._net = network
@@ -183,10 +184,11 @@ class FlyvisEye:
         import torch
         from flyvis import NetworkView
 
-        torch.set_num_threads(1)
+        n_th = max(1, int(getattr(self, "_torch_threads", 1) or 1))
+        torch.set_num_threads(n_th)
         if hasattr(torch, "set_num_interop_threads"):
             try:
-                torch.set_num_interop_threads(1)
+                torch.set_num_interop_threads(min(n_th, 2))
             except RuntimeError:
                 pass
         net = NetworkView(self.checkpoint).init_network()
@@ -434,6 +436,25 @@ def compile_handoff_plan(
     )
 
 
+# T4/T5 drive LPLC2/LC4/DNp01. Calibration p99 comes from high-contrast
+# hex movies; a compact room object sits well below that, so GF waits
+# until ~80°. A modest type gain restores biological 40–60° sensitivity
+# without a geometry oracle. Wide-field HS is subtracted in the controller.
+# Identity: amplifying T4/T5 to chase 40–60° also amplifies room flow
+# (LPLC2 0.43 in no-object yaw0) and false-escapes. Closed-loop LC4/LPLC2
+# stay near 0 until ~60–70° of disk on this hex/FOV; report that window.
+EXPANSION_HANDOFF_GAIN = {
+    "T4a": 1.0,
+    "T4b": 1.0,
+    "T4c": 1.0,
+    "T4d": 1.0,
+    "T5a": 1.0,
+    "T5b": 1.0,
+    "T5c": 1.0,
+    "T5d": 1.0,
+}
+
+
 def apply_handoff_plan(
     plan: HandoffPlan,
     voltages: Dict[str, np.ndarray],
@@ -459,6 +480,11 @@ def apply_handoff_plan(
     rates = (plan.rmax * np.clip(np.maximum(V - plan.v_gray, 0.0) / (plan.p99 + 1e-6), 0.0, 1.0)).astype(
         np.float32
     )
+    if ranges:
+        for t, (a, b) in ranges.items():
+            g = EXPANSION_HANDOFF_GAIN.get(t)
+            if g is not None and g != 1.0:
+                rates[a:b] *= float(g)
     return plan.idx, rates
 
 

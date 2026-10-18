@@ -37,6 +37,20 @@ def test_dng02_prefix_and_amplitude_is_mean_not_difference():
     assert "dng02_yaw" not in ro.as_dict()
 
 
+def test_lc4_p90_is_local_column_not_mean():
+    conn = tiny_signed_connectome()
+    idx = build_readout_index(conn.typ, conn.side, conn.body_ids)
+    rates = np.zeros(conn.n, dtype=np.float32)
+    lc4 = idx.groups.get("LC4|L", np.zeros(0, dtype=int))
+    if lc4.size < 2:
+        pytest.skip("synthetic connectome has no LC4 population")
+    rates[lc4] = 1.0
+    rates[lc4[0]] = 10.0
+    ro = read_dns(rates, idx)
+    assert ro.lc4_L == pytest.approx(float(np.mean(rates[lc4])))
+    assert ro.lc4_p90_L > ro.lc4_L + 0.5
+
+
 def test_readout_dataclass_fields():
     ro = DNReadout(dnp01_L=1.0, dnp01_R=0.1)
     assert ro.dnp01_L == 1.0

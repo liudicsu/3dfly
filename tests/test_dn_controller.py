@@ -233,7 +233,7 @@ def test_last8_rest_allows_loom_above_prewarm_peak():
     for _ in range(6):
         c.compute(DNReadout(dnp01_L=2.40, dnp01_R=2.10, dng02_amp=5.0))
     assert c.brain_escape_count == 0
-    loom = DNReadout(dnp01_L=2.70, dnp01_R=2.20, dnp03_L=1.2, dnp03_R=0.4, dng02_amp=5.0)
+    loom = DNReadout(dnp01_L=2.70, dnp01_R=2.20, dnp03_L=1.2, dnp03_R=0.4, lc4_L=2.2, lc4_R=1.0, dng02_amp=5.0)
     for _ in range(4):
         c.compute(loom)
     assert c.brain_escape_count == 1
@@ -243,7 +243,7 @@ def test_post_baseline_delay_skips_takeoff_transient():
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=8, dnp01_escape_hold_steps=2)  # short delay for the unit test
     rest = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dng02_amp=5.0)
     c.capture_baseline(rest)
-    transient = DNReadout(dnp01_L=2.50, dnp01_R=1.90, dnp03_L=1.2, dnp03_R=0.3, dng02_amp=5.0)
+    transient = DNReadout(dnp01_L=2.50, dnp01_R=1.90, dnp03_L=1.2, dnp03_R=0.3, lc4_L=2.2, lc4_R=1.0, dng02_amp=5.0)
     for _ in range(7):
         c.compute(transient)
     assert c.brain_escape_count == 0
@@ -262,6 +262,8 @@ def test_default_path_ignores_eye_brightness_for_threat_and_yaw():
         dnp01_L=3.2,
         dnp03_L=1.30,
         dnp03_R=0.20,
+        lc4_L=2.2,
+        lc4_R=1.0,
         eye_L=0.08,
         eye_R=0.30,
         dng02_amp=5.0,
@@ -453,7 +455,7 @@ def test_brief_slope_bump_does_not_latch_through_slow_open_climb():
     c.capture_baseline(rest)
     for _ in range(4):
         c.compute(rest)
-    bump = DNReadout(dnp01_L=1.87, dnp01_R=1.78, dnp03_L=0.70, dnp03_R=0.38, lc4_L=1.4, lc4_R=1.0, dng02_amp=5.0)
+    bump = DNReadout(dnp01_L=1.87, dnp01_R=1.78, dnp03_L=0.44, dnp03_R=0.38, lc4_L=1.08, lc4_R=1.0, dng02_amp=5.0)
     c.compute(bump)
     for i in range(36):
         z = 1.87 + 0.20 * min(1.0, (i + 1) / 32.0)
@@ -461,9 +463,9 @@ def test_brief_slope_bump_does_not_latch_through_slow_open_climb():
             DNReadout(
                 dnp01_L=z,
                 dnp01_R=z - 0.08,
-                dnp03_L=0.70,
+                dnp03_L=0.44,
                 dnp03_R=0.38,
-                lc4_L=1.35,
+                lc4_L=1.08,
                 lc4_R=1.00,
                 dng02_amp=5.0,
             )
@@ -483,6 +485,73 @@ def test_would_fire_counts_cooldown_masked_edges():
     c.compute(loom)
     assert c.brain_escape_count == 1
     assert c.would_fire_count >= 2
+
+
+def test_residual_left_dc_plus_dnp01_wander_does_not_escape():
+    """Box r8: free-flight LC4_L residual + DNp01 wander must not fire."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp01_L=1.80, dnp01_R=1.70, dnp03_L=0.55, dnp03_R=0.35, lc4_L=1.35, lc4_R=1.00, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    for i in range(80):
+        z = 1.80 + 0.28 * min(1.0, (i + 1) / 40.0)
+        c.compute(
+            DNReadout(
+                dnp01_L=z,
+                dnp01_R=z - 0.08,
+                dnp03_L=0.58,
+                dnp03_R=0.35,
+                lc4_L=1.40,
+                lc4_R=1.00,
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count == 0
+
+
+def test_hse_matched_lc4_does_not_count_as_expanding():
+    """Wide-field HS explains translation LC4; GF must not treat it as a loom."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.38, lc4_L=1.0, lc4_R=1.0, hse_L=0.0, hse_R=0.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    for i in range(40):
+        z = 1.80 + 0.30 * min(1.0, (i + 1) / 24.0)
+        c.compute(
+            DNReadout(
+                dnp01_L=z,
+                dnp01_R=z - 0.08,
+                dnp03_L=0.42,
+                dnp03_R=0.40,
+                lc4_L=1.0 + 0.40 * min(1.0, (i + 1) / 24.0),
+                lc4_R=1.0 + 0.38 * min(1.0, (i + 1) / 24.0),
+                hse_L=4.0,
+                hse_R=0.2,
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count == 0
+
+
+def test_vpn_climb_fires_at_lower_dnp01_than_size_gate():
+    """LC4 expansion is the GF drive: fire at 0.12 Hz DNp01, not after 0.20."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=2)
+    rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.40, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    for i in range(4):
+        amp = 1.0 + 0.45 * (i + 1)
+        c.compute(
+            DNReadout(
+                dnp01_L=1.94,
+                dnp03_L=0.40 + 0.35 * (i + 1),
+                dnp03_R=0.40,
+                lc4_L=amp,
+                lc4_R=1.0,
+                lplc2_L=0.2 * (i + 1),
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count == 1
+    assert c.last_rise < 0.20
+    assert c.escape_events[-1].threat_side == "L"
 
 
 def test_slow_open_space_wander_does_not_escape():
@@ -518,6 +587,7 @@ def test_approaching_loom_rise_with_dnp03_laterality_escapes_away():
         dnp03_R=0.40,
         lc4_L=2.4,
         lc4_R=1.0,
+        lplc2_L=0.8,
         dng02_amp=5.0,
     )
     act = c.compute(loom)

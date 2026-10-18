@@ -234,11 +234,16 @@ def test_lateral_approaches_turn_away_from_threat():
             ctl.capture_baseline(warmed.readout)
         env.set_loom_object(spec["loom_start"])
         heads = []
+        poses = []
         loom_pos = np.asarray(spec["loom_start"], dtype=float)
         loom_v = np.asarray(spec["loom_vel"], dtype=float)
+        from threedfly.control.closed_loop_metrics import object_behind_fly
+
         for _ in range(160):
             loom_pos = loom_pos + loom_v * float(env.control_dt)
-            if loom_pos[0] < -0.4:
+            fly_xy = poses[-1] if poses else spec["pose"]
+            hdg = heads[-1] if heads else spec["yaw"]
+            if object_behind_fly(loom_pos, fly_xy, hdg):
                 env.hide_loom_object()
             else:
                 env.set_loom_object(loom_pos)
@@ -246,6 +251,7 @@ def test_lateral_approaches_turn_away_from_threat():
             act = ctl.compute(res.readout)
             left, right, info = env.step(act, wing_strokes=ctl.last_wing_strokes)
             heads.append(heading_from_quaternion(info["orientation"]))
+            poses.append(np.asarray(info["position"], dtype=float))
             if env.check_collision():
                 env.recover_from_collision()
         return heads, list(ctl.escape_events)

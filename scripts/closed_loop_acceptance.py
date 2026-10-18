@@ -38,6 +38,7 @@ from threedfly.control.closed_loop_metrics import (
     direction_correct_frac,
     geometry_aware_frac,
     loom_geometry,
+    object_behind_fly,
     walls_per_100,
     wrap_heading_delta,
     xy_extent,
@@ -179,6 +180,7 @@ def _run_scenario(
     rises = []
     ms_brain = []
     ms_flyvis = []
+    ms_flyvis_frame = []
     ms_total = []
     wall = 0
     yaw_terms = []
@@ -186,6 +188,7 @@ def _run_scenario(
     rise_onset = None
     geo_lock = None
     geo_fire = None
+    last_visible_geo = None
     n_esc_seen = 0
     t_wall = time.perf_counter()
     left_img, right_img = env.get_eye_images()
@@ -201,8 +204,13 @@ def _run_scenario(
     for step in range(n_steps):
         if loom_pos is not None and loom_v is not None:
             loom_pos = loom_pos + loom_v * float(env.control_dt)
-            # Once the object has passed behind the fly it is not a loom.
-            if loom_pos[0] < -0.4:
+            if headings:
+                fly_xy, hdg = traj[-1], headings[-1]
+            else:
+                fly_xy, hdg = (pose if pose is not None else (0.0, 0.0, 1.5)), yaw
+            # Hide once the object is behind the *fly*, not a world-x cut
+            # (off-origin starts otherwise keep a receding object visible).
+            if object_behind_fly(loom_pos, fly_xy, hdg):
                 env.hide_loom_object()
                 loom_pos = None
             else:
@@ -219,6 +227,8 @@ def _run_scenario(
         rises.append(rise_now)
         ms_brain.append(res.ms.get("brain", 0.0))
         ms_flyvis.append(res.ms.get("flyvis", 0.0))
+        if float(res.ms.get("flyvis_ran", 1.0)) >= 0.5:
+            ms_flyvis_frame.append(res.ms.get("flyvis", 0.0))
         ms_total.append(res.ms.get("total", 0.0))
         terms = dict(ctl.last_yaw_terms)
         terms["x"] = float(pos[0])
@@ -226,27 +236,30 @@ def _run_scenario(
         terms["near_wall"] = 1.0 if max(abs(pos[0]), abs(pos[1])) > 3.2 else 0.0
         geo = loom_geometry(loom_pos, pos, heading) if loom_pos is not None else None
         if geo is not None:
-            terms["azimuth_deg"] = float(geo["azimuth_deg"])
-            terms["angular_size_deg"] = float(geo["angular_size_deg"])
+            last_visible_geo = geo
+        use_geo = geo if geo is not None else last_visible_geo
+        if use_geo is not None:
+            terms["azimuth_deg"] = float(use_geo["azimuth_deg"])
+            terms["angular_size_deg"] = float(use_geo["angular_size_deg"])
             if rise_onset is None and rise_now >= 0.08:
-                rise_onset = {"step": int(step), **{k: geo[k] for k in geo}}
+                rise_onset = {"step": int(step), **{k: use_geo[k] for k in use_geo}}
             if geo_lock is None and ctl.last_lock_step is not None:
                 geo_lock = {
                     "step": int(step),
                     "threat": ctl._loom_threat,
-                    **{k: geo[k] for k in geo},
+                    **{k: use_geo[k] for k in use_geo},
                 }
             if ctl.brain_escape_count > n_esc_seen:
-                geo_fire = {"step": int(step), **{k: geo[k] for k in geo}}
+                geo_fire = {"step": int(step), **{k: use_geo[k] for k in use_geo}}
                 n_esc_seen = int(ctl.brain_escape_count)
             if rise_now >= 0.08:
                 rise_geometry.append(
                     {
                         "step": int(step),
-                        "azimuth_deg": float(geo["azimuth_deg"]),
-                        "angular_size_deg": float(geo["angular_size_deg"]),
-                        "distance_m": float(geo["distance_m"]),
-                        "class": geo["class"],
+                        "azimuth_deg": float(use_geo["azimuth_deg"]),
+                        "angular_size_deg": float(use_geo["angular_size_deg"]),
+                        "distance_m": float(use_geo["distance_m"]),
+                        "class": use_geo["class"],
                         "rise": float(rise_now),
                         "lat": float(ctl.last_lat_integrated),
                         "threat": ctl._loom_threat or "",
@@ -267,11 +280,13 @@ def _run_scenario(
     wall_s = time.perf_counter() - t_wall
     traj = np.asarray(traj, dtype=float) if traj else np.zeros((0, 3))
     headings_arr = np.asarray(headings, dtype=float)
-    dir_ok = (
-        direction_correct_frac(headings_arr, ctl.escape_events, threat_side)
-        if threat_side
-        else float("nan")
-    )
+    if threat_side:
+        if not any(not getattr(e, "engineered", False) for e in ctl.escape_events):
+            dir_ok = 0.0
+        else:
+            dir_ok = direction_correct_frac(headings_arr, ctl.escape_events, threat_side)
+    else:
+        dir_ok = float("nan")
     brakes = [float(t.get("loom_brake", 0.0)) for t in yaw_terms]
     braked = bool(brakes) and float(np.max(brakes)) >= 0.35
     az_on = None if rise_onset is None else float(rise_onset["azimuth_deg"])
@@ -339,6 +354,8 @@ def _run_scenario(
         "ms_per_step_flyvis": float(np.median(ms_flyvis)) if ms_flyvis else 0.0,
         "ms_per_step_brain_flyvis": float(np.median(ms_total)) if ms_total else 0.0,
         "ms_per_step_brain_flyvis_mean": float(np.mean(ms_total)) if ms_total else 0.0,
+        "ms_flyvis_frame_median": float(np.median(ms_flyvis_frame)) if ms_flyvis_frame else 0.0,
+        "ms_flyvis_frame_mean": float(np.mean(ms_flyvis_frame)) if ms_flyvis_frame else 0.0,
         "room_coverage": coverage(traj),
         "dx": dx,
         "dy": dy,
@@ -355,6 +372,44 @@ def _run_scenario(
     }
 
 
+def _escape_side_counts(sc: dict) -> dict:
+    sides = {"L": 0, "R": 0, "": 0}
+    for ev in sc.get("escape_events") or []:
+        if ev.get("engineered"):
+            continue
+        key = ev.get("threat_side") or ""
+        sides[key] = sides.get(key, 0) + 1
+    return sides
+
+
+def _escape_one_sided(sc: dict) -> bool:
+    sides = _escape_side_counts(sc)
+    n = int(sides.get("L", 0) + sides.get("R", 0))
+    return n >= 3 and min(int(sides.get("L", 0)), int(sides.get("R", 0))) == 0
+
+
+def _noobj_heading_summary(scenarios: dict) -> dict:
+    per = {}
+    fires = 0
+    for name, sc in scenarios.items():
+        if not name.startswith("ctrl_noobj_"):
+            continue
+        n = int(sc.get("brain_escapes") or 0)
+        per[name] = {
+            "escapes": n,
+            "would_fire": sc.get("would_fire"),
+            "rise_max": sc.get("dnp01_rise_max"),
+            "steps": sc.get("steps"),
+        }
+        fires += n
+    return {
+        "per_scenario": per,
+        "n": int(len(per)),
+        "fires": int(fires),
+        "pass": bool(per) and fires == 0,
+    }
+
+
 def _is_loom_variant(name: str) -> bool:
     return name.startswith("side_loom_") or name.startswith("loomL_") or name.startswith("loomR_")
 
@@ -367,9 +422,10 @@ def _variant_direction(scenarios: dict) -> dict:
         if not _is_loom_variant(name):
             continue
         d = sc.get("escape_direction_correct")
+        if d is None:
+            d = 0.0
         per[name] = d
-        if d is not None:
-            dirs.append(float(d))
+        dirs.append(float(d))
     return {
         "per_scenario": per,
         "mean": float(np.mean(dirs)) if dirs else None,
@@ -396,6 +452,7 @@ def _variant_geometry_aware(scenarios: dict) -> dict:
             "angular_size_onset_deg": sc.get("angular_size_onset_deg"),
             "azimuth_lock_deg": sc.get("azimuth_lock_deg"),
             "azimuth_fire_deg": sc.get("azimuth_fire_deg"),
+            "angular_size_fire_deg": sc.get("angular_size_fire_deg"),
             "brain_escapes": sc.get("brain_escapes"),
             "threat_locked": sc.get("threat_locked"),
             "pre_escape_yaw_toward": sc.get("pre_escape_yaw_toward"),
@@ -463,28 +520,34 @@ def _plot_trajectory(scenarios: dict, path: Path) -> None:
 
 
 def _plot_escapes(scenarios: dict, path: Path, delta_hz: float) -> None:
+    import math
+
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     names = list(scenarios)
-    fig, axes = plt.subplots(len(names), 1, figsize=(8, 2.4 * len(names)), sharex=False)
-    if len(names) == 1:
-        axes = [axes]
-    for ax, name in zip(axes, names):
+    ncols = 3 if len(names) > 4 else 1
+    nrows = int(math.ceil(len(names) / float(ncols)))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 2.2 * nrows), sharex=False)
+    flat = np.atleast_1d(axes).ravel()
+    for i, name in enumerate(names):
+        ax = flat[i]
         sc = scenarios[name]
         rise = sc.get("dnp01_rise")
         if rise is None or getattr(rise, "size", 0) == 0:
             rise = sc["dnp01"]
-        ax.plot(rise, color="tab:red", lw=1.0, label="DNp01 rise")
-        ax.axhline(delta_hz, color="gray", ls="--", lw=0.8, label=f"rise thr {delta_hz:.2f}")
+        ax.plot(rise, color="tab:red", lw=1.0)
+        ax.axhline(delta_hz, color="gray", ls="--", lw=0.8)
         for ev in sc["escape_events"]:
             ax.axvline(ev["step"], color="tab:orange", alpha=0.5)
-        ax.set_ylabel("ΔHz")
-        ax.set_title(f"{name}: escapes={sc['brain_escapes']} latch={sc['dnp01_latch_frac']:.3f}")
-        ax.legend(loc="upper right", fontsize=8)
-    axes[-1].set_xlabel("step")
+        ang = sc.get("angular_size_fire_deg")
+        extra = f" ang={ang:.0f}°" if isinstance(ang, (int, float)) and ang is not None else ""
+        ax.set_title(f"{name} esc={sc['brain_escapes']}{extra}", fontsize=8)
+        ax.tick_params(labelsize=7)
+    for j in range(len(names), len(flat)):
+        flat[j].axis("off")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -625,6 +688,23 @@ def main(argv=None) -> int:
         vel=(0.55, 0.0, 0.0),
         prewarm=16,
     )
+    print("Control: no-object headings ≥200 steps after prewarm, 0 fires…", flush=True)
+    heading_yaws = (0.0, 0.70, -0.70, 2.20)
+    noobj_steps = 80 if args.quick else 220
+    for i, hyaw in enumerate(heading_yaws):
+        name = f"ctrl_noobj_yaw{i}"
+        speed = 0.40
+        scenarios[name] = _run_scenario(
+            name,
+            env,
+            brain,
+            ctl,
+            noobj_steps,
+            pose=(-2.0, 0.0, 1.5),
+            yaw=float(hyaw),
+            vel=(speed * float(np.cos(hyaw)), speed * float(np.sin(hyaw)), 0.0),
+            prewarm=16 if args.quick else 80,
+        )
     env.close()
 
     side_l = scenarios["side_loom_left"]
@@ -677,12 +757,20 @@ def main(argv=None) -> int:
             "headon_wall_contacts": scenarios["headon_wall"]["wall_contacts"],
             "headon_brain_escapes": scenarios["headon_wall"]["brain_escapes"],
             "ctrl_center_16_escapes": scenarios["ctrl_center_short_prewarm"]["brain_escapes"],
+            "ctrl_noobj_headings": _noobj_heading_summary(scenarios),
+            "room_escape_sides": _escape_side_counts(room),
+            "room_escape_one_sided": _escape_one_sided(room),
             "side_L_would_fire": side_l.get("would_fire"),
             "side_R_would_fire": side_r.get("would_fire"),
+            "side_L_angular_size_fire_deg": side_l.get("angular_size_fire_deg"),
+            "side_R_angular_size_fire_deg": side_r.get("angular_size_fire_deg"),
             "variant_direction_correct": _variant_direction(scenarios),
             "variant_geometry_aware": _variant_geometry_aware(scenarios),
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
             "ms_per_step_mean": room.get("ms_per_step_brain_flyvis_mean"),
+            "ms_flyvis_frame_median": room.get("ms_flyvis_frame_median"),
+            "ms_flyvis_frame_mean": room.get("ms_flyvis_frame_mean"),
+            "flyvis_path": getattr(brain, "flyvis_path", {}),
             "flyvis_stride": int(params.flyvis_stride),
             "beats_pr16_walls": beats_pr16_walls(room["wall_contacts"], room["steps"]),
             "no_latch": room["dnp01_latch_frac"] < 0.05,
@@ -706,20 +794,32 @@ def _print_variant_tables(summary: dict) -> None:
     if not names:
         return
     print("\nRaw direction (must turn away from scenario side):", flush=True)
-    print(f"{'scenario':<28} {'raw':>6} {'geo':>6} {'class':>8} {'az0':>7} {'esc':>4} {'lock':>4} {'toward':>6}", flush=True)
+    print(
+        f"{'scenario':<28} {'raw':>6} {'geo':>6} {'class':>8} {'az0':>7} {'angF':>6} {'esc':>4} {'lock':>4} {'toward':>6}",
+        flush=True,
+    )
     for name in names:
         d = details.get(name, {})
         r = d.get("raw", (raw.get("per_scenario") or {}).get(name))
         g = d.get("geometry_aware")
         print(
             f"{name:<28} {_fmt(r):>6} {_fmt(g):>6} {str(d.get('loom_class') or '-'):>8} "
-            f"{_fmt(d.get('azimuth_onset_deg')):>7} {str(d.get('brain_escapes')):>4} "
+            f"{_fmt(d.get('azimuth_onset_deg')):>7} {_fmt(d.get('angular_size_fire_deg')):>6} "
+            f"{str(d.get('brain_escapes')):>4} "
             f"{str(d.get('threat_locked') or '-'):>4} {str(d.get('pre_escape_yaw_toward')):>6}",
             flush=True,
         )
     print(
         f"raw mean={raw.get('mean')} pass={raw.get('pass')} | "
         f"geometry-aware mean={geo.get('mean')} pass={geo.get('pass')}",
+        flush=True,
+    )
+    noobj = summary.get("ctrl_noobj_headings") or {}
+    print(
+        f"no-object headings fires={noobj.get('fires')} n={noobj.get('n')} pass={noobj.get('pass')} | "
+        f"room sides={summary.get('room_escape_sides')} one_sided={summary.get('room_escape_one_sided')} | "
+        f"ang_fire L/R={summary.get('side_L_angular_size_fire_deg')}/{summary.get('side_R_angular_size_fire_deg')} | "
+        f"flyvis_frame={summary.get('ms_flyvis_frame_mean')} path={summary.get('flyvis_path')}",
         flush=True,
     )
 

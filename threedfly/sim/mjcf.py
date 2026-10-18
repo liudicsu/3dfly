@@ -44,7 +44,7 @@ FLY_MJCF = """
     <material name="obs_mat" texture="obs_check" texrepeat="6 6" reflectance="0.04"/>
     <texture name="loom_check" type="2d" builtin="checker" width="128" height="128"
              rgb1="0.00 0.00 0.00" rgb2="0.92 0.90 0.84"/>
-    <material name="loom_mat" texture="loom_check" texrepeat="8 8" reflectance="0.0"/>
+    <material name="loom_mat" texture="loom_check" texrepeat="16 16" reflectance="0.0"/>
     
     <!-- flybody mesh assets (Apache-2.0). Scale: millimetres × 0.01 → metres (10× life-size). -->
     <mesh name="thorax_mesh" file="thorax_body.obj" scale=""" + f'"{_S}"' + """/>

@@ -19,6 +19,7 @@ from threedfly.brain.constants import (
     G_GAP_DEFAULT,
     G_INH_DEFAULT,
     HALTERE_RATE,
+    N_HEX,
     RHO_FULL_SIGNED_REFERENCE,
     cache_dir,
     configure_threads,
@@ -97,8 +98,15 @@ class DualFlyvisEyes:
                 )
                 self._state_L, self._state_R = sL, sR
                 return vL, vR
-            except Exception:
+            except Exception as exc:
                 self._batch_ok = False
+                self._batch_error = f"{type(exc).__name__}: {exc}"
+                logger.exception("flyvis batched two-eye step failed; sequential fallback")
+                print(
+                    f"WARNING: flyvis batch path failed ({type(exc).__name__}: {exc}); "
+                    "falling back to sequential two-eye steps",
+                    flush=True,
+                )
         eye = self.eye_L
         eye._state = self._state_L
         vL = eye.step(hex_L)
@@ -172,6 +180,7 @@ class ClosedLoopBrain:
         self.last_ms: Dict[str, float] = {}
         self.n_steps = 0
         self._flyvis_hold: Optional[Tuple[dict, dict]] = None
+        self.flyvis_path: Dict[str, object] = {}
         n_l = int(self.plans.get("L", _empty_plan()).idx.size)
         n_r = int(self.plans.get("R", _empty_plan()).idx.size)
         n_h = int(self.halt_idx.size)
@@ -229,7 +238,8 @@ class ClosedLoopBrain:
             hex_L, hex_R = stereo_to_hex(left_img, right_img)
         t1 = time.perf_counter()
         stride = max(1, int(getattr(self.params, "flyvis_stride", 1)))
-        if self._flyvis_hold is None or (self.n_steps % stride) == 0:
+        flyvis_ran = self._flyvis_hold is None or (self.n_steps % stride) == 0
+        if flyvis_ran:
             vL, vR = self.eyes.step_pair(hex_L, hex_R)
             self._flyvis_hold = (vL, vR)
         else:
@@ -260,6 +270,7 @@ class ClosedLoopBrain:
             "flyvis": 1000.0 * (t2 - t1),
             "brain": 1000.0 * (t3 - t2),
             "total": 1000.0 * (t3 - t0),
+            "flyvis_ran": 1.0 if flyvis_ran else 0.0,
         }
         self.last_ms = ms
         self.n_steps += 1
@@ -371,6 +382,13 @@ class ClosedLoopBrain:
                 calib.save(cache)
                 print(f"  wrote calibration {cache}", flush=True)
             eyes.reset()
+            timing = probe_eye_paths(eyes)
+            print(
+                f"  flyvis path={timing.get('path')} "
+                f"seq={timing.get('seq_ms')} ms/pair batch={timing.get('batch_ms')} ms/pair "
+                f"err={timing.get('error')}",
+                flush=True,
+            )
         if calib is None:
             raise ValueError("FlyvisCalibration is required")
         if hmap is None:
@@ -383,7 +401,7 @@ class ClosedLoopBrain:
             f"  handoff L={plans['L'].idx.size} R={plans['R'].idx.size} halt={halt.size}",
             flush=True,
         )
-        return cls(
+        brain = cls(
             core=core,
             index=index,
             plans=plans,
@@ -391,6 +409,52 @@ class ClosedLoopBrain:
             halt_idx=halt,
             params=params,
         )
+        if isinstance(eyes, DualFlyvisEyes):
+            brain.flyvis_path = getattr(eyes, "_path_probe", {})
+        return brain
+
+
+def probe_eye_paths(eyes: DualFlyvisEyes, n: int = 3) -> Dict[str, object]:
+    """Time sequential vs batched two-eye flyvis; keep the faster path."""
+    gray = np.full(N_HEX, 0.5, dtype=np.float32)
+    eyes.reset()
+    eyes._batch_ok = False
+    t0 = time.perf_counter()
+    for _ in range(int(n)):
+        eyes.step_pair(gray, gray)
+    seq_ms = 1000.0 * (time.perf_counter() - t0) / max(int(n), 1)
+    eyes.reset()
+    eyes._batch_ok = True
+    batch_ms = None
+    batch_err = None
+    try:
+        t0 = time.perf_counter()
+        for _ in range(int(n)):
+            eyes.step_pair(gray, gray)
+        if not getattr(eyes, "_batch_ok", True):
+            raise RuntimeError(getattr(eyes, "_batch_error", "batch disabled mid-probe"))
+        batch_ms = 1000.0 * (time.perf_counter() - t0) / max(int(n), 1)
+    except Exception as exc:
+        batch_err = f"{type(exc).__name__}: {exc}"
+        eyes._batch_ok = False
+        logger.error("flyvis batch probe failed: %s", batch_err)
+        print(f"WARNING: flyvis batch probe failed ({batch_err})", flush=True)
+    if batch_ms is not None and float(batch_ms) < float(seq_ms):
+        eyes._batch_ok = True
+        path = "batch"
+    else:
+        eyes._batch_ok = False
+        path = "sequential"
+        eyes.reset()
+    probe = {
+        "path": path,
+        "seq_ms": float(seq_ms),
+        "batch_ms": None if batch_ms is None else float(batch_ms),
+        "error": batch_err,
+        "torch_threads": int(getattr(getattr(eyes, "eye_L", None), "_torch_threads", 0) or 0),
+    }
+    eyes._path_probe = probe
+    return probe
 
 
 def _empty_plan() -> HandoffPlan:

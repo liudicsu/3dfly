@@ -33,6 +33,12 @@ class DNReadout:
     lplc1_R: float = 0.0
     lc4_L: float = 0.0
     lc4_R: float = 0.0
+    # Local-column peaks: a compact loom drives a few LC4/LPLC2 hard; the
+    # mean is diluted by silent columns and only moves after ~80° of disk.
+    lc4_p90_L: float = 0.0
+    lc4_p90_R: float = 0.0
+    lplc2_p90_L: float = 0.0
+    lplc2_p90_R: float = 0.0
     # Hex means (diagnostics / opt-in engineered eye laterality only).
     eye_L: float = 0.0
     eye_R: float = 0.0
@@ -59,6 +65,12 @@ def _mean(rates: np.ndarray, idx: np.ndarray) -> float:
     if idx is None or len(idx) == 0:
         return 0.0
     return float(np.mean(rates[idx]))
+
+
+def _p90(rates: np.ndarray, idx: np.ndarray) -> float:
+    if idx is None or len(idx) == 0:
+        return 0.0
+    return float(np.percentile(rates[idx], 90))
 
 
 def _select(typ: np.ndarray, side: np.ndarray, name: str, s: str, prefix: bool = False) -> np.ndarray:
@@ -127,6 +139,10 @@ def read_dns(rates: np.ndarray, index: ReadoutIndex) -> DNReadout:
         lplc1_R=_mean(rates, index.groups.get("LPLC1|R", np.zeros(0, dtype=int))),
         lc4_L=_mean(rates, index.groups.get("LC4|L", np.zeros(0, dtype=int))),
         lc4_R=_mean(rates, index.groups.get("LC4|R", np.zeros(0, dtype=int))),
+        lc4_p90_L=_p90(rates, index.groups.get("LC4|L", np.zeros(0, dtype=int))),
+        lc4_p90_R=_p90(rates, index.groups.get("LC4|R", np.zeros(0, dtype=int))),
+        lplc2_p90_L=_p90(rates, index.groups.get("LPLC2|L", np.zeros(0, dtype=int))),
+        lplc2_p90_R=_p90(rates, index.groups.get("LPLC2|R", np.zeros(0, dtype=int))),
     )
 
 

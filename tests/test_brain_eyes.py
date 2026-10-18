@@ -70,26 +70,11 @@ def test_walls_use_high_contrast_checker():
     assert 'rgb2="0.92 0.90 0.84"' in xml or "0.92 0.90 0.84" in xml
 
 
-def test_mirror_stereo_images_swaps_and_flips():
-    from threedfly.brain.eyes import mirror_stereo_images, stereo_to_hex
+def test_mirror_stereo_images_helper_removed():
+    """Swap+fliplr is not a rendered mirror (DNp01 err 0.33 vs 0.03)."""
+    from threedfly.brain import eyes as eyes_mod
 
-    left = np.zeros((8, 8, 3), dtype=np.uint8)
-    right = np.zeros((8, 8, 3), dtype=np.uint8)
-    left[:, :3] = 200
-    right[:, 5:] = 80
-    mL, mR = mirror_stereo_images(left, right)
-    assert mL[0, 0, 0] == 80
-    assert mR[0, -1, 0] == 200
-    # Swap-and-flip must move a left-eye blob onto the right hex lattice.
-    # (Right-eye V-flip is a vertical remap only; energy still changes eye.)
-    h, w = 64, 64
-    blob_L = np.zeros((h, w, 3), dtype=np.uint8)
-    blob_L[:, : w // 4] = 255
-    gray = np.full((h, w, 3), 32, dtype=np.uint8)
-    hL, hR = stereo_to_hex(blob_L, gray)
-    mhL, mhR = stereo_to_hex(*mirror_stereo_images(blob_L, gray))
-    assert float(hL.mean()) > float(hR.mean()) + 0.05
-    assert float(mhR.mean()) > float(mhL.mean()) + 0.05
+    assert not hasattr(eyes_mod, "mirror_stereo_images")
 
 
 def test_hex_fovy_matches_camera():

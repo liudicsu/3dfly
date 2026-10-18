@@ -17,6 +17,7 @@ from threedfly.control.closed_loop_metrics import (
     escape_turned_away,
     geometry_aware_event_ok,
     geometry_aware_frac,
+    object_behind_fly,
     walls_per_100,
     wrap_heading_delta,
     xy_extent,
@@ -105,10 +106,46 @@ def test_geometry_aware_frontal_must_not_turn_into():
     assert not geometry_aware_event_ok(straight, 0, "L", azimuth_onset_deg=45.0)
 
 
+def test_object_behind_fly_uses_body_x_not_world_x():
+    # Object at world x=-1, fly at origin heading +X → behind.
+    assert object_behind_fly((-1.0, 0.0, 1.5), (0.0, 0.0, 1.5), 0.0)
+    # Same world x, fly facing −X → object is in front.
+    assert not object_behind_fly((-1.0, 0.0, 1.5), (0.0, 0.0, 1.5), np.pi)
+    # Off-origin start: world x=+3 is behind a fly at x=+4 heading +X.
+    assert object_behind_fly((3.0, 1.0, 1.5), (4.0, 1.0, 1.5), 0.0)
+
+
 def test_geometry_aware_frac_frontal_brake_without_escape():
     assert geometry_aware_frac([], [], "L", 15.0, escaped=False, braked=True) == pytest.approx(1.0)
     assert geometry_aware_frac([], [], "L", 45.0, escaped=False, braked=True) == pytest.approx(0.0)
     assert geometry_aware_frac([], [], "L", 45.0, escaped=False, braked=False) == pytest.approx(0.0)
+
+
+def test_noobj_heading_control_requires_zero_fires():
+    path = ROOT / "scripts" / "closed_loop_acceptance.py"
+    spec = importlib.util.spec_from_file_location("cla_noobj", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    summary = mod._noobj_heading_summary(
+        {
+            "ctrl_noobj_yaw0": {"brain_escapes": 0, "would_fire": 0, "dnp01_rise_max": 0.1, "steps": 220},
+            "ctrl_noobj_yaw1": {"brain_escapes": 0, "would_fire": 0, "dnp01_rise_max": 0.1, "steps": 220},
+            "ctrl_noobj_yaw2": {"brain_escapes": 0, "would_fire": 0, "dnp01_rise_max": 0.1, "steps": 220},
+            "ctrl_noobj_yaw3": {"brain_escapes": 0, "would_fire": 0, "dnp01_rise_max": 0.1, "steps": 220},
+            "room": {"brain_escapes": 4},
+        }
+    )
+    assert summary["n"] == 4
+    assert summary["fires"] == 0
+    assert summary["pass"] is True
+    fail = mod._noobj_heading_summary(
+        {"ctrl_noobj_yaw0": {"brain_escapes": 1, "would_fire": 1, "dnp01_rise_max": 0.3, "steps": 220}}
+    )
+    assert fail["pass"] is False
+    room = {"escape_events": [{"threat_side": "L"}, {"threat_side": "L"}, {"threat_side": "L"}]}
+    assert mod._escape_one_sided(room) is True
+    mixed = {"escape_events": [{"threat_side": "L"}, {"threat_side": "R"}, {"threat_side": "L"}]}
+    assert mod._escape_one_sided(mixed) is False
 
 
 def test_acceptance_script_metric_code_runs_on_numpy2():
@@ -176,6 +213,15 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert vd["n"] == 3
     assert vd["mean"] == pytest.approx(2.0 / 3.0)
     assert vd["pass"] is False
+    vd_miss = mod._variant_direction(
+        {
+            "side_loom_left": {"escape_direction_correct": None},
+            "loomR_far1.4x": {"escape_direction_correct": 1.0},
+        }
+    )
+    assert vd_miss["n"] == 2
+    assert vd_miss["mean"] == pytest.approx(0.5)
+    assert vd_miss["per_scenario"]["side_loom_left"] == 0.0
     vg = mod._variant_geometry_aware(
         {
             "side_loom_left": {

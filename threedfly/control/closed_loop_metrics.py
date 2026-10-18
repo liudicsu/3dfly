@@ -61,6 +61,13 @@ def body_azimuth_deg(obj_xy, fly_xy, heading_rad: float) -> float:
     return float(np.degrees(wrap_heading_delta(world, float(heading_rad))))
 
 
+def object_behind_fly(obj_xyz, fly_xyz, heading_rad: float, behind_m: float = -0.4) -> bool:
+    """True when the object is behind the fly (body +X), not a world-x cut."""
+    rel = np.asarray(obj_xyz, dtype=float)[:2] - np.asarray(fly_xyz, dtype=float)[:2]
+    fwd = np.array([np.cos(float(heading_rad)), np.sin(float(heading_rad))], dtype=float)
+    return float(np.dot(rel, fwd)) < float(behind_m)
+
+
 def angular_size_deg(distance: float, radius: float = LOOM_RADIUS_M) -> float:
     d = max(float(distance), 1e-6)
     return float(2.0 * np.degrees(np.arctan(float(radius) / d)))

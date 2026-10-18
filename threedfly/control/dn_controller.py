@@ -69,8 +69,16 @@ class DNFlightController:
         self._lat_sign_hist: List[int] = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
+        self.last_lat_delta = 0.0
+        self._lat_rest: Optional[float] = None
         self._peak_lc4_L = 0.0
         self._peak_lc4_R = 0.0
+        self._vpn_hist: List[float] = []
+        self._vpn_rest: Optional[float] = None
+        self.last_vpn_amp = 0.0
+        self.last_vpn_delta = 0.0
+        self.last_vpn_slope = 0.0
+        self._vpn_rising = False
         self.last_lock_step: Optional[int] = None
         self.last_yaw_terms: Dict[str, float] = {}
 
@@ -107,8 +115,16 @@ class DNFlightController:
         self._lat_sign_hist = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
+        self.last_lat_delta = 0.0
+        self._lat_rest = None
         self._peak_lc4_L = 0.0
         self._peak_lc4_R = 0.0
+        self._vpn_hist = []
+        self._vpn_rest = None
+        self.last_vpn_amp = 0.0
+        self.last_vpn_delta = 0.0
+        self.last_vpn_slope = 0.0
+        self._vpn_rising = False
         self.last_lock_step = None
         self.last_yaw_terms = {}
 
@@ -132,8 +148,16 @@ class DNFlightController:
         self._lat_sign_hist = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
+        self.last_lat_delta = 0.0
+        self._lat_rest = None
         self._peak_lc4_L = 0.0
         self._peak_lc4_R = 0.0
+        self._vpn_hist = []
+        self._vpn_rest = None
+        self.last_vpn_amp = 0.0
+        self.last_vpn_delta = 0.0
+        self.last_vpn_slope = 0.0
+        self._vpn_rising = False
         self.last_lock_step = None
         if self.params.use_engineered_eye_laterality:
             eye = float(readout.eye_L) - float(readout.eye_R)
@@ -164,6 +188,10 @@ class DNFlightController:
             lplc1_R=float(ro.lplc1_R) - float(b.lplc1_R),
             lc4_L=float(ro.lc4_L) - float(b.lc4_L),
             lc4_R=float(ro.lc4_R) - float(b.lc4_R),
+            lc4_p90_L=float(getattr(ro, "lc4_p90_L", 0.0)) - float(getattr(b, "lc4_p90_L", 0.0)),
+            lc4_p90_R=float(getattr(ro, "lc4_p90_R", 0.0)) - float(getattr(b, "lc4_p90_R", 0.0)),
+            lplc2_p90_L=float(getattr(ro, "lplc2_p90_L", 0.0)) - float(getattr(b, "lplc2_p90_L", 0.0)),
+            lplc2_p90_R=float(getattr(ro, "lplc2_p90_R", 0.0)) - float(getattr(b, "lplc2_p90_R", 0.0)),
             eye_L=float(ro.eye_L) - float(b.eye_L),
             eye_R=float(ro.eye_R) - float(b.eye_R),
         )
@@ -258,34 +286,99 @@ class DNFlightController:
         d03, vpn = self._loom_lr(ro)
         return d03 + vpn
 
+    def _vpn_amp(self, ro: DNReadout) -> float:
+        """Mean LC4/LPLC2. p90 flickers in cruise and looks like expansion."""
+        return max(
+            0.0,
+            float(ro.lc4_L),
+            float(ro.lc4_R),
+            float(ro.lplc2_L),
+            float(ro.lplc2_R),
+        )
+
+    def _update_vpn(self, ro: DNReadout) -> None:
+        """Looming VPNs expand; residual / self-motion DC is tracked as rest.
+
+        Wide-field HSE predicts translation-driven LC4. The GF sees the
+        residual (LPLC2/LC4 after HS), so cruise optic flow cannot expand.
+        Expansion is a *run of rising samples*, not a one-frame step.
+        """
+        # Do not subtract |HSE|: HS also tracks the loom's wide-field
+        # expansion (13→50 Hz here) and would zero LC4/LPLC2 until ~80°.
+        amp = float(self._vpn_amp(ro))
+        if self._vpn_rest is None:
+            self._vpn_rest = 0.0 if amp >= 0.28 else amp
+        elif not self._vpn_expanding():
+            tau = max(float(getattr(self.params, "lat_rest_tau_steps", 25.0)), 1.0)
+            self._vpn_rest += (amp - float(self._vpn_rest)) / tau
+        self.last_vpn_amp = amp
+        self.last_vpn_delta = amp - float(self._vpn_rest or 0.0)
+        self._vpn_hist.append(amp)
+        if len(self._vpn_hist) > 8:
+            self._vpn_hist.pop(0)
+        if len(self._vpn_hist) >= 4:
+            diffs = np.diff(np.asarray(self._vpn_hist[-4:], dtype=float))
+            self.last_vpn_slope = float(np.mean(diffs))
+            floor = 0.5 * float(getattr(self.params, "vpn_slope_min", 0.005))
+            self._vpn_rising = bool(
+                np.all(diffs >= floor) and self.last_vpn_slope >= float(getattr(self.params, "vpn_slope_min", 0.005))
+            )
+        else:
+            self.last_vpn_slope = 0.0
+            self._vpn_rising = False
+
+    def _vpn_expanding(self) -> bool:
+        """True only for a monotonic LC4/LPLC2 rise, not a step or standing DC."""
+        p = self.params
+        dmin = float(getattr(p, "vpn_amp_min", 0.28)) * 0.35
+        slope_min = float(getattr(p, "vpn_slope_min", 0.005))
+        # A 3-step flicker is not a loom: also need a real amplitude rise.
+        dneed = max(0.20, dmin)
+        if self.last_vpn_delta >= 0.35 and self.last_vpn_amp >= 0.35:
+            return True
+        if getattr(self, "_vpn_rising", False) and self.last_vpn_delta >= dneed:
+            return True
+        return self.last_vpn_delta >= dneed and self.last_vpn_slope >= slope_min
+
     def _integrated_laterality(self, ro: DNReadout) -> float:
-        """Rise-weighted L−R over the current climb, not the fire instant."""
+        """Rise-weighted L−R *above cruise rest*, not standing DC."""
         p = self.params
         now = float(self._loom_laterality(ro))
         self.last_lat_now = now
+        expanding = self._vpn_expanding()
+        if self.last_rise < 0.08 and not expanding:
+            tau = max(float(getattr(p, "lat_rest_tau_steps", 25.0)), 1.0)
+            if self._lat_rest is None:
+                self._lat_rest = now
+            else:
+                self._lat_rest += (now - float(self._lat_rest)) / tau
+        if self._lat_rest is None:
+            self._lat_rest = 0.0
+        delta = now - float(self._lat_rest)
+        self.last_lat_delta = float(delta)
         n = max(1, int(getattr(p, "threat_integrate_steps", 8)))
-        if self.last_rise < float(p.dnp01_rearm_delta_hz):
+        if self.last_rise < float(p.dnp01_rearm_delta_hz) and not expanding:
             self._lat_hist = []
             self._lat_sign_hist = []
             self._peak_lc4_L = 0.0
             self._peak_lc4_R = 0.0
             self._loom_threat = ""
             self.last_lock_step = None
-        if self.last_rise >= 0.08:
+        if self.last_rise >= 0.08 or expanding:
             self._peak_lc4_L = max(self._peak_lc4_L, max(0.0, float(ro.lc4_L)))
             self._peak_lc4_R = max(self._peak_lc4_R, max(0.0, float(ro.lc4_R)))
-        w = max(float(self.last_rise), 0.0) if self.last_rise >= 0.08 else 0.0
-        self._lat_hist.append((now, w))
+        w = max(float(self.last_rise), float(self.last_vpn_amp), 0.0) if (self.last_rise >= 0.08 or expanding) else 0.0
+        self._lat_hist.append((delta, w))
         if len(self._lat_hist) > n:
             self._lat_hist.pop(0)
         den = float(sum(wt for _, wt in self._lat_hist))
         if den > 1e-6:
             integ = float(sum(lat * wt for lat, wt in self._lat_hist) / den)
         else:
-            integ = float(np.mean([lat for lat, _ in self._lat_hist])) if self._lat_hist else now
+            integ = float(np.mean([lat for lat, _ in self._lat_hist])) if self._lat_hist else delta
         self.last_lat_integrated = integ
-        if self.last_rise >= 0.08:
-            sgn = 1 if now > 1e-6 else (-1 if now < -1e-6 else 0)
+        if self.last_rise >= 0.08 or expanding:
+            sgn = 1 if delta > 1e-6 else (-1 if delta < -1e-6 else 0)
             self._lat_sign_hist.append(int(sgn))
             keep = max(4, int(getattr(p, "threat_lock_consistent", 4)))
             if len(self._lat_sign_hist) > keep + 2:
@@ -297,14 +390,12 @@ class DNFlightController:
                 and tail[0] != 0
                 and all(s == tail[0] for s in tail)
             )
-            lock_rise = float(getattr(p, "threat_lock_rise_hz", 0.16))
+            lock_rise = float(getattr(p, "threat_lock_rise_hz", 0.12))
             lat_min = float(p.dnp01_loom_lat_min)
-            # Rise-weighted integ + a run of the same sign. First-sample
-            # lock was self-motion / yaw-into-object, not the loom.
             if (
                 not self._loom_threat
                 and consistent
-                and self.last_rise >= lock_rise
+                and (self.last_rise >= lock_rise or expanding)
                 and abs(integ) >= lat_min
             ):
                 self._loom_threat = "L" if integ > 0.0 else "R"
@@ -390,15 +481,29 @@ class DNFlightController:
             slope = float(rise)
         # Sticky steep during this climb (rise ≥ 0.08). Open-space false
         # fires are blocked by laterality, not by forgetting a real onset.
+        self._update_vpn(ro)
+        expanding = self._vpn_expanding()
+        vpn_ok = True if self._base is None else expanding
+        if self.params.use_engineered_eye_laterality:
+            vpn_ok = True
         steep_now = slope >= float(getattr(p, "dnp01_slope_min", 0.0))
         if steep_now and rise >= 0.08:
             self._steep_climb = True
-        if rise < float(p.dnp01_rearm_delta_hz):
+        if expanding and rise >= float(getattr(p, "dnp01_vpn_delta_hz", 0.12)):
+            self._steep_climb = True
+        vpn_delta = float(getattr(p, "dnp01_vpn_delta_hz", 0.12))
+        fire_delta = float(p.dnp01_escape_delta_hz)
+        if expanding:
+            fire_delta = min(fire_delta, vpn_delta)
+        if rise < float(p.dnp01_rearm_delta_hz) and not expanding:
             self._escape_armed = True
             self._rise_hold = 0
             self._steep_climb = False
             self._steep_hist = []
-        if rise >= p.dnp01_escape_delta_hz:
+        # Hold counts time above the early GF bar so a climb that only
+        # becomes "expanding" on frame 4 still has a 4-step hold.
+        hold_bar = float(getattr(p, "dnp01_vpn_delta_hz", 0.10))
+        if rise >= hold_bar:
             self._rise_hold += 1
         else:
             self._rise_hold = 0
@@ -414,8 +519,9 @@ class DNFlightController:
         lat_ok = True
         if self._base is not None and not p.use_engineered_eye_laterality:
             lat_min = float(p.dnp01_loom_lat_min)
-            same = (self.last_lat_now * lat_int) > 0.0 or abs(self.last_lat_now) < 0.5 * lat_min
-            lat_ok = (abs(lat_int) >= lat_min and same) or bool(self._loom_threat)
+            # Residual L DC is in lat_rest; only a laterality *rise* counts.
+            same = (self.last_lat_delta * lat_int) > 0.0 or abs(self.last_lat_delta) < 0.5 * lat_min
+            lat_ok = abs(lat_int) >= lat_min and same and vpn_ok
         would_fire = (
             warmed
             and post_base
@@ -423,7 +529,8 @@ class DNFlightController:
             and lat_ok
             and self._steep_climb
             and self._escape_armed
-            and rise >= p.dnp01_escape_delta_hz
+            and rise >= fire_delta
+            and vpn_ok
         )
         if would_fire:
             self.would_fire_count += 1
@@ -541,6 +648,10 @@ class DNFlightController:
             "engineered_escapes": float(self.engineered_escape_count),
             "would_fire": float(self.would_fire_count),
             "lat_integrated": float(self.last_lat_integrated),
+            "lat_delta": float(self.last_lat_delta),
+            "lat_rest": float(self._lat_rest or 0.0),
+            "vpn_amp": float(self.last_vpn_amp),
+            "vpn_slope": float(self.last_vpn_slope),
             "loom_threat": 1.0 if self._loom_threat == "L" else (-1.0 if self._loom_threat == "R" else 0.0),
             "peak_lc4_L": float(self._peak_lc4_L),
             "peak_lc4_R": float(self._peak_lc4_R),

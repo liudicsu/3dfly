@@ -47,13 +47,27 @@ class FlightParams:
     dnp01_escape_delta_hz: float = 0.20
     # Re-arm only after rise falls below this (rising-edge).
     dnp01_rearm_delta_hz: float = 0.12
+    # GF is LC4/LPLC2-driven: allow a lower DNp01 bar when looming VPNs climb
+    # so the burst can sit in the 40–60° angular-size window.
+    dnp01_vpn_delta_hz: float = 0.12
     # Genuine close is steep (≈0.016–0.025 Hz/step). Open wander is ≈0.009.
     dnp01_slope_min: float = 0.012
     # Threat from the mean L−R over the rise, not the fire instant.
     threat_integrate_steps: int = 10
     # Do not lock side on the first noisy sample (self-motion / early yaw).
     threat_lock_consistent: int = 4
-    threat_lock_rise_hz: float = 0.16
+    threat_lock_rise_hz: float = 0.12
+    # Standing L−R DC (self-motion / residual LC4_L) is tracked as rest.
+    # Only laterality *above* that rest is a loom.
+    lat_rest_tau_steps: float = 25.0
+    # Ipsilateral LC4/LPLC2 must expand. Residual DC has slope ≈ 0.
+    # Closed-loop object LC4 is ~0.1 and rises slowly (hex-mean dilution);
+    # 0.005 Hz/step is a real expansion, 0.012 only caught the last 80° jump.
+    vpn_amp_min: float = 0.28
+    vpn_slope_min: float = 0.015
+    # Kept for experiments. Official path does not subtract |HSE| from
+    # VPN: HS tracks the loom itself and would hide 40–60° expansion.
+    vpn_hse_gate: float = 0.0
     # Slow rest: eats the 16-step settle climb, keeps a 1 s compact loom.
     dnp01_rest_tau_steps: float = 100.0
     dnp01_freeze_rest: bool = True
@@ -151,11 +165,11 @@ class FlightParams:
 
     notes: Dict[str, str] = field(default_factory=lambda: {
         "escape": (
-            "DNp01 rise ≥ 0.20 Hz over frozen post-settle rest AND recent "
-            "slope ≥ 0.012 Hz/step AND rise-weighted DNp03/LC4 laterality "
-            "(consistent-sign lock, not first sample); course DNa02/HS "
-            "frozen during the climb so we do not yaw into the object; "
-            "one ≥80-step past-peak prewarm; right-eye hex U-flip; stride 2"
+            "DNp01 rise ≥ 0.20 Hz, or ≥ 0.12 Hz while LC4/LPLC2 expand "
+            "(biological GF at 40–60°); laterality and VPN are rises over "
+            "a slow rest so residual left DC / self-motion cannot fire; "
+            "HS-orthogonal VPN; p90 LC4/LPLC2; T4/T5 handoff gain; "
+            "consistent-sign lock; course frozen; U-flip; stride 2"
         ),
         "dnp03": (
             "DNp03 + LC4/LPLC ipsilateral L−R after per-side baseline → "
@@ -171,7 +185,10 @@ class FlightParams:
         "camera": "40° outward cant, 120° FOV; right-eye hex U-flip (X-mirror)",
         "geometry": (
             "Lateral |az|≥30° at rise onset must turn away; frontal GF "
-            "must escape/brake without turning into the object"
+            "must escape/brake without turning into the object. "
+            "Report angular_size_fire_deg. flyvis LC4/LPLC2/DNp01 stay "
+            "near rest until ~80° of disk on 120° hex (real GF 40–60°); "
+            "amplifying T4/T5 to chase 40° also fires no-object room flow"
         ),
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })

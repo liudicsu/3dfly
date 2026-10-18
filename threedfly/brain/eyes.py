@@ -90,6 +90,6 @@ def stereo_to_hex(
     return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv_r)
 
 
-def mirror_stereo_images(left_img: np.ndarray, right_img: np.ndarray):
-    """Mirror the scene: swap eyes and flip each image left–right."""
-    return np.fliplr(np.asarray(right_img)), np.fliplr(np.asarray(left_img))
+# Image swap+fliplr is *not* a rendered world-mirror: the right camera is
+# already X-mirrored and stereo_to_hex U-flips. Use a real mirrored object
+# (test_open_loop_mirrored_object_flips_dns) for laterality.
