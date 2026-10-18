@@ -238,3 +238,46 @@ def test_brain_panel_and_assets_http_routes():
         assert raised, "traversal should 404"
     finally:
         srv.stop()
+
+
+def test_dashboard_panels_static_served():
+    import urllib.request
+    from threedfly.stream.builder import FrameBuilder
+    from threedfly.stream.server import BrainStreamServer
+
+    fb = FrameBuilder(n_neurons=8, include_eye_layout=False)
+    srv = BrainStreamServer(host="127.0.0.1", port=0, max_hz=30).start()
+    try:
+        srv.set_hello(fb.hello())
+        base = f"http://127.0.0.1:{srv.port}"
+        js = urllib.request.urlopen(base + "/dashboard_panels.js", timeout=5).read()
+        assert b"DashboardPanels" in js
+        assert b"hexLattice" in js
+        html = urllib.request.urlopen(base + "/brain", timeout=5).read()
+        assert b"dashboard_panels.js" in html
+        assert b"eyeL" in html and b"PATHWAY" in html
+    finally:
+        srv.stop()
+
+
+def test_hex_lattice_extent15_is_721():
+    """Mirror dashboard_panels.js hexLattice(15) — flyvis hex count."""
+    extent = 15
+    n = 0
+    for u in range(-extent, extent + 1):
+        for v in range(max(-extent, -u - extent), min(extent, -u + extent) + 1):
+            n += 1
+    assert n == 721
+    assert n == 3 * extent * (extent + 1) + 1
+
+
+def test_dashboard_panels_js_hex_and_flow_constants():
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "threedfly/stream/static/dashboard_panels.js").read_text()
+    assert "export function hexLattice" in js
+    assert "export class DashboardPanels" in js
+    assert "FLOW_NODES" in js and "DNp01" in js and "wings" in js
+    assert "DN_SERIES" in js and "HEAT_GROUPS" in js
+    assert "drawEye" in js and "drawFlow" in js and "drawDN" in js
+    assert "drawHeat" in js and "drawTimeline" in js

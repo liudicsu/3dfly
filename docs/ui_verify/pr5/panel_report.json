@@ -1,0 +1,17 @@
+{
+  "pr": 5,
+  "title": "dashboard panels: hex eyes, pathway, DN traces, heatmap, timeline",
+  "branch": "ui/pr5-dashboard-panels",
+  "files": {
+    "dashboard_panels.js": "Canvas2D panels consuming protocol-v1 sections",
+    "brain_panel.html": "wires DashboardPanels into /brain layout"
+  },
+  "screenshots": {
+    "eyes.png": "L/R hex eye maps (721 hex each) from EYE_L/EYE_R",
+    "flow.png": "signal-flow eyes\u2192T4/T5\u2192LPLC2/LC4\u2192DNs\u2192wings",
+    "dn_traces.png": "DN/LPLC2 Hz traces with escape markers",
+    "dashboard_side.png": "full side column (eyes+flow+DN+heatmap+controls)"
+  },
+  "verify": "replayed output/ui_verify/pr2/live_frames.bin via scripts/stream_replay.py; headless Chromium screenshots",
+  "note": "Heatmap + timeline live in the same page; timeline sits under the 3D view."
+}
