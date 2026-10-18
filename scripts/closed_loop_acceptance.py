@@ -1128,13 +1128,14 @@ def main(argv=None) -> int:
             ),
             "known_limitations": (
                 "No sim object pose/radius reaches stereo_to_hex or the "
-                "controller (rendered pixels + 5° FWHM Gaussian + p80 "
-                "luminance shift only). Camera-vs-hex at az=35° l/v=0.04 "
-                "without paint: disc 0.11/0.10/0.09 vs 0.00; LPLC2 peak "
-                "err 25%; DNp01 peak 0.37 vs 1.72, 0.20 onset 175° vs 62°. "
-                "Gray-hex DNp01 L−R is 0.0004 (brain, not eye mask). "
-                "150° eyes see room walls as expanding texture — that is "
-                "the walls/no-object leftover, not a hidden oracle."
+                "controller. Factorial (still fly, az 35°, l/v 0.04): "
+                "A gray room DNp01 −0.02 (washed disc 0.41); B checkers "
+                "0.37 onset 175°; C +cruise 0.44; D hard hex on B's "
+                "bg/std 1.60 onset 90°; hex_ref 1.72 onset 62°. Soft "
+                "camera disc, not checkers or self-motion. flyvis p80+"
+                "gain 1.35, 1/f walls, bilateral (both-eye) climb → "
+                "brake. Walls 0.25/100 (was 5.25). Frontolat laterality "
+                "and no-object 4/6 remain."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
