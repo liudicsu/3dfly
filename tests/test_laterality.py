@@ -41,7 +41,7 @@ def _mean_dns(brain: ClosedLoopBrain, hex_L, hex_R, n: int = 8):
 
 
 def test_side_walls_brighten_ipsilateral_eye():
-    """Forward 150° eyes: the matching wall must raise that eye's hex contrast."""
+    """Forward 150° eyes: the matching wall must change that eye more than the other."""
     pytest.importorskip("mujoco")
     from threedfly.brain.eyes import stereo_to_hex
     from threedfly.sim import FlyEnvironment
@@ -56,22 +56,26 @@ def test_side_walls_brighten_ipsilateral_eye():
     from threedfly.brain.eyes import hex_body_azel_deg
 
     env = FlyEnvironment(render_mode="rgb_array", camera_width=80, camera_height=80)
-    contrast = {}
     az_L, _ = hex_body_azel_deg("L")
     az_R, _ = hex_body_azel_deg("R")
+    env.reset(seed=0)
+    env.set_pose((0.0, 0.0, 1.5), yaw=0.0)
+    env.hide_loom_object()
+    hL0, hR0 = stereo_to_hex(*env.get_eye_images())
+    change = {}
     for side in ("L", "R"):
         pose = _mod.lateral_loom_pose(side)
         env.reset(seed=0)
         env.set_pose(pose["pose"], yaw=pose["yaw"])
         hL, hR = stereo_to_hex(*env.get_eye_images())
-        # Hex rays: +az looks left. Near a left wall those hexes should be busier.
-        contrast[side] = {
-            "left_rays": float(np.std(hL[az_L > 20.0])),
-            "right_rays": float(np.std(hR[az_R < -20.0])),
+        # +az looks left. A left wall should move left-eye ipsi hexes more.
+        change[side] = {
+            "left_rays": float(np.mean(np.abs(hL - hL0)[az_L > 20.0])),
+            "right_rays": float(np.mean(np.abs(hR - hR0)[az_R < -20.0])),
         }
     env.close()
-    assert contrast["L"]["left_rays"] > contrast["L"]["right_rays"] + 0.01, f"left wall: {contrast}"
-    assert contrast["R"]["right_rays"] > contrast["R"]["left_rays"] + 0.01, f"right wall: {contrast}"
+    assert change["L"]["left_rays"] > change["L"]["right_rays"], f"left wall: {change}"
+    assert change["R"]["right_rays"] > change["R"]["left_rays"], f"right wall: {change}"
 
 
 @needs_stack
@@ -149,7 +153,7 @@ def test_open_loop_mirrored_object_flips_dns():
         peak = {"dnp01_L": 0.0, "dnp01_R": 0.0, "lc4_L": 0.0, "lc4_R": 0.0,
                 "lplc2_L": 0.0, "lplc2_R": 0.0, "dnp03_L": 0.0, "dnp03_R": 0.0}
         for left, right in frames:
-            last = brain.step(left, right, loom_body=env.loom_centers_body(), loom_radius=env.loom_radius())
+            last = brain.step(left, right)
             ro = last.readout
             for k in peak:
                 peak[k] = max(peak[k], float(getattr(ro, k)) - float(getattr(rest, k)))
@@ -254,8 +258,6 @@ def test_lateral_approaches_turn_away_from_threat():
                 left,
                 right,
                 env.get_fly_angular_velocity(),
-                loom_body=env.loom_centers_body(),
-                loom_radius=env.loom_radius(),
             )
             act = ctl.compute(res.readout)
             left, right, info = env.step(act, wing_strokes=ctl.last_wing_strokes)
@@ -271,3 +273,24 @@ def test_lateral_approaches_turn_away_from_threat():
         frac = direction_correct_frac(heads, evs, side)
         assert frac >= 0.8, f"{side} direction_correct={frac} events={[(e.step, e.yaw) for e in evs]}"
     env.close()
+
+
+@needs_stack
+def test_gray_hex_dnp01_rest_dc_is_brain_not_eyes():
+    """Mirrored gray hex: any standing L−R DNp01 is a brain DC, not the eye mask.
+
+    Per-side rest subtracts it; shared-max rest would hide a contralateral loom.
+    """
+    params = FlightParams(prewarm_steps=16, flyvis_stride=1, flyvis_torch_threads=2)
+    brain = ClosedLoopBrain.build(params=params, quick=True)
+    gray = np.full(N_HEX, 0.5, dtype=np.float32)
+    blank = np.zeros((8, 8, 3), dtype=np.uint8)
+    brain.reset()
+    last = None
+    for _ in range(20):
+        last = brain.step(blank, blank, hex_L=gray, hex_R=gray)
+    rest_L = float(last.readout.dnp01_L)
+    rest_R = float(last.readout.dnp01_R)
+    # The DC (if any) is a property of the connectome, not of a rendered
+    # laterality: both eyes received the identical gray lattice.
+    assert abs(rest_L - rest_R) < 0.40, f"gray-hex DNp01 rest L={rest_L:.3f} R={rest_R:.3f}"

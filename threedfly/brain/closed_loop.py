@@ -232,17 +232,11 @@ class ClosedLoopBrain:
         angular_velocity: Optional[np.ndarray] = None,
         hex_L: Optional[np.ndarray] = None,
         hex_R: Optional[np.ndarray] = None,
-        loom_body=None,
-        loom_radius: Optional[float] = None,
     ) -> BrainStep:
         t0 = time.perf_counter()
         if hex_L is None or hex_R is None:
-            hex_L, hex_R = stereo_to_hex(
-                left_img,
-                right_img,
-                loom_body=loom_body,
-                loom_radius=0.58 if loom_radius is None else float(loom_radius),
-            )
+            # Rendered pixels only. No mocap / object pose / radius.
+            hex_L, hex_R = stereo_to_hex(left_img, right_img)
         t1 = time.perf_counter()
         stride = max(1, int(getattr(self.params, "flyvis_stride", 1)))
         flyvis_ran = self._flyvis_hold is None or (self.n_steps % stride) == 0

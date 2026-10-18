@@ -165,9 +165,11 @@ class FlightParams:
 
     notes: Dict[str, str] = field(default_factory=lambda: {
         "escape": (
-            "DNp01 rise ≥ 0.20 Hz, or ≥ 0.12 Hz while LC4/LPLC2 expand "
-            "(biological GF at 40–60°); laterality and VPN are rises over "
-            "a slow rest so residual left DC / self-motion cannot fire; "
+            "DNp01 rise = max(L−rest_L, R−rest_R) ≥ 0.20 Hz, or ≥ 0.12 Hz "
+            "while LC4/LPLC2 expand (biological GF at 40–60°); laterality "
+            "and VPN are rises over a slow rest so residual left DC / "
+            "self-motion cannot fire; course freeze only on a lateral "
+            "DNp01 climb (bilateral wall keeps HS); "
             "HS-orthogonal VPN; p90 LC4/LPLC2; T4/T5 handoff gain; "
             "consistent-sign lock; course frozen; U-flip; stride 2"
         ),
@@ -183,11 +185,11 @@ class FlightParams:
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",
         "camera": (
-            "Forward 150° square-FOV cameras; each hex samples its body-frame "
-            "ray (lattice centre = frontal). Each eye is masked to the "
-            "Drosophila envelope (−15°…+170° ipsilateral, ~15° overlap) so "
-            "frontolat 20–70° is monocular. Rays that hit the loom sphere "
-            "paint that hex black (hard edge; full-field dark once inside). "
+            "Forward 150° square-FOV cameras; each hex averages a 5° FWHM "
+            "Gaussian acceptance lobe over rendered pixels (lattice centre "
+            "= frontal). Drosophila envelope (−15°…+170° ipsilateral, ~15° "
+            "overlap). Background-percentile luminance → flyvis gray=0.5. "
+            "Eye input is rendered pixels only — no sim object pose/radius. "
             "No U-flip, no 40° cant."
         ),
         "geometry": (

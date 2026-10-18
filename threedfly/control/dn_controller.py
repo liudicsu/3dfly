@@ -1,11 +1,12 @@
 """Map coreTplus DN readouts to the 5-vector flight action.
 
-Escape is a DNp01 *rise* over a calibrated rest taken after flyvis/brain
-warmup — not an absolute 12 Hz gate and not a moving EMA that eats slow
-looms. Direction during the burst comes from baseline-subtracted DNp03
+Escape is a DNp01 *rise* over a calibrated *per-side* rest taken after
+flyvis/brain warmup — rise = max(L−rest_L, R−rest_R), never
+max(L,R) − shared rest (an L DC would hide a right-side loom).
+Direction during the burst comes from baseline-subtracted DNp03
 (contralateral turn). Steering is DNa02 + DNp15 L−R plus continuous DNp03,
 each tanh-normalised to its M1 peak-delta scale. Thrust is DNg02 mean(L, R)
-only — no DNg02 yaw.
+only — no DNg02 yaw. No sim object pose/radius is read here.
 """
 
 from __future__ import annotations
@@ -49,6 +50,8 @@ class DNFlightController:
         self.would_fire_count = 0
         self.dnp01_prev = 0.0
         self.dnp01_rest: Optional[float] = None
+        self.dnp01_rest_L: Optional[float] = None
+        self.dnp01_rest_R: Optional[float] = None
         self.steps = 0
         self.dnp01_latch_steps = 0
         self.escape_events: List[EscapeEvent] = []
@@ -56,6 +59,8 @@ class DNFlightController:
         self._last_readout = DNReadout()
         self._base: Optional[DNReadout] = None
         self._warmup: List[float] = []
+        self._warmup_L: List[float] = []
+        self._warmup_R: List[float] = []
         self.last_rise = 0.0
         self._escape_armed = True
         self._baseline_step: Optional[int] = None
@@ -96,12 +101,16 @@ class DNFlightController:
         self.would_fire_count = 0
         self.dnp01_prev = 0.0
         self.dnp01_rest = None
+        self.dnp01_rest_L = None
+        self.dnp01_rest_R = None
         self.steps = 0
         self.dnp01_latch_steps = 0
         self.escape_events.clear()
         self._last_threat = ""
         self._base = None
         self._warmup.clear()
+        self._warmup_L.clear()
+        self._warmup_R.clear()
         self.last_rise = 0.0
         self._escape_armed = True
         self._baseline_step = None
@@ -132,10 +141,15 @@ class DNFlightController:
         """Snapshot per-side DN rest after brain/flyvis pre-warm."""
         self._base = replace(readout)
         if dnp01_rest is None:
-            self.dnp01_rest = max(float(readout.dnp01_L), float(readout.dnp01_R))
+            self.dnp01_rest_L = float(readout.dnp01_L)
+            self.dnp01_rest_R = float(readout.dnp01_R)
         else:
-            self.dnp01_rest = float(dnp01_rest)
+            self.dnp01_rest_L = float(dnp01_rest)
+            self.dnp01_rest_R = float(dnp01_rest)
+        self.dnp01_rest = max(float(self.dnp01_rest_L), float(self.dnp01_rest_R))
         self._warmup.clear()
+        self._warmup_L.clear()
+        self._warmup_R.clear()
         self._baseline_step = int(self.steps)
         self._rise_hold = 0
         self._escape_armed = True
@@ -226,8 +240,10 @@ class DNFlightController:
     def _steer_yaw(self, ro: DNReadout) -> float:
         t = self._steer_terms(ro)
         # Course terms (DNa02/DNp15/HS) can yaw the fly INTO a side loom
-        # before DNp01 fires, flipping laterality. Freeze them on a climb.
-        if self.last_rise >= 0.08:
+        # before DNp01 fires. Freeze them only on a *lateral* climb — a
+        # bilateral wall loom must keep HS / DNa02 so the fly can turn.
+        freeze = self.last_rise >= 0.08 and self._lateral_dnp01_climb()
+        if freeze:
             t["dna02"] = 0.0
             t["dnp15"] = 0.0
             t["hse"] = 0.0
@@ -235,7 +251,7 @@ class DNFlightController:
         if abs(yaw) < float(getattr(self.params, "steer_deadzone", 0.0)):
             yaw = 0.0
         t["steer"] = float(yaw)
-        t["course_frozen"] = 1.0 if self.last_rise >= 0.08 else 0.0
+        t["course_frozen"] = 1.0 if freeze else 0.0
         self.last_yaw_terms = t
         return float(yaw)
 
@@ -426,22 +442,56 @@ class DNFlightController:
             return "R"
         return ""
 
-    def _update_rest(self, dnp01: float) -> float:
+    def _side_rest(self, side: str) -> float:
+        if side == "L" and self.dnp01_rest_L is not None:
+            return float(self.dnp01_rest_L)
+        if side == "R" and self.dnp01_rest_R is not None:
+            return float(self.dnp01_rest_R)
+        return float(self.dnp01_rest or 0.0)
+
+    def _dnp01_rises(self, readout: DNReadout) -> tuple[float, float]:
+        return (
+            float(readout.dnp01_L) - self._side_rest("L"),
+            float(readout.dnp01_R) - self._side_rest("R"),
+        )
+
+    def _lateral_dnp01_climb(self, readout: Optional[DNReadout] = None) -> bool:
+        """True when one eye's DNp01 rise exceeds the other by the climb bar.
+
+        Shared-max rest hid a contralateral loom behind an L DC. The same
+        definition — per-side rise — tells a side loom from a bilateral
+        wall: freeze course only when the climb is one-sided.
+        """
+        ro = readout if readout is not None else self._last_readout
+        rise_L, rise_R = self._dnp01_rises(ro)
+        return abs(float(rise_L) - float(rise_R)) >= 0.08
+
+    def _update_rest(self, dnp01_L: float, dnp01_R: float) -> float:
         p = self.params
         warm_n = int(p.dnp01_warmup_steps)
-        if self.dnp01_rest is None and self.steps < warm_n:
-            self._warmup.append(float(dnp01))
+        if self.dnp01_rest_L is None and self.steps < warm_n:
+            self._warmup_L.append(float(dnp01_L))
+            self._warmup_R.append(float(dnp01_R))
+            self._warmup.append(max(float(dnp01_L), float(dnp01_R)))
             return 0.0
-        if self.dnp01_rest is None:
-            if self._warmup:
-                tail = self._warmup[-min(8, len(self._warmup)) :]
-                self.dnp01_rest = float(np.mean(tail))
+        if self.dnp01_rest_L is None:
+            if self._warmup_L:
+                n = min(8, len(self._warmup_L))
+                self.dnp01_rest_L = float(np.mean(self._warmup_L[-n:]))
+                self.dnp01_rest_R = float(np.mean(self._warmup_R[-n:]))
             else:
-                self.dnp01_rest = float(dnp01)
-        rise = float(dnp01) - float(self.dnp01_rest)
+                self.dnp01_rest_L = float(dnp01_L)
+                self.dnp01_rest_R = float(dnp01_R)
+            self.dnp01_rest = max(float(self.dnp01_rest_L), float(self.dnp01_rest_R))
+        rise = max(
+            float(dnp01_L) - float(self.dnp01_rest_L),
+            float(dnp01_R) - float(self.dnp01_rest_R),
+        )
         if (not p.dnp01_freeze_rest) and self.escape_timer <= 0:
             tau = max(float(p.dnp01_rest_tau_steps), 1.0)
-            self.dnp01_rest += (float(dnp01) - float(self.dnp01_rest)) / tau
+            self.dnp01_rest_L += (float(dnp01_L) - float(self.dnp01_rest_L)) / tau
+            self.dnp01_rest_R += (float(dnp01_R) - float(self.dnp01_rest_R)) / tau
+            self.dnp01_rest = max(float(self.dnp01_rest_L), float(self.dnp01_rest_R))
         return rise
 
     def compute(
@@ -458,17 +508,22 @@ class DNFlightController:
         if dnp01_raw >= p.rate_cap_hz - p.latch_eps_hz:
             self.dnp01_latch_steps += 1
 
-        if self.dnp01_rest is not None:
-            rise = dnp01_raw - float(self.dnp01_rest)
+        if self.dnp01_rest_L is not None and self.dnp01_rest_R is not None:
+            rise_L, rise_R = self._dnp01_rises(readout)
+            rise = max(float(rise_L), float(rise_R))
             if (not p.dnp01_freeze_rest) and self.escape_timer <= 0:
                 tau = max(float(p.dnp01_rest_tau_steps), 1.0)
-                self.dnp01_rest += (dnp01_raw - float(self.dnp01_rest)) / tau
+                self.dnp01_rest_L += (float(readout.dnp01_L) - float(self.dnp01_rest_L)) / tau
+                self.dnp01_rest_R += (float(readout.dnp01_R) - float(self.dnp01_rest_R)) / tau
+                self.dnp01_rest = max(float(self.dnp01_rest_L), float(self.dnp01_rest_R))
         elif self._base is not None:
-            rise = max(float(ro.dnp01_L), float(ro.dnp01_R))
-            self.dnp01_rest = dnp01_raw
-            rise = 0.0
+            self.dnp01_rest_L = float(self._base.dnp01_L)
+            self.dnp01_rest_R = float(self._base.dnp01_R)
+            self.dnp01_rest = max(float(self.dnp01_rest_L), float(self.dnp01_rest_R))
+            rise_L, rise_R = self._dnp01_rises(readout)
+            rise = max(float(rise_L), float(rise_R))
         else:
-            rise = self._update_rest(dnp01_raw)
+            rise = self._update_rest(float(readout.dnp01_L), float(readout.dnp01_R))
         self.last_rise = float(rise)
         self._d01_hist.append(float(dnp01_raw))
         if len(self._d01_hist) > 8:
@@ -657,6 +712,8 @@ class DNFlightController:
             "peak_lc4_R": float(self._peak_lc4_R),
             "dnp01": float(max(ro.dnp01_L, ro.dnp01_R)),
             "dnp01_rest": float(self.dnp01_rest or 0.0),
+            "dnp01_rest_L": float(self.dnp01_rest_L or 0.0),
+            "dnp01_rest_R": float(self.dnp01_rest_R or 0.0),
             "dnp01_rise": float(self.last_rise),
             "dnp03_L": float(ro.dnp03_L),
             "dnp03_R": float(ro.dnp03_R),

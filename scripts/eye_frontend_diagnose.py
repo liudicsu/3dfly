@@ -3,6 +3,7 @@
 
 1. Coverage map: each hex's body-frame az/el (new rays vs legacy 40°/120° pack).
 2. Same frontolat loom (az 35°, l/v 0.04): hex disc vs 3D camera→hex at 20/40/60°.
+   Camera path is rendered pixels only (Gaussian accept + luminance). No paint.
 
     python scripts/eye_frontend_diagnose.py --output output/m2
 """
@@ -133,9 +134,7 @@ def camera_hex_at_size(env, az_deg: float, ang_deg: float, fly_xyz=(0.0, 0.0, 1.
     pos[1] += d * np.sin(az)
     env.set_loom_object(pos)
     left, right = env.get_eye_images()
-    hL, hR = stereo_to_hex(
-        left, right, loom_body=env.loom_centers_body(), loom_radius=env.loom_radius()
-    )
+    hL, hR = stereo_to_hex(left, right)
     return hL, hR, left, right, pos, d
 
 
@@ -242,11 +241,7 @@ def build_camera_movie(env, az_deg: float, lv: float, dist0: float, dt: float, p
     vel = np.array([-speed * np.cos(az), -speed * np.sin(az), 0.0], dtype=float)
     for i in range(n):
         env.set_loom_object(pos)
-        hL, hR = stereo_to_hex(
-            *env.get_eye_images(),
-            loom_body=env.loom_centers_body(),
-            loom_radius=env.loom_radius(),
-        )
+        hL, hR = stereo_to_hex(*env.get_eye_images())
         hex_L.append(hL)
         hex_R.append(hR)
         theta.append(angular_size_deg(float(np.linalg.norm(pos[:2]))))
@@ -320,6 +315,24 @@ def main(argv=None) -> int:
     print("Building brain…", flush=True)
     brain = ClosedLoopBrain.build(params=params)
     brain.params.flyvis_stride = 1
+    from threedfly.brain.constants import N_HEX as _N
+
+    dummy = np.zeros((8, 8, 3), dtype=np.uint8)
+    g = np.full(_N, 0.5, dtype=np.float32)
+    brain.reset()
+    last = None
+    for _ in range(20):
+        last = brain.step(dummy, dummy, hex_L=g, hex_R=g)
+    rest_dc = {
+        "gray_hex_dnp01_L": float(last.readout.dnp01_L),
+        "gray_hex_dnp01_R": float(last.readout.dnp01_R),
+        "gray_hex_dnp01_L_minus_R": float(last.readout.dnp01_L) - float(last.readout.dnp01_R),
+        "note": (
+            "Identical gray hex on both eyes. Any L−R is a brain DC; "
+            "rise uses per-side rest so it cannot hide a contralateral loom."
+        ),
+    }
+    print("  rest DC (gray hex)", rest_dc, flush=True)
     env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
     env.reset(seed=0)
     env.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
@@ -397,7 +410,14 @@ def main(argv=None) -> int:
 
     plot_compare(frames, traces, out / "hex_vs_camera.png")
     env.close()
-    payload = {"coverage": cov, "onsets": onsets, "frame_stats": frame_stats, "match": match}
+    payload = {
+        "coverage": cov,
+        "onsets": onsets,
+        "frame_stats": frame_stats,
+        "match": match,
+        "rest_dc": rest_dc,
+        "painted": False,
+    }
     (out / "eye_frontend.json").write_text(json.dumps(payload, indent=2))
     print(f"wrote {out / 'eye_coverage.png'} {out / 'hex_vs_camera.png'}", flush=True)
     return 0

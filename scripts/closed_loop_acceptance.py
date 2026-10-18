@@ -288,8 +288,6 @@ def _run_scenario(
             left_img,
             right_img,
             env.get_fly_angular_velocity(),
-            loom_body=env.loom_centers_body(),
-            loom_radius=env.loom_radius(),
         )
         action = ctl.compute(res.readout)
         left_img, right_img, info = env.step(action, wing_strokes=ctl.last_wing_strokes)

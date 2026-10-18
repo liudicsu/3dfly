@@ -1,5 +1,8 @@
 """Sample MuJoCo eye images onto the flyvis 721-hex lattice.
 
+Eye input is rendered pixels (or an explicit hex movie). No sim object
+pose, radius, or mocap state is read here.
+
 Each hex ommatidium has a body-frame direction taken from the flyvis
 lattice (``hex_degrees``). That lattice is the frontal ~150° of each eye;
 its origin is the binocular field, not the camera optical axis.
@@ -34,9 +37,10 @@ EYE_DOWN_DEG = 0.0
 BIO_AZ_CONTRA_DEG = 15.0
 BIO_AZ_IPSI_DEG = 170.0
 UNSEEN_GRAY = 0.5
-# Must match threedfly/sim/mjcf.py loom_geom radius.
-LOOM_RADIUS_M = 0.58
-LOOM_HEX = 0.0
+# Drosophila acceptance angle Δρ ≈ 5° FWHM (Stavenga / Land). σ = FWHM / 2.355.
+ACCEPT_FWHM_DEG = 5.0
+ACCEPT_SIGMA_DEG = ACCEPT_FWHM_DEG / 2.35482004503
+ACCEPT_N = 5
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
@@ -185,6 +189,78 @@ def hex_camera_uv(
     return uv, valid & hex_in_bio_envelope(side, az)
 
 
+@lru_cache(maxsize=8)
+def hex_accept_uv(
+    side: str,
+    height: int,
+    width: int,
+    fovy_deg: float = EYE_FOVY_DEG,
+    sigma_deg: float = ACCEPT_SIGMA_DEG,
+    n_off: int = ACCEPT_N,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-hex Gaussian acceptance samples.
+
+    Returns ``(uv (N,K,2), sample_valid (N,K), weights (K,), hex_valid (N,))``.
+    Offsets are in body az/el degrees; no object geometry is used.
+    """
+    az, el = hex_body_azel_deg(side)
+    look, x_ax, y_ax = eye_camera_axes(side)
+    aspect = float(width) / max(float(height), 1.0)
+    sig = max(float(sigma_deg), 1e-3)
+    offs = np.linspace(-2.0 * sig, 2.0 * sig, int(n_off))
+    daz, del_ = np.meshgrid(offs, offs, indexing="xy")
+    daz = daz.ravel().astype(np.float32)
+    del_ = del_.ravel().astype(np.float32)
+    w = np.exp(-0.5 * (daz * daz + del_ * del_) / (sig * sig)).astype(np.float32)
+    az_s = az[:, None] + daz[None, :]
+    el_s = el[:, None] + del_[None, :]
+    uv, ok = project_dirs_to_uv(
+        azel_to_body_dir(az_s.ravel(), el_s.ravel()), look, x_ax, y_ax, fovy_deg, aspect
+    )
+    n_hex = int(az.size)
+    n_k = int(daz.size)
+    uv = uv.reshape(n_hex, n_k, 2)
+    ok = ok.reshape(n_hex, n_k)
+    hex_ok = hex_in_bio_envelope(side, az) & ok.any(axis=1)
+    return uv, ok, w, hex_ok
+
+
+def _sample_image_hex_weighted(
+    image: np.ndarray,
+    uv: np.ndarray,
+    sample_valid: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Gaussian-weighted bilinear samples. ``uv`` is (N, K, 2)."""
+    n, k, _ = uv.shape
+    samples = _sample_image_hex(image, uv.reshape(n * k, 2)).reshape(n, k)
+    w = np.asarray(weights, dtype=np.float32)[None, :] * np.asarray(sample_valid, dtype=np.float32)
+    den = w.sum(axis=1)
+    num = (samples * w).sum(axis=1)
+    out = np.full(n, UNSEEN_GRAY, dtype=np.float32)
+    good = den > 1e-8
+    out[good] = (num[good] / den[good]).astype(np.float32)
+    return out
+
+
+def _luminance_to_gray(hex_frame: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Map the rendered background to flyvis gray=0.5 (dark stays dark).
+
+    Two-point histogram stretch: p80 → 0.5, p5 stays below it. A growing
+    dark object must not become the background (median would). Floor the
+    span so a flat field is not amplified. Generic — no object geometry.
+    """
+    out = np.asarray(hex_frame, dtype=np.float32).copy()
+    m = np.asarray(valid, dtype=bool)
+    if np.count_nonzero(m) < 8:
+        return out
+    lo = float(np.percentile(out[m], 5.0))
+    bg = float(np.percentile(out[m], 80.0))
+    span = max(bg - lo, 0.12)
+    out[m] = np.clip((out[m] - bg) / span * UNSEEN_GRAY + UNSEEN_GRAY, 0.0, 1.0)
+    return out
+
+
 def hex_coverage(side: str) -> dict:
     """Body-frame az/el actually sampled by each hex (for plots / tests)."""
     az, el = hex_body_azel_deg(side)
@@ -237,65 +313,6 @@ def legacy_packed_azel_deg(
     return az.astype(np.float32), el.astype(np.float32), uv
 
 
-def rays_hit_sphere(dirs: np.ndarray, center, radius: float) -> np.ndarray:
-    """True if a ray from the origin along *dirs* hits the sphere.
-
-    Origin inside the sphere counts as a hit on every ray (full-field dark).
-    """
-    d = np.asarray(dirs, dtype=float).reshape(-1, 3)
-    n = np.linalg.norm(d, axis=1, keepdims=True)
-    d = d / np.maximum(n, 1e-12)
-    c = np.asarray(center, dtype=float).reshape(3)
-    r = float(radius)
-    c2 = float(np.dot(c, c))
-    if c2 <= r * r:
-        return np.ones(d.shape[0], dtype=bool)
-    dc = d @ c
-    disc = dc * dc - (c2 - r * r)
-    return (disc >= 0.0) & (dc > 0.0)
-
-
-def angular_loom_mask(
-    side: str,
-    center,
-    radius: float = LOOM_RADIUS_M,
-    thmax_deg: float = 90.0,
-) -> np.ndarray:
-    """Hex-disc mask: ``hypot(az − az0, el − el0) ≤ θ/2``, θ = 2 atan(r/d) ≤ 90°.
-
-    Same geometry as ``stimuli.loom()``. Origin inside the sphere uses θ=90°.
-    """
-    az, el = hex_body_azel_deg(side)
-    c = np.asarray(center, dtype=float).reshape(3)
-    dist = float(np.linalg.norm(c))
-    if dist < 1e-6:
-        az0, el0, theta = 0.0, 0.0, float(thmax_deg)
-    else:
-        az0 = float(np.degrees(np.arctan2(c[1], c[0])))
-        el0 = float(np.degrees(np.arcsin(np.clip(c[2] / dist, -1.0, 1.0))))
-        theta = float(2.0 * np.degrees(np.arctan(float(radius) / dist)))
-        if dist <= float(radius):
-            theta = float(thmax_deg)
-        theta = min(theta, float(thmax_deg))
-    return (np.hypot(az - az0, el - el0) <= 0.5 * theta) & hex_in_bio_envelope(side, az)
-
-
-def paint_loom_rays(
-    hex_frame: np.ndarray,
-    side: str,
-    center,
-    radius: float = LOOM_RADIUS_M,
-    valid: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """Paint a hard dark disc on hexes that look at the loom (flyvis loom())."""
-    hit = angular_loom_mask(side, center, radius)
-    if valid is not None:
-        hit = hit & np.asarray(valid, dtype=bool)
-    out = np.asarray(hex_frame, dtype=np.float32).copy()
-    out[hit] = LOOM_HEX
-    return out
-
-
 def image_to_hex(
     image: np.ndarray,
     uv: Optional[np.ndarray] = None,
@@ -313,21 +330,28 @@ def image_to_hex(
     return samples.astype(np.float32)
 
 
+def _image_to_hex_accept(image: np.ndarray, side: str) -> np.ndarray:
+    """Sample one rendered eye through the ~5° Gaussian acceptance lobe."""
+    image = np.asarray(image)
+    h, w = int(image.shape[0]), int(image.shape[1])
+    uv, sample_ok, weights, hex_ok = hex_accept_uv(side, h, w)
+    hex_frame = _sample_image_hex_weighted(image, uv, sample_ok, weights)
+    hex_frame = np.where(hex_ok, hex_frame, UNSEEN_GRAY).astype(np.float32)
+    return _luminance_to_gray(hex_frame, hex_ok)
+
+
 def stereo_to_hex(
     left_img: np.ndarray,
     right_img: np.ndarray,
     uv: Optional[np.ndarray] = None,
-    loom_body=None,
-    loom_radius: float = LOOM_RADIUS_M,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Left and right MuJoCo eye images → (721,), (721,) hex frames.
+    """Left and right rendered eye images → (721,), (721,) hex frames.
 
-    Each hex samples its own body-frame ray through the matching camera
-    (inverse pinhole). Hexes outside the camera frustum stay mid-gray.
-
-    ``loom_body`` is the sphere centre in the body frame (or a pair of
-    per-eye centres). Hexes whose ray hits the sphere are painted black —
-    hard ommatidial edges, and full-field dark once the fly is inside.
+    Official path: each hex averages a 5° FWHM Gaussian acceptance lobe
+    over the rendered pixels, then valid hexes are shifted so the
+    background (80th percentile) sits at flyvis gray=0.5. Generic for
+    every geom (walls, object, sky). No sim object pose/radius is read
+    here — the camera image is the only scene input.
     """
     left_img = np.asarray(left_img)
     right_img = np.asarray(right_img)
@@ -338,21 +362,4 @@ def stereo_to_hex(
         uv_r = uv.copy()
         uv_r[:, 0] = 1.0 - uv_r[:, 0]
         return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv_r)
-    hL, wL = int(left_img.shape[0]), int(left_img.shape[1])
-    hR, wR = int(right_img.shape[0]), int(right_img.shape[1])
-    uv_L, ok_L = hex_camera_uv("L", hL, wL)
-    uv_R, ok_R = hex_camera_uv("R", hR, wR)
-    hex_L = image_to_hex(left_img, uv=uv_L, valid=ok_L)
-    hex_R = image_to_hex(right_img, uv=uv_R, valid=ok_R)
-    if loom_body is None:
-        return hex_L, hex_R
-    body = np.asarray(loom_body, dtype=float)
-    if body.ndim == 1:
-        cL = cR = body
-    else:
-        cL, cR = body[0], body[1]
-    r = float(loom_radius)
-    return (
-        paint_loom_rays(hex_L, "L", cL, r),
-        paint_loom_rays(hex_R, "R", cR, r),
-    )
+    return _image_to_hex_accept(left_img, "L"), _image_to_hex_accept(right_img, "R")

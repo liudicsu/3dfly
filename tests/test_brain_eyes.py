@@ -16,7 +16,6 @@ from threedfly.brain.eyes import (
     hex_coverage,
     hex_in_bio_envelope,
     image_to_hex,
-    rays_hit_sphere,
     stereo_to_hex,
 )
 
@@ -142,8 +141,9 @@ def test_stereo_to_hex_pair():
     assert hL.shape == hR.shape == (N_HEX,)
     _, ok_L = hex_camera_uv("L", 32, 32)
     _, ok_R = hex_camera_uv("R", 32, 32)
-    assert hL[ok_L].mean() > 0.4
-    assert hR[ok_R].mean() == pytest.approx(0.0)
+    # Uniform images sit at flyvis gray after median luminance shift.
+    assert hL[ok_L].mean() == pytest.approx(0.5, abs=0.05)
+    assert hR[ok_R].mean() == pytest.approx(0.5, abs=0.05)
 
 
 def test_right_eye_hex_mirrors_body_azimuth():
@@ -162,11 +162,11 @@ def test_right_eye_hex_mirrors_body_azimuth():
     ipsi = hR[ok_R & (az_R < -15.0)].mean()
     nasal = hR[ok_R & (az_R > 5.0)].mean()
     assert ipsi > nasal + 0.15, f"ipsi={ipsi:.3f} nasal={nasal:.3f}"
-    # Left image is black: in-view hexes sample 0 (out-of-view stay mid-gray).
+    # Left image is uniform: luminance shift puts in-view hexes at gray.
     from threedfly.brain.eyes import hex_camera_uv
 
     _, ok_L = hex_camera_uv("L", h, w)
-    assert float(hL[ok_L].max()) == pytest.approx(0.0)
+    assert float(hL[ok_L].mean()) == pytest.approx(0.5, abs=0.05)
 
 
 def test_frontolat_body_az_is_monocular():
@@ -189,7 +189,11 @@ def test_frontolat_body_az_is_monocular():
 
 
 def test_camera_disc_lands_on_hex_disc_site():
-    """3D disc at body az 35° darkens the same left-eye hexes as a hex disc."""
+    """3D disc at body az 35° darkens the same left-eye hexes as a hex disc.
+
+    Rendered pixels only — no object-pose paint. Gaussian acceptance +
+    luminance shift keep the disc darker than the background, not 0.00.
+    """
     pytest.importorskip("mujoco")
     from threedfly.brain.stimuli import hex_degrees
     from threedfly.control.closed_loop_metrics import LOOM_RADIUS_M
@@ -202,62 +206,61 @@ def test_camera_disc_lands_on_hex_disc_site():
     env.reset(seed=0)
     env.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
     env.set_loom_object((d * np.cos(az), d * np.sin(az), 1.5))
-    hL, hR = stereo_to_hex(
-        *env.get_eye_images(),
-        loom_body=env.loom_centers_body(),
-        loom_radius=env.loom_radius(),
-    )
+    hL, hR = stereo_to_hex(*env.get_eye_images())
     env.close()
     _, _, xd, yd = hex_degrees()
     disc_L = np.hypot(xd - 35.0, yd) <= 0.5 * ang
     # Right-eye xd=−35 looks at body +35° — outside the 15° contra envelope.
     disc_R_frontolat = np.hypot(xd + 35.0, yd) <= 0.5 * ang
     assert int(np.count_nonzero(disc_L)) > 10
-    assert float(hL[disc_L].mean()) < 0.12
-    assert float(hR[disc_R_frontolat].mean()) > 0.35
     az_L, el_L = hex_body_azel_deg("L")
     bg = (~disc_L) & hex_in_bio_envelope("L", az_L) & (np.abs(el_L) < 40.0)
-    assert float(hL[bg].mean()) > float(hL[disc_L].mean()) + 0.20
+    assert float(hL[disc_L].mean()) < 0.35
+    assert float(hR[disc_R_frontolat].mean()) > 0.35
+    assert float(hL[bg].mean()) > float(hL[disc_L].mean()) + 0.12
 
 
-def test_rays_hit_sphere_matches_angular_disc():
-    """A frontolat sphere at 40° angular size hits the same hexes as a hex disc."""
-    from threedfly.brain.eyes import azel_to_body_dir, hex_body_azel_deg
-    from threedfly.brain.stimuli import hex_degrees
-    from threedfly.control.closed_loop_metrics import LOOM_RADIUS_M
+def test_stereo_to_hex_has_no_loom_oracle():
+    """Eye input must not accept sim object pose/radius."""
+    import inspect
 
-    ang = 40.0
-    d = float(LOOM_RADIUS_M) / max(float(np.tan(np.radians(0.5 * ang))), 1e-6)
-    az = np.radians(35.0)
-    center = np.array([d * np.cos(az), d * np.sin(az), 0.0])
-    az_L, el_L = hex_body_azel_deg("L")
-    hit = rays_hit_sphere(azel_to_body_dir(az_L, el_L), center, LOOM_RADIUS_M)
-    _, _, xd, yd = hex_degrees()
-    disc = np.hypot(xd - 35.0, yd) <= 0.5 * ang
-    iou = float(np.count_nonzero(hit & disc)) / max(float(np.count_nonzero(hit | disc)), 1.0)
-    assert iou > 0.80
+    from threedfly.brain import closed_loop as cl
+    from threedfly.brain import eyes as eyes_mod
+    from threedfly.sim import environment as env_mod
+
+    sig = inspect.signature(eyes_mod.stereo_to_hex)
+    assert "loom_body" not in sig.parameters
+    assert "loom_radius" not in sig.parameters
+    step = inspect.signature(cl.ClosedLoopBrain.step)
+    assert "loom_body" not in step.parameters
+    assert "loom_radius" not in step.parameters
+    assert not hasattr(eyes_mod, "paint_loom_rays")
+    assert not hasattr(eyes_mod, "angular_loom_mask")
+    assert not hasattr(eyes_mod, "rays_hit_sphere")
+    assert not hasattr(env_mod.FlyEnvironment, "loom_centers_body")
+    assert not hasattr(env_mod.FlyEnvironment, "loom_radius")
 
 
-def test_camera_inside_sphere_stays_dark():
-    """Per-hex rays: past ~90° the origin is inside the sphere → full-field dark."""
+def test_empty_room_hex_is_left_right_symmetric():
+    """Mirrored empty room: L/R hex means match, so L DC is not an eye-mask artifact."""
     pytest.importorskip("mujoco")
     from threedfly.sim import FlyEnvironment
 
-    d = 0.45
-    az = np.radians(35.0)
     env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
     env.reset(seed=0)
     env.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
-    env.set_loom_object((d * np.cos(az), d * np.sin(az), 1.5))
-    hL, hR = stereo_to_hex(
-        *env.get_eye_images(),
-        loom_body=env.loom_centers_body(),
-        loom_radius=env.loom_radius(),
-    )
+    env.hide_loom_object()
+    left, right = env.get_eye_images()
+    hL, hR = stereo_to_hex(left, right)
     env.close()
-    from threedfly.brain.stimuli import hex_degrees
+    from threedfly.brain.eyes import hex_camera_uv
 
-    _, _, xd, yd = hex_degrees()
-    disc = np.hypot(xd - 35.0, yd) <= 45.0
-    assert float(hL[disc].mean()) < 0.05
-    assert float(hL.min()) == 0.0
+    _, ok_L = hex_camera_uv("L", 160, 160)
+    _, ok_R = hex_camera_uv("R", 160, 160)
+    mean_L = float(hL[ok_L].mean())
+    mean_R = float(hR[ok_R].mean())
+    std_L = float(hL[ok_L].std())
+    std_R = float(hR[ok_R].std())
+    # After luminance-norm both sit near 0.5; L vs R should match.
+    assert abs(mean_L - mean_R) < 0.04, f"empty-room hex L={mean_L:.3f} R={mean_R:.3f}"
+    assert abs(std_L - std_R) < 0.05, f"empty-room hex std L={std_L:.3f} R={std_R:.3f}"
