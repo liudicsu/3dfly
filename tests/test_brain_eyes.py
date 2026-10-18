@@ -11,8 +11,10 @@ from threedfly.brain.eyes import (
     EYE_CANT_DEG,
     EYE_DOWN_DEG,
     EYE_FOVY_DEG,
+    HEX_SPACING_DEG,
     box_eye_uv,
     hex_body_azel_deg,
+    hex_box_kernel_px,
     hex_coverage,
     hex_in_bio_envelope,
     image_to_hex,
@@ -105,6 +107,9 @@ def test_hex_fovy_matches_camera():
     assert EYE_FOVY_DEG == pytest.approx(150.0)
     assert EYE_CANT_DEG == pytest.approx(mjcf_mod.EYE_CANT_DEG)
     assert EYE_DOWN_DEG == pytest.approx(mjcf_mod.EYE_DOWN_DEG)
+    assert HEX_SPACING_DEG == pytest.approx(5.8, abs=0.05)
+    assert hex_box_kernel_px(320, 150.0) == 12
+    assert hex_box_kernel_px(160, 150.0) == 6
 
 
 def test_legacy_pack_put_centre_on_optical_axis():
@@ -199,8 +204,8 @@ def test_frontolat_body_az_is_monocular():
 def test_camera_disc_lands_on_hex_disc_site():
     """3D disc at body az 35° darkens the same left-eye hexes as a hex disc.
 
-    Rendered pixels only — no object-pose paint. Gaussian acceptance +
-    luminance shift keep the disc darker than the background, not 0.00.
+    Rendered pixels only — no object-pose paint. flyvis BoxEye hex
+    average + adaptive luminance keep the disc darker than the background.
     """
     pytest.importorskip("mujoco")
     from threedfly.brain.eyes import reset_luminance_rest

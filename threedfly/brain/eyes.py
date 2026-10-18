@@ -26,7 +26,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from threedfly.brain.constants import HEX_EXTENT, N_HEX
+from threedfly.brain.constants import HEX_DEG, HEX_EXTENT, N_HEX
 from threedfly.brain.stimuli import hex_degrees
 
 # Must match threedfly/sim/mjcf.py (forward wide-FOV, no cant).
@@ -37,20 +37,22 @@ EYE_DOWN_DEG = 0.0
 BIO_AZ_CONTRA_DEG = 15.0
 BIO_AZ_IPSI_DEG = 170.0
 UNSEEN_GRAY = 0.5
-# Drosophila acceptance angle Δρ ≈ 5° FWHM (Stavenga / Land). σ = FWHM / 2.355.
+# flyvis neighbor spacing (hex_to_pixel × HEX_DEG). BoxEye averages a
+# box of this size, then samples the hex centre — not a 5° Gaussian on
+# top of an already 5.8° lattice (that delayed DNp01 61° → 147°).
+HEX_SPACING_DEG = float(HEX_DEG) * (3.0 ** 0.5)  # 5.8°
+# Legacy Gaussian kept for coverage / diagnosis only.
 ACCEPT_FWHM_DEG = 5.0
 ACCEPT_SIGMA_DEG = ACCEPT_FWHM_DEG / 2.35482004503
 ACCEPT_N = 5
-# flyvis ContrastBrightness: pixel = c*(x − 0.5) + 0.5. Training c ≈ 1
-# (log-normal, std 0.2). We recenter the background (p80) to 0.5, then
-# apply a fixed gain in that band so a rendered dark disc reaches ~0
-# without stretching every wall texel to black.
-# flyvis ContrastBrightness around a p80 background. 1.35 is within the
-# training log-normal (std 0.2). Higher (1.7) blackened still discs but
-# turned 1/f texels into open-space looms.
-# Frozen p80 + 1.35 turned 1/f texels into 6/6 open-space looms
-# (TTC 10–13 s). Disc is now truly black; flyvis default c=1 is enough.
+# flyvis ContrastBrightness around a p80 background. 1.10 is in the
+# training log-normal (c≈1, std 0.2). Disc is matte black.
 FLYVIS_CONTRAST_GAIN = 1.10
+# Photoreceptor-like luminance rest: seconds, not frozen and not per-frame.
+# 2 s at 50 Hz control. A 0.5 s loom barely moves rest; standing 1/f is tracked.
+LUM_TAU_S = 2.0
+LUM_DT_S = 0.02
+LUM_TAU_STEPS = LUM_TAU_S / LUM_DT_S
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
@@ -259,7 +261,7 @@ def _sample_image_hex_weighted(
 
 
 class _BgRest:
-    """Per-eye p80 that a growing dark object cannot pull down."""
+    """Per-eye p80 with photoreceptor-like adaptation (seconds)."""
 
     def __init__(self) -> None:
         self.L: Optional[float] = None
@@ -271,7 +273,11 @@ class _BgRest:
 
     def update(self, side: str, bg_now: float) -> float:
         prev = self.L if side == "L" else self.R
-        rest = float(bg_now) if prev is None else max(float(prev), float(bg_now))
+        bg_now = float(bg_now)
+        if prev is None:
+            rest = bg_now
+        else:
+            rest = float(prev) + (bg_now - float(prev)) / float(LUM_TAU_STEPS)
         if side == "L":
             self.L = rest
         else:
@@ -292,9 +298,10 @@ def _luminance_to_gray(
 ) -> np.ndarray:
     """Match flyvis input stats: background → 0.5, fixed contrast gain.
 
-    p80 is the background. A growing dark disc must not lower that rest
-    (per-frame p80 on a 60° disc collapses contrast). Then
-    ``0.5 + G*(x − rest)``. Generic; no object geometry.
+    p80 is the background. Rest adapts with a seconds-scale tau
+    (photoreceptors), so standing 1/f is not contrast growth and a
+    0.5 s loom still stays dark. Then ``0.5 + G*(x − rest)``.
+    Generic; no object geometry.
     """
     out = np.asarray(hex_frame, dtype=np.float32).copy()
     m = np.asarray(valid, dtype=bool)
@@ -375,12 +382,36 @@ def image_to_hex(
     return samples.astype(np.float32)
 
 
-def _image_to_hex_accept(image: np.ndarray, side: str) -> np.ndarray:
-    """Sample one rendered eye through the ~5° Gaussian acceptance lobe."""
+def hex_box_kernel_px(height: int, fovy_deg: float = EYE_FOVY_DEG) -> int:
+    """flyvis BoxEye kernel: one hex-spacing box in camera pixels."""
+    deg_per_px = float(fovy_deg) / max(float(height), 1.0)
+    return max(1, int(round(HEX_SPACING_DEG / max(deg_per_px, 1e-6))))
+
+
+def _box_filter_gray(image: np.ndarray, k: int) -> np.ndarray:
+    """Mean box filter (flyvis BoxEye conv / kernel_size²)."""
+    if image.ndim == 3:
+        gray = image.mean(axis=2)
+    else:
+        gray = image
+    g = np.asarray(gray, dtype=np.float32)
+    peak = 255.0 if float(g.max() if g.size else 0.0) > 1.5 else 1.0
+    g = np.clip(g / peak, 0.0, 1.0)
+    if int(k) <= 1:
+        return g
+    from scipy.ndimage import uniform_filter
+
+    return uniform_filter(g, size=int(k), mode="nearest").astype(np.float32)
+
+
+def _image_to_hex_box(image: np.ndarray, side: str) -> np.ndarray:
+    """flyvis BoxEye: box-average at hex spacing, then sample hex centres."""
     image = np.asarray(image)
     h, w = int(image.shape[0]), int(image.shape[1])
-    uv, sample_ok, weights, hex_ok = hex_accept_uv(side, h, w)
-    hex_frame = _sample_image_hex_weighted(image, uv, sample_ok, weights)
+    k = hex_box_kernel_px(h)
+    filt = _box_filter_gray(image, k)
+    uv, hex_ok = hex_camera_uv(side, h, w)
+    hex_frame = _sample_image_hex(filt, uv)
     hex_frame = np.where(hex_ok, hex_frame, UNSEEN_GRAY).astype(np.float32)
     return _luminance_to_gray(hex_frame, hex_ok, side=side)
 
@@ -392,10 +423,10 @@ def stereo_to_hex(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Left and right rendered eye images → (721,), (721,) hex frames.
 
-    Official path: each hex averages a 5° FWHM Gaussian acceptance lobe
-    over the rendered pixels, then flyvis-style luminance (p80 → 0.5,
-    fixed contrast gain). Generic for every geom. No sim object
-    pose/radius is read here — the camera image is the only scene input.
+    Official path: flyvis BoxEye (hex-spacing box average, then hex
+    centre). Not a 5° Gaussian on top of the 5.8° lattice. Then
+    flyvis-style luminance (adaptive p80 → 0.5, fixed contrast gain).
+    Generic for every geom. No sim object pose/radius.
     """
     left_img = np.asarray(left_img)
     right_img = np.asarray(right_img)
@@ -406,4 +437,4 @@ def stereo_to_hex(
         uv_r = uv.copy()
         uv_r[:, 0] = 1.0 - uv_r[:, 0]
         return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv_r)
-    return _image_to_hex_accept(left_img, "L"), _image_to_hex_accept(right_img, "R")
+    return _image_to_hex_box(left_img, "L"), _image_to_hex_box(right_img, "R")

@@ -127,6 +127,19 @@ FORCED_TYPES = (
     "LPLC1",
     "LPi43",
     "LPi34",
+    "LPi12",
+    "LPi21",
+    "LPi2b",
+    "LPi2c",
+    "LPi2d",
+    "LPi2e",
+    "LPi14",
+    "LPi3412",
+    "LPi3a",
+    "LPi3b",
+    "LPi3c",
+    "LPi4a",
+    "LPi4b",
 )
 
 # Inhibitory sources onto LPLC2 / LC4 during rotation (research_r4/inh_sources.json).
@@ -144,6 +157,17 @@ INH_SOURCES_LPLC2 = (
     "LPi2c",
     "LPi4b",
     "LPi34",
+    # Extra LPi already in the 45k bundle (Mauss / Klapoetke wide-field
+    # suppressors). Glu → GluCl sign −1. MeVC23 is listed in research
+    # inh_sources but is not in this connectome slice.
+    "LPi14",
+    "LPi2d",
+    "LPi2e",
+    "LPi3412",
+    "LPi3a",
+    "LPi3b",
+    "LPi3c",
+    "LPi4a",
     "MeVC23",
     "Tlp13",
     "LPT50",

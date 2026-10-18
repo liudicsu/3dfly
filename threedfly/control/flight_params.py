@@ -185,14 +185,13 @@ class FlightParams:
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",
         "camera": (
-            "Forward 150° square-FOV cameras; each hex averages a 5° FWHM "
-            "Gaussian acceptance lobe over rendered pixels (lattice centre "
-            "= frontal). Drosophila envelope (−15°…+170° ipsilateral, ~15° "
-            "overlap). flyvis-style luminance: p80 background → 0.5, then "
-            "fixed contrast gain (ContrastBrightness). Matte-black loom "
-            "(rgba 0, no spec/haze). 320 px so camera AA ≪ 5° FWHM. "
-            "1/f walls (RMS 0.05, gain 1.10). Laterality is per-side DNp01 rise "
-            "(camera LC4 L−R can flip). Bilateral = both GF sides. "
+            "Forward 150° square-FOV cameras; flyvis BoxEye hex-box "
+            "average (5.8° lattice, not a 5° Gaussian on top). Lattice "
+            "centre = frontal. Drosophila envelope (−15°…+170° ipsilateral, "
+            "~15° overlap). Adaptive p80 (τ=2 s) → 0.5, fixed contrast "
+            "gain. Matte-black loom. 320 px. 1/f RMS 0.05, gain 1.10. "
+            "Laterality is per-side DNp01 rise. LPi (Glu/−) T4/T5→LPi→"
+            "LPLC2 is in coreTplus. "
             "Eye input is rendered pixels only — no sim object pose/radius. "
             "No U-flip, no 40° cant."
         ),
