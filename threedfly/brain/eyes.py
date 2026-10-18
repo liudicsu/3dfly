@@ -384,15 +384,9 @@ def image_to_hex(
 
 
 def hex_box_kernel_px(height: int, fovy_deg: float = EYE_FOVY_DEG) -> int:
-    """flyvis hex_render: sample hex centres, plus a few px of AA.
-
-    A full hex-spacing box (12 px @ 320/150°) is a second 5.8° blur on
-    a raster that is already 0.47°/px — the same extra softness that
-    delayed DNp01 (hex_ref 61°, camera 157°). hex_ref assigns the
-    intensity at the hex centre. Keep 3 px (~1.4°) so we are not
-    nearest-neighbour aliasing.
-    """
-    return 3 if int(height) >= 160 else 1
+    """flyvis BoxEye kernel: one hex-spacing box in camera pixels."""
+    deg_per_px = float(fovy_deg) / max(float(height), 1.0)
+    return max(1, int(round(HEX_SPACING_DEG / max(deg_per_px, 1e-6))))
 
 
 def _box_filter_gray(image: np.ndarray, k: int) -> np.ndarray:

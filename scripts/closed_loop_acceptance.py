@@ -1176,13 +1176,13 @@ def main(argv=None) -> int:
             ),
             "known_limitations": (
                 "No sim object pose/radius reaches stereo_to_hex or the "
-                "controller. Matte-black loom (rgba 0, no spec/haze), "
-                "320 px so camera AA ≪ 5° FWHM, frozen p80 rest. "
-                "Still-fly az35 l/v0.04: disc~0.07/0.005, DNp01 peak "
-                "1.29 vs hex_ref 1.72, 0.20-onset 147° vs 61.5°. "
-                "Lock matches true side; bilateral_brake=0 on frontolat. "
-                "Leftover fails are late dCA>0. Open-space 1/f fires "
-                "have TTC 10–14 s (not real walls)."
+                "controller. LPi* are in coreTplus (Glu/GABA sign −1; "
+                "T4/T5→LPi→LPLC2 present). Adaptive p80 τ=5 s. flyvis "
+                "BoxEye hex-box (not Gaussian). Still-fly az35 l/v0.04: "
+                "DNp01 peak 1.25 vs hex_ref 1.72; 0.20-onset 157° vs "
+                "61.5° (LC4 onset 18° — GF climb is late, not sampling). "
+                "Frontolat leftover fails are dCA>0. Lock matches true "
+                "side. 3px-AA centre sample dropped frontolat to 7/16."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],

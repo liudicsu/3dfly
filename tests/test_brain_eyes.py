@@ -108,8 +108,8 @@ def test_hex_fovy_matches_camera():
     assert EYE_CANT_DEG == pytest.approx(mjcf_mod.EYE_CANT_DEG)
     assert EYE_DOWN_DEG == pytest.approx(mjcf_mod.EYE_DOWN_DEG)
     assert HEX_SPACING_DEG == pytest.approx(5.8, abs=0.05)
-    assert hex_box_kernel_px(320, 150.0) == 3
-    assert hex_box_kernel_px(160, 150.0) == 3
+    assert hex_box_kernel_px(320, 150.0) == 12
+    assert hex_box_kernel_px(160, 150.0) == 6
 
 
 def test_legacy_pack_put_centre_on_optical_axis():
