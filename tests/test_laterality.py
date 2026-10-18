@@ -41,7 +41,7 @@ def _mean_dns(brain: ClosedLoopBrain, hex_L, hex_R, n: int = 8):
 
 
 def test_side_walls_brighten_ipsilateral_eye():
-    """Canted 120° eyes: the matching wall must raise that eye's hex mean."""
+    """Forward 150° eyes: the matching wall must raise that eye's hex contrast."""
     pytest.importorskip("mujoco")
     from threedfly.brain.eyes import stereo_to_hex
     from threedfly.sim import FlyEnvironment
@@ -53,18 +53,25 @@ def test_side_walls_brighten_ipsilateral_eye():
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
 
-    env = FlyEnvironment(render_mode="rgb_array", camera_width=80, camera_height=60)
+    from threedfly.brain.eyes import hex_body_azel_deg
+
+    env = FlyEnvironment(render_mode="rgb_array", camera_width=80, camera_height=80)
     contrast = {}
+    az_L, _ = hex_body_azel_deg("L")
+    az_R, _ = hex_body_azel_deg("R")
     for side in ("L", "R"):
         pose = _mod.lateral_loom_pose(side)
         env.reset(seed=0)
         env.set_pose(pose["pose"], yaw=pose["yaw"])
         hL, hR = stereo_to_hex(*env.get_eye_images())
-        contrast[side] = (float(np.std(hL)), float(np.std(hR)))
+        # Hex rays: +az looks left. Near a left wall those hexes should be busier.
+        contrast[side] = {
+            "left_rays": float(np.std(hL[az_L > 20.0])),
+            "right_rays": float(np.std(hR[az_R < -20.0])),
+        }
     env.close()
-    # Textured wall is on the ipsilateral eye → higher hex contrast, not mean.
-    assert contrast["L"][0] > contrast["L"][1] + 0.015, f"left wall should texture left eye: {contrast}"
-    assert contrast["R"][1] > contrast["R"][0] + 0.015, f"right wall should texture right eye: {contrast}"
+    assert contrast["L"]["left_rays"] > contrast["L"]["right_rays"] + 0.01, f"left wall: {contrast}"
+    assert contrast["R"]["right_rays"] > contrast["R"]["left_rays"] + 0.01, f"right wall: {contrast}"
 
 
 @needs_stack
@@ -118,7 +125,7 @@ def test_open_loop_mirrored_object_flips_dns():
 
     params = FlightParams(prewarm_steps=16, flyvis_stride=1, flyvis_torch_threads=2)
     brain = ClosedLoopBrain.build(params=params, quick=True)
-    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
+    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
     env.reset(seed=0)
     env.set_pose((0.0, 0.0, 1.5), yaw=0.0, vel=(0.0, 0.0, 0.0))
 
@@ -142,7 +149,7 @@ def test_open_loop_mirrored_object_flips_dns():
         peak = {"dnp01_L": 0.0, "dnp01_R": 0.0, "lc4_L": 0.0, "lc4_R": 0.0,
                 "lplc2_L": 0.0, "lplc2_R": 0.0, "dnp03_L": 0.0, "dnp03_R": 0.0}
         for left, right in frames:
-            last = brain.step(left, right)
+            last = brain.step(left, right, loom_body=env.loom_centers_body(), loom_radius=env.loom_radius())
             ro = last.readout
             for k in peak:
                 peak[k] = max(peak[k], float(getattr(ro, k)) - float(getattr(rest, k)))
@@ -214,14 +221,17 @@ def test_lateral_approaches_turn_away_from_threat():
     _spec = importlib.util.spec_from_file_location("cla_laterality", _acc)
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
-    params = FlightParams(flyvis_stride=2, flyvis_torch_threads=2)
+    params = FlightParams(flyvis_stride=1, flyvis_torch_threads=2)
     brain = ClosedLoopBrain.build(params=params, quick=True)
-    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
+    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
+    env.control_dt = 0.01
+    env.n_substeps = max(1, int(round(0.01 / float(env.model.opt.timestep))))
     ctl = DNFlightController(params)
-    lateral_loom_object = _mod.lateral_loom_object
+    collision_course_object = _mod.collision_course_object
 
     def _approach(side: str):
-        spec = lateral_loom_object(side)
+        az = 45.0 if side == "L" else -45.0
+        spec = collision_course_object(az, 3.4, 0.08)
         env.reset(seed=0)
         env.set_pose(spec["pose"], yaw=spec["yaw"], vel=spec["vel"])
         env.hide_loom_object()
@@ -240,7 +250,13 @@ def test_lateral_approaches_turn_away_from_threat():
         for _ in range(160):
             loom_pos = loom_pos + loom_v * float(env.control_dt)
             env.set_loom_object(loom_pos)
-            res = brain.step(left, right, env.get_fly_angular_velocity())
+            res = brain.step(
+                left,
+                right,
+                env.get_fly_angular_velocity(),
+                loom_body=env.loom_centers_body(),
+                loom_radius=env.loom_radius(),
+            )
             act = ctl.compute(res.readout)
             left, right, info = env.step(act, wing_strokes=ctl.last_wing_strokes)
             heads.append(heading_from_quaternion(info["orientation"]))

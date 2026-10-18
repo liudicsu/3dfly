@@ -27,9 +27,13 @@ FLY_MJCF = """
   <option timestep="0.002" gravity="0 0 -9.81"/>
   <visual>
     <headlight ambient="0.55 0.55 0.55" diffuse="0.85 0.85 0.85" specular="0.1 0.1 0.1"/>
+    <rgba haze="0.5 0.5 0.5 1"/>
   </visual>
   
   <asset>
+    <!-- Mid-gray sky so frontal hexes rest at flyvis gray=0.5 (loom() bg). -->
+    <texture name="sky" type="skybox" builtin="flat" rgb1="0.5 0.5 0.5" rgb2="0.5 0.5 0.5"
+             width="16" height="16"/>
     <texture name="grid" type="2d" builtin="checker" width="512" height="512" 
              rgb1="0.28 0.28 0.30" rgb2="0.88 0.86 0.80"/>
     <material name="grid_mat" texture="grid" texrepeat="16 16" reflectance="0.08"/>
@@ -121,19 +125,16 @@ FLY_MJCF = """
         <geom name="head_geom" type="mesh" mesh="head_mesh" 
               material="fly_body_mat" mass="0.0002" contype="0" conaffinity="0"/>
         
-        <!-- 120° FOV, 40° outward cant. 30° cant put a frontal-right
-         object (az −35°) in the left eye; 40° moves the nasal edge to
-         −20° so offset_x+0.8 stays ipsilateral. ±Y walls at 90° remain
-         inside each eye (look 40° + half-FOV 60°). -->
+        <!-- Wide forward FOV, no cant. Each hex samples its own body-frame
+         ray (threedfly/brain/eyes.py). Lattice centre = body-frontal so
+         LPLC2/LC4 see 0–70° looms; 40° out / 20° down had put that
+         sector on the nasal periphery. Image-right = −Y (body right). -->
         <camera name="left_eye" pos="0.003 0.006 0.002"
-                xyaxes="0.643 -0.766 0.000  0.262 0.220 0.940"
-                fovy="120" mode="fixed"/>
-        <!-- Right X is sagittally mirrored. Y also flips so X×Y stays
-             forward (MuJoCo looks along −Z). stereo_to_hex U-flips the
-             right hex (image-right = nasal → flyvis u). -->
+                xyaxes="0.000 -1.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
         <camera name="right_eye" pos="0.003 -0.006 0.002"
-                xyaxes="0.643 0.766 0.000  -0.262 0.220 -0.940"
-                fovy="120" mode="fixed"/>
+                xyaxes="0.000 -1.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
       </body>
       
       <!-- Wings: stroke hinge for visual flapping; aero force is applied in Python. -->
@@ -258,18 +259,18 @@ def get_fly_mjcf() -> str:
     return FLY_MJCF.format(meshdir=meshdir)
 
 
-# Frontolateral coverage: 40° outward cant (left +Y, right −Y), 20° down,
-# 120° fovy. 30° cant left a −35° offset object in both eyes.
-EYE_CANT_DEG = 40.0
-EYE_DOWN_DEG = 20.0
-EYE_FOVY_DEG = 120.0
+# Forward wide-FOV cameras. Hex rays (not the optical axis) set laterality.
+# 40° outward / 20° down / 120° packed UV put frontal 0–70° on the periphery.
+EYE_CANT_DEG = 0.0
+EYE_DOWN_DEG = 0.0
+EYE_FOVY_DEG = 150.0
 
 
 def eye_xyaxes(side: str, cant_deg: float = EYE_CANT_DEG, down_deg: float = EYE_DOWN_DEG):
-    """6-float MuJoCo xyaxes for an outward-canted eye.
+    """6-float MuJoCo xyaxes. Both eyes look +X; hex rays provide L/R.
 
-    Image-right is nasal on both sides. The right eye's Y axis is flipped so
-    look stays forward (the image is inverted; ``stereo_to_hex`` U-flips).
+    Image-right is body −Y. ``stereo_to_hex`` projects each hex's body-frame
+    direction through this camera (no U-flip).
     """
     import numpy as np
 
@@ -277,19 +278,18 @@ def eye_xyaxes(side: str, cant_deg: float = EYE_CANT_DEG, down_deg: float = EYE_
         raise ValueError(f"side must be L or R, got {side!r}")
     a = np.deg2rad(float(cant_deg))
     d = np.deg2rad(float(down_deg))
+    sgn = 1.0 if side == "L" else -1.0
     look = np.array(
-        [np.cos(d) * np.cos(a), np.cos(d) * np.sin(a), -np.sin(d)],
+        [np.cos(d) * np.cos(a), sgn * np.cos(d) * np.sin(a), -np.sin(d)],
         dtype=float,
     )
     look = look / float(np.linalg.norm(look))
     z = -look
     x = np.cross(np.array([0.0, 0.0, 1.0]), z)
-    x = x / float(np.linalg.norm(x))
+    n = float(np.linalg.norm(x))
+    x = x / n if n > 1e-8 else np.array([0.0, -1.0, 0.0])
     y = np.cross(z, x)
     y = y / float(np.linalg.norm(y))
-    if side == "R":
-        x = np.array([x[0], -x[1], x[2]], dtype=float)
-        y = np.array([-y[0], y[1], -y[2]], dtype=float)
     return [float(v) for v in np.concatenate([x, y])]
 
 

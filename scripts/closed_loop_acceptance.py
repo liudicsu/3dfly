@@ -284,7 +284,13 @@ def _run_scenario(
             # steps after hide). The object continues past/away.
             loom_pos = loom_pos + loom_v * float(env.control_dt)
             env.set_loom_object(loom_pos)
-        res = brain.step(left_img, right_img, env.get_fly_angular_velocity())
+        res = brain.step(
+            left_img,
+            right_img,
+            env.get_fly_angular_velocity(),
+            loom_body=env.loom_centers_body(),
+            loom_radius=env.loom_radius(),
+        )
         action = ctl.compute(res.readout)
         left_img, right_img, info = env.step(action, wing_strokes=ctl.last_wing_strokes)
         pos = np.asarray(info["position"], dtype=float)
@@ -848,7 +854,7 @@ def main(argv=None) -> int:
     )
     print("Building closed-loop brain…", flush=True)
     brain = ClosedLoopBrain.build(params=params, quick=args.quick)
-    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=120)
+    env = FlyEnvironment(render_mode="rgb_array", camera_width=160, camera_height=160)
     ctl = DNFlightController(params)
     ctl.bind_hover(env.hover_action)
 
@@ -870,9 +876,14 @@ def main(argv=None) -> int:
         prev = int(brain.params.flyvis_stride)
         if spec.get("stride"):
             brain.params.flyvis_stride = int(spec["stride"])
+        # Gate looms use the brain DT (10 ms). 20 ms × stride 2 was skipping
+        # the hex frames the open-loop sweep used.
+        prev_dt, prev_sub = env.control_dt, env.n_substeps
+        env.control_dt = 0.01
+        env.n_substeps = max(1, int(round(0.01 / float(env.model.opt.timestep))))
         print(
             f"Scenario {name} az={spec.get('az_design_deg')} lv={spec.get('lv_s')} "
-            f"d={spec.get('distance_m')}…",
+            f"d={spec.get('distance_m')} dt=0.01…",
             flush=True,
         )
         threat = spec.get("threat_side")
@@ -896,6 +907,8 @@ def main(argv=None) -> int:
         sc["lv_s"] = spec.get("lv_s")
         sc["seed"] = spec.get("seed")
         brain.params.flyvis_stride = prev
+        env.control_dt = prev_dt
+        env.n_substeps = prev_sub
         return sc
 
     fl_cases = frontolateral_gate_cases()
@@ -905,12 +918,12 @@ def main(argv=None) -> int:
         fl_cases = fl_cases[:2]
     print("Gate: frontolateral collision-course (|az| 20–70°)…", flush=True)
     for spec in fl_cases:
-        n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"])
+        n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"], dt=0.01)
         scenarios[spec["tag"]] = _run_loom_case(spec, n)
 
     print("Gate: pure frontal (|az|<20°)…", flush=True)
     for spec in frontal_gate_cases()[: 1 if args.quick else None]:
-        n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"])
+        n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"], dt=0.01)
         scenarios[spec["tag"]] = _run_loom_case(spec, n)
 
     print("Report-only: eccentric official L/R + far/slow/offset (LPLC2/GF frontal bias)…", flush=True)

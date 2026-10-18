@@ -42,7 +42,7 @@ class FlyEnvironment:
         self,
         render_mode: Optional[str] = "rgb_array",
         camera_width: int = 160,
-        camera_height: int = 120,
+        camera_height: int = 160,
     ):
         """
         Initialize environment.
@@ -196,6 +196,30 @@ class FlyEnvironment:
     def hide_loom_object(self) -> None:
         self.set_loom_object((0.0, 0.0, -8.0))
 
+    def loom_radius(self) -> float:
+        try:
+            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "loom_geom")
+        except Exception:
+            gid = -1
+        if gid < 0:
+            return 0.58
+        return float(self.model.geom_size[gid][0])
+
+    def loom_centers_body(self):
+        """Loom-sphere centre relative to each eye camera, in the body frame.
+
+        Hidden (z < −4) → None. Used by per-ommatidium ray painting.
+        """
+        if self._loom_mocap < 0:
+            return None
+        world = np.asarray(self.data.mocap_pos[self._loom_mocap], dtype=float).reshape(3)
+        if world[2] < -4.0:
+            return None
+        rot = self._quat_to_rotation_matrix(self.get_fly_orientation())
+        left = np.asarray(self.data.cam_xpos[self.left_eye_id], dtype=float).reshape(3)
+        right = np.asarray(self.data.cam_xpos[self.right_eye_id], dtype=float).reshape(3)
+        return np.stack([rot.T @ (world - left), rot.T @ (world - right)], axis=0)
+
     def step(
         self,
         action: np.ndarray,
@@ -314,14 +338,26 @@ class FlyEnvironment:
             shape = (self.camera_height, self.camera_width, 3)
             return np.zeros(shape, dtype=np.uint8), np.zeros(shape, dtype=np.uint8)
         
-        # Render left eye
-        self.renderer.update_scene(self.data, camera=self.left_eye_id)
-        left_img = self.renderer.render()
-        
-        # Render right eye
-        self.renderer.update_scene(self.data, camera=self.right_eye_id)
-        right_img = self.renderer.render()
-        
+        # The 150° eyes sit on the head; hide the fly mesh so self-body
+        # does not paint a static dark blob onto ventral/central hexes.
+        fly_ids = np.fromiter(self._fly_geom_ids, dtype=np.int32)
+        saved = None
+        if fly_ids.size:
+            saved = self.model.geom_rgba[fly_ids].copy()
+            self.model.geom_rgba[fly_ids, 3] = 0.0
+        try:
+            self.renderer.update_scene(self.data, camera=self.left_eye_id)
+            # Two-sided: once the fly is inside the loom sphere the
+            # interior must stay dark (hex discs keep growing to 90°;
+            # single-sided culling showed the room through the object).
+            self.renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+            left_img = self.renderer.render()
+            self.renderer.update_scene(self.data, camera=self.right_eye_id)
+            self.renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+            right_img = self.renderer.render()
+        finally:
+            if saved is not None:
+                self.model.geom_rgba[fly_ids] = saved
         return left_img.copy(), right_img.copy()
     
     def get_fly_position(self) -> np.ndarray:

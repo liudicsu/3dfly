@@ -182,7 +182,14 @@ class FlightParams:
         ),
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",
-        "camera": "40° outward cant, 120° FOV; right-eye hex U-flip (X-mirror)",
+        "camera": (
+            "Forward 150° square-FOV cameras; each hex samples its body-frame "
+            "ray (lattice centre = frontal). Each eye is masked to the "
+            "Drosophila envelope (−15°…+170° ipsilateral, ~15° overlap) so "
+            "frontolat 20–70° is monocular. Rays that hit the loom sphere "
+            "paint that hex black (hard edge; full-field dark once inside). "
+            "No U-flip, no 40° cant."
+        ),
         "geometry": (
             "Lateral |az|≥30° at rise onset must turn away; frontal GF "
             "must escape/brake without turning into the object. "
