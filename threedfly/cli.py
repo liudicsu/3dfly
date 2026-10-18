@@ -445,7 +445,16 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
     is_flag=True,
     help="Opt-in ablation: trigger escape from stereo looming if DNp01 is silent",
 )
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, legacy_brain, engineered_looming_residual):
+@click.option(
+    "--stream-port",
+    type=int,
+    default=8765,
+    show_default=True,
+    help="Binary brain-stream websocket port (protocol v1; also serves an inspector page). 0 = off",
+)
+@click.option("--stream-hz", type=float, default=30.0, show_default=True, help="Max stream frame rate")
+@click.option("--stream-log", type=click.Path(), default=None, help="Append stream stats (JSON lines)")
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, legacy_brain, engineered_looming_residual, stream_port, stream_hz, stream_log):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -471,6 +480,9 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
             enable_soft_recovery=not no_soft_recovery,
             use_core_tplus=False if legacy_brain else None,
             engineered_looming_residual=engineered_looming_residual,
+            stream_port=stream_port,
+            stream_hz=stream_hz,
+            stream_log=stream_log,
         )
     except Exception as e:
         click.echo(f"\nError running interactive simulation: {e}", err=True)
