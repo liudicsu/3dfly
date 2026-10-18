@@ -59,6 +59,7 @@ def _write_synthetic_connectome(tmp_path: Path) -> Path:
 
 def test_run_simulation_biological_mode_smoke(tmp_path):
     """run_simulation must complete a few biological-mode steps without crashing."""
+    pytest.importorskip("open3d")
     from threedfly.runner import run_simulation
 
     subgraph = _write_synthetic_connectome(tmp_path)

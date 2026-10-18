@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 
 from scipy import sparse
-from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
+from threedfly.vision import StereoVision, BrainDepthEstimator
+
+
+def _mapper(*args, **kwargs):
+    pytest.importorskip("open3d")
+    from threedfly.vision import PointCloudMapper
+
+    return PointCloudMapper(*args, **kwargs)
 
 
 def test_stereo_vision_init():
@@ -65,7 +72,7 @@ def test_visual_features():
 
 def test_point_cloud_mapper_init():
     """Test PointCloudMapper initialization."""
-    mapper = PointCloudMapper(voxel_size=0.05)
+    mapper = _mapper(voxel_size=0.05)
     
     assert mapper.voxel_size == 0.05
     assert mapper.total_points_added == 0
@@ -73,7 +80,7 @@ def test_point_cloud_mapper_init():
 
 def test_point_cloud_add_observation():
     """Test adding depth observation to map."""
-    mapper = PointCloudMapper(voxel_size=0.1)
+    mapper = _mapper(voxel_size=0.1)
     
     # Create synthetic depth observation
     h, w = 24, 32
@@ -90,7 +97,7 @@ def test_point_cloud_add_observation():
 
 def test_exploration_score():
     """Test exploration score computation."""
-    mapper = PointCloudMapper(voxel_size=0.05)  # Smaller voxels for better sensitivity
+    mapper = _mapper(voxel_size=0.05)  # Smaller voxels for better sensitivity
     
     position = np.array([1.0, 1.0, 1.5])
     
@@ -115,7 +122,7 @@ def test_exploration_score():
 
 def test_mapping_statistics():
     """Test mapping statistics."""
-    mapper = PointCloudMapper()
+    mapper = _mapper()
     
     stats = mapper.get_statistics()
     
@@ -237,7 +244,7 @@ def test_brain_depth_reset():
 
 def test_point_cloud_mapper_sources():
     """Test point cloud mapper with different sources."""
-    mapper = PointCloudMapper()
+    mapper = _mapper()
     
     depth = np.ones((24, 32)) * 1.0
     rgb = np.random.randint(0, 256, (24, 32, 3), dtype=np.uint8)

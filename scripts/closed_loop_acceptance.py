@@ -729,6 +729,7 @@ def _frontolat_gate(scenarios: dict) -> dict:
             "azimuth_onset_deg": sc.get("azimuth_onset_deg"),
             "loom_band": sc.get("loom_band") or onset_azimuth_band(sc.get("azimuth_onset_deg")),
             "angular_size_fire_deg": sc.get("angular_size_fire_deg"),
+            "azimuth_fire_deg": sc.get("azimuth_fire_deg"),
             "fire_minus_closest": sc.get("fire_minus_closest"),
             "visible_at_fire": sc.get("visible_at_fire"),
             "approaching_at_fire": sc.get("approaching_at_fire"),
@@ -1068,6 +1069,12 @@ def main(argv=None) -> int:
         use_engineered_looming_residual=args.engineered_looming_residual,
         use_engineered_eye_laterality=args.engineered_eye_laterality,
     )
+    print(
+        f"GF readout (frozen): form={params.gf_form} k={params.gf_k} "
+        f"threshold={params.gf_threshold} vel_window={params.gf_vel_window_s}s "
+        f"(scripts/calibrate_gf_readout.py; von Reyn 2014/2017)",
+        flush=True,
+    )
     print("Building closed-loop brain…", flush=True)
     brain = ClosedLoopBrain.build(params=params, quick=args.quick)
     env = FlyEnvironment(render_mode="rgb_array")
@@ -1371,18 +1378,21 @@ def main(argv=None) -> int:
                 "controller. Photoreceptor rest τ=5 s, exp(−dt/τ), init "
                 "at calib mean 0.5 (not frame 1); static contrast is "
                 "~37% at 5 s. Official looms start ≤5° and are present "
-                "at prewarm. Static 30–40° onset and receding discs "
-                "are 0-fire gates (pass). Frontal both-GF DNp01 ≥ 0.20 "
-                "is a takeoff (az0/az5/az12 all fire). Each eye has a "
+                "at prewarm. GF fire is the one-shot calibrated readout "
+                "(scripts/calibrate_gf_readout.py; von Reyn 2014/2017 "
+                "40–60° at l/v 40 ms) — not the old 0.20 Hz bar. Static "
+                "30–40° onset and receding discs are 0-fire gates; if "
+                "they fire after calibration, report, do not patch. "
+                "Frontal both-GF takeoff (az0/az5/az12). Each eye has a "
                 "forward + ipsilateral side camera so the flyvis ±75° "
                 "lattice is fully sampled (1:1 deg; rear 75–165° has "
-                "no flyvis cells). Frontolat on-time turn-away is the "
-                "remaining miss: without the 20–30° onset cheat, "
-                "DNp01 still crosses after closest approach (or not "
-                "at all at |az|≥55 / l/v=0.08). No-object 0/6. Report "
-                "brain+flyvis and full-loop ms/step separately; "
-                "full-loop need not hit 25 ms. Do not lower the 0.20 "
-                "fire bar."
+                "no flyvis cells). Eccentric looms are late or silent. "
+                "Frontolat on-time turn-away is the remaining miss: "
+                "without the 20–30° onset cheat, the score still "
+                "crosses after closest approach (object already behind, "
+                "dCA +5…+9; lock matches true side). No-object 0/6. "
+                "Report brain+flyvis and full-loop ms/step separately; "
+                "full-loop need not hit 25 ms."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
@@ -1446,6 +1456,44 @@ def _print_variant_tables(summary: dict) -> None:
                 f"{_fmt(fd.get('lc4_L')):>6} {_fmt(fd.get('lc4_R')):>6} "
                 f"{_fmt(fd.get('lplc2_L')):>6} {_fmt(fd.get('lplc2_R')):>6} "
                 f"{_fmt(fd.get('yaw')):>6}",
+                flush=True,
+            )
+        print(
+            "\nAway=0 diagnosis (lock vs true side at fire; dCA / az_fire):",
+            flush=True,
+        )
+        print(
+            f"{'scenario':<28} {'true':>4} {'lock':>4} {'azF':>7} {'dCA':>5} "
+            f"{'vis':>3} {'away':>5} {'note':<40}",
+            flush=True,
+        )
+        for name, d in fl["details"].items():
+            if int(d.get("brain_escapes") or 0) <= 0:
+                continue
+            fd = d.get("fire_diag") or {}
+            true = d.get("true_side") or "-"
+            lock = d.get("threat_locked") or fd.get("threat_side") or "-"
+            azf = d.get("azimuth_fire_deg")
+            dca = d.get("fire_minus_closest")
+            behind = (
+                azf is not None
+                and abs(float(azf)) > 90.0
+                and dca is not None
+                and int(dca) > 0
+            )
+            lock_ok = true in ("L", "R") and lock == true
+            if behind and lock_ok:
+                note = "lock ok; object already behind (passed)"
+            elif behind:
+                note = "object behind; lock disagrees"
+            elif lock_ok:
+                note = "lock matches true side"
+            else:
+                note = "lock != true side"
+            print(
+                f"{name:<28} {str(true):>4} {str(lock):>4} {_fmt(azf):>7} "
+                f"{_fmt(dca):>5} {_fmt(1 if d.get('visible_at_fire') else 0):>3} "
+                f"{_fmt(d.get('escape_direction_correct')):>5} {note:<40}",
                 flush=True,
             )
     fr = summary.get("frontal_gate") or {}

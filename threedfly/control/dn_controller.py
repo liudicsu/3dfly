@@ -18,6 +18,7 @@ import numpy as np
 
 from threedfly.brain.readouts import DNReadout
 from threedfly.control.flight_params import FlightParams
+from threedfly.control.gf_readout import pd_score, rise_velocity
 
 
 def _tanh(x: float) -> float:
@@ -86,6 +87,13 @@ class DNFlightController:
         self._vpn_rising = False
         self.last_lock_step: Optional[int] = None
         self.last_yaw_terms: Dict[str, float] = {}
+        self.last_gf_score = 0.0
+        self._rise_hist: List[float] = []
+        self._rise_L_hist: List[float] = []
+        self._rise_R_hist: List[float] = []
+        self._gf_integ = 0.0
+        self._gf_integ_L = 0.0
+        self._gf_integ_R = 0.0
 
     def bind_hover(self, hover_action: float) -> None:
         self.params.hover_up = float(hover_action)
@@ -136,6 +144,13 @@ class DNFlightController:
         self._vpn_rising = False
         self.last_lock_step = None
         self.last_yaw_terms = {}
+        self.last_gf_score = 0.0
+        self._rise_hist = []
+        self._rise_L_hist = []
+        self._rise_R_hist = []
+        self._gf_integ = 0.0
+        self._gf_integ_L = 0.0
+        self._gf_integ_R = 0.0
 
     def capture_baseline(self, readout: DNReadout, dnp01_rest: Optional[float] = None) -> None:
         """Snapshot per-side DN rest after brain/flyvis pre-warm."""
@@ -173,6 +188,13 @@ class DNFlightController:
         self.last_vpn_slope = 0.0
         self._vpn_rising = False
         self.last_lock_step = None
+        self.last_gf_score = 0.0
+        self._rise_hist = []
+        self._rise_L_hist = []
+        self._rise_R_hist = []
+        self._gf_integ = 0.0
+        self._gf_integ_L = 0.0
+        self._gf_integ_R = 0.0
         if self.params.use_engineered_eye_laterality:
             eye = float(readout.eye_L) - float(readout.eye_R)
             if abs(eye) >= float(self.params.eye_threat_min):
@@ -591,7 +613,45 @@ class DNFlightController:
             rise = max(float(rise_L), float(rise_R))
         else:
             rise = self._update_rest(float(readout.dnp01_L), float(readout.dnp01_R))
+            if self.dnp01_rest_L is not None and self.dnp01_rest_R is not None:
+                rise_L, rise_R = self._dnp01_rises(readout)
+            else:
+                rise_L = rise_R = float(rise)
         self.last_rise = float(rise)
+        dt_vis = float(getattr(p, "visual_dt", 0.02))
+        win_s = float(getattr(p, "gf_vel_window_s", 0.04))
+        self._rise_hist.append(float(rise))
+        self._rise_L_hist.append(float(rise_L))
+        self._rise_R_hist.append(float(rise_R))
+        if len(self._rise_hist) > 16:
+            self._rise_hist = self._rise_hist[-16:]
+            self._rise_L_hist = self._rise_L_hist[-16:]
+            self._rise_R_hist = self._rise_R_hist[-16:]
+        vel = rise_velocity(self._rise_hist, dt_vis, win_s)
+        vel_L = rise_velocity(self._rise_L_hist, dt_vis, win_s)
+        vel_R = rise_velocity(self._rise_R_hist, dt_vis, win_s)
+        k_gf = float(getattr(p, "gf_k", 0.0))
+        inst = pd_score(rise, vel, k_gf)
+        inst_L = pd_score(rise_L, vel_L, k_gf)
+        inst_R = pd_score(rise_R, vel_R, k_gf)
+        form = str(getattr(p, "gf_form", "pd"))
+        if form == "integrate":
+            if rise < float(p.dnp01_rearm_delta_hz):
+                self._gf_integ = 0.0
+                self._gf_integ_L = 0.0
+                self._gf_integ_R = 0.0
+            else:
+                self._gf_integ += max(0.0, inst) * dt_vis
+                self._gf_integ_L += max(0.0, inst_L) * dt_vis
+                self._gf_integ_R += max(0.0, inst_R) * dt_vis
+            score = float(self._gf_integ)
+            score_L = float(self._gf_integ_L)
+            score_R = float(self._gf_integ_R)
+        else:
+            score = inst
+            score_L = inst_L
+            score_R = inst_R
+        self.last_gf_score = float(score)
         self._d01_hist.append(float(dnp01_raw))
         if len(self._d01_hist) > 8:
             self._d01_hist.pop(0)
@@ -613,10 +673,7 @@ class DNFlightController:
             self._steep_climb = True
         if expanding and rise >= float(getattr(p, "dnp01_vpn_delta_hz", 0.12)):
             self._steep_climb = True
-        vpn_delta = float(getattr(p, "dnp01_vpn_delta_hz", 0.12))
-        fire_delta = float(p.dnp01_escape_delta_hz)
-        if expanding:
-            fire_delta = min(fire_delta, vpn_delta)
+        fire_bar = float(getattr(p, "gf_threshold", p.dnp01_escape_delta_hz))
         if rise < float(p.dnp01_rearm_delta_hz) and not expanding:
             self._escape_armed = True
             self._rise_hold = 0
@@ -650,8 +707,7 @@ class DNFlightController:
         # Brake without this fire is not an escape.
         both_gf = False
         if self.dnp01_rest_L is not None and self.dnp01_rest_R is not None:
-            gf_L, gf_R = self._dnp01_rises(readout)
-            both_gf = min(float(gf_L), float(gf_R)) >= fire_delta
+            both_gf = min(float(score_L), float(score_R)) >= fire_bar
             lplc_L = float(readout.lplc2_L)
             lplc_R = float(readout.lplc2_R)
             if self._base is not None:
@@ -667,7 +723,7 @@ class DNFlightController:
             and lat_ok
             and self._steep_climb
             and self._escape_armed
-            and rise >= fire_delta
+            and score >= fire_bar
             and vpn_ok
         )
         if would_fire:
@@ -798,6 +854,7 @@ class DNFlightController:
             "dnp01_rest_L": float(self.dnp01_rest_L or 0.0),
             "dnp01_rest_R": float(self.dnp01_rest_R or 0.0),
             "dnp01_rise": float(self.last_rise),
+            "gf_score": float(self.last_gf_score),
             "dnp03_L": float(ro.dnp03_L),
             "dnp03_R": float(ro.dnp03_R),
             "lplc2_L": float(ro.lplc2_L),

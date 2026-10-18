@@ -364,7 +364,7 @@ def test_lc4_ipsilateral_laterality_sets_threat():
 
 
 def test_frontal_both_gf_cross_with_expanding_vpn_fires_escape():
-    """Both DNp01 sides crossing 0.20 with expanding VPN is a GF takeoff."""
+    """Both GF scores crossing the calibrated bar with expanding LPLC2 is a takeoff."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
     rest = DNReadout(
         dnp01_L=0.50,
@@ -659,8 +659,8 @@ def test_hse_matched_lc4_does_not_count_as_expanding():
     assert c.brain_escape_count == 0
 
 
-def test_vpn_climb_fires_at_lower_dnp01_than_size_gate():
-    """LC4 expansion is the GF drive: fire at 0.12 Hz DNp01, not after 0.20."""
+def test_vpn_climb_does_not_use_a_second_fire_bar():
+    """VPN expansion is a gate. The 0.12 Hz shortcut is gone; GF score decides."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=2)
     rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.40, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
     c.capture_baseline(rest)
@@ -677,8 +677,37 @@ def test_vpn_climb_fires_at_lower_dnp01_than_size_gate():
                 dng02_amp=5.0,
             )
         )
+    # rise = 0.14. With the uncalibrated 0.12 VPN bar this used to fire.
+    # After GF calibration the score must cross gf_threshold.
+    if c.last_gf_score < float(c.params.gf_threshold):
+        assert c.brain_escape_count == 0
+    else:
+        assert c.brain_escape_count == 1
+        assert c.escape_events[-1].threat_side == "L"
+
+
+def test_calibrated_gf_score_fires_escape():
+    """A climb that crosses the frozen GF score with VPN+laterality fires."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=2)
+    rest = DNReadout(dnp01_L=1.80, dnp03_L=0.40, dnp03_R=0.40, lc4_L=1.0, lc4_R=1.0, dng02_amp=5.0)
+    c.capture_baseline(rest)
+    bar = float(c.params.gf_threshold)
+    for i in range(8):
+        z = 1.80 + (bar + 0.15) * min(1.0, (i + 1) / 6.0)
+        amp = 1.0 + 0.45 * (i + 1)
+        c.compute(
+            DNReadout(
+                dnp01_L=z,
+                dnp03_L=0.40 + 0.35 * (i + 1),
+                dnp03_R=0.40,
+                lc4_L=amp,
+                lc4_R=1.0,
+                lplc2_L=0.2 * (i + 1),
+                dng02_amp=5.0,
+            )
+        )
     assert c.brain_escape_count == 1
-    assert c.last_rise < 0.20
+    assert c.last_gf_score >= bar
     assert c.escape_events[-1].threat_side == "L"
 
 

@@ -22,7 +22,11 @@ def test_residual_off_and_no_dng02_yaw_gain():
 
 def test_escape_threshold_sits_between_m1_rotation_and_loom():
     p = FlightParams()
-    assert 0.15 < p.dnp01_escape_delta_hz < 0.45
+    assert p.gf_form in ("pd", "integrate")
+    assert p.gf_k >= 0.0
+    assert p.gf_threshold > 0.0
+    assert p.gf_vel_window_s > 0.0
+    assert p.gf_target_deg == 50.0
     assert p.dnp01_loom_hz == M1_DNP01_LOOM_IPSI_HZ
     assert p.dnp01_rot_hz == M1_DNP01_ROT_MAX_HZ
     assert p.dna02_scale_hz == M1_DNA02_LR_HZ
@@ -37,8 +41,8 @@ def test_escape_threshold_sits_between_m1_rotation_and_loom():
     assert p.threat_integrate_steps >= 8
     assert p.threat_lock_consistent >= 3
     assert p.threat_lock_rise_hz >= 0.10
-    assert p.dnp01_vpn_delta_hz < p.dnp01_escape_delta_hz
     assert p.vpn_amp_min > 0.0
     assert p.lat_rest_tau_steps >= 10.0
-    assert "0.20" in p.notes["escape"] or "laterality" in p.notes["escape"]
+    assert "von Reyn" in p.notes["escape"]
+    assert "calibrate_gf_readout" in p.notes["escape"]
     assert "20" in p.notes["geometry"] and "70" in p.notes["geometry"]

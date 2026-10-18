@@ -16,7 +16,7 @@ from threedfly.connectome.simulator import (
     count_directed_hops,
 )
 from threedfly.sim import FlyEnvironment
-from threedfly.vision import StereoVision, PointCloudMapper, BrainDepthEstimator
+from threedfly.vision import StereoVision, BrainDepthEstimator
 from threedfly.vision.brain_depth import extract_t4_t5_flow_features
 from threedfly.control import FlightController, ExplorationPolicy
 from threedfly.control.controller import BiologicalFlightController
@@ -141,6 +141,8 @@ def run_simulation(
     )
     
     print("\n[4/7] Initializing vision and mapping...")
+    from threedfly.vision.pointcloud import PointCloudMapper
+
     stereo = StereoVision(baseline=0.012, focal_length=0.01)
     mapper = PointCloudMapper(voxel_size=0.05)
     

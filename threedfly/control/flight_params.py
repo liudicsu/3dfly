@@ -41,14 +41,25 @@ class FlightParams:
     # --- Giant fiber / escape (DNp01) ---
     dnp01_loom_hz: float = M1_DNP01_LOOM_IPSI_HZ
     dnp01_rot_hz: float = M1_DNP01_ROT_MAX_HZ
-    # U-flip right hex: camera-object DNp01 ~0.70 / 0.86 Hz. Open wander
-    # ~0.28 Hz. 0.20 fires earlier (40–60° GF) with slope + integrated
-    # laterality so slow open climb cannot pass.
-    dnp01_escape_delta_hz: float = 0.20
+    # Alias of gf_threshold (pd form). Live fire is the readout, not 0.20.
+    dnp01_escape_delta_hz: float = 0.23
+    # Frozen GF readout from scripts/calibrate_gf_readout.py (do not retune
+    # on closed-loop gates). Canonical set: flyvis loom() l/v=40 ms, fly
+    # still, gray; both-eyes x0=0 and L/R at az ±30°.
+    # form=pd, k=0.045 s, threshold=0.23 Hz
+    #   both_x0_0  37.7°   L_az30  49.3°   R_az-30  54.8°
+    # Binocular hex loom is stronger (rise@50°=0.25 vs 0.18); no (k, thr)
+    # puts all three in 40–60°. Fit maximises n_in_window (2/3) then RMS
+    # to 50°. von Reyn et al. 2014 Nat Neurosci / 2017 Curr Biol.
+    gf_form: str = "pd"
+    gf_k: float = 0.045
+    gf_threshold: float = 0.23
+    gf_vel_window_s: float = 0.04
+    gf_target_deg: float = 50.0
     # Re-arm only after rise falls below this (rising-edge).
     dnp01_rearm_delta_hz: float = 0.12
-    # GF is LC4/LPLC2-driven: allow a lower DNp01 bar when looming VPNs climb
-    # so the burst can sit in the 40–60° angular-size window.
+    # Hold / steep-climb helper, not a second fire bar. The calibrated
+    # GF score already includes velocity; VPN no longer lowers the bar.
     dnp01_vpn_delta_hz: float = 0.12
     # Genuine close is steep (≈0.016–0.025 Hz/step). Open wander is ≈0.009.
     dnp01_slope_min: float = 0.012
@@ -167,13 +178,14 @@ class FlightParams:
 
     notes: Dict[str, str] = field(default_factory=lambda: {
         "escape": (
-            "DNp01 rise = max(L−rest_L, R−rest_R) ≥ 0.20 Hz, or ≥ 0.12 Hz "
-            "while LC4/LPLC2 expand (biological GF at 40–60°); laterality "
-            "and VPN are rises over a slow rest so residual left DC / "
-            "self-motion cannot fire; course freeze only on a lateral "
-            "DNp01 climb (bilateral wall keeps HS); "
-            "HS-orthogonal VPN; p90 LC4/LPLC2; T4/T5 handoff gain; "
-            "consistent-sign lock; course frozen; U-flip; stride 2"
+            "GF readout calibrated once on flyvis loom() l/v=40 ms "
+            "(both-eyes centred + L/R az ±30°, fly still, gray): "
+            "pd score = rise + 0.045·d(rise)/dt, threshold 0.23 Hz "
+            "(canonical fire 37.7° / 49.3° / 54.8°; binocular hex is "
+            "early, no 3/3 in 40–60°). scripts/calibrate_gf_readout.py; "
+            "von Reyn et al. 2014 Nat Neurosci / 2017 Curr Biol. "
+            "VPN/laterality remain gates, not a second 0.12 Hz fire bar. "
+            "Course freeze only on a lateral DNp01 climb; stride 2"
         ),
         "dnp03": (
             "DNp03 + LC4/LPLC ipsilateral L−R after per-side baseline → "
@@ -199,8 +211,9 @@ class FlightParams:
         ),
         "geometry": (
             "Lateral |az|≥30° at rise onset must turn away; frontal GF "
-            "takeoff when both DNp01 sides cross 0.20 (brake alone is "
-            "not the escape). Official looms start ≤5° and are present "
+            "takeoff when both sides cross the calibrated GF score "
+            "(brake alone is not the escape). Official looms start ≤5° "
+            "and are present "
             "at prewarm. Static 30–40° onset and receding discs must "
             "not fire. Frontolat |az0| 20–70° visible+approaching and "
             "turn away (≥80%). Eccentric |az|≈90–120° are report-only."
