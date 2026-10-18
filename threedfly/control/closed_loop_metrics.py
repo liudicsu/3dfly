@@ -21,6 +21,12 @@ PR16_WALLS_PER_100 = 100.0 * PR16_WALLS / PR16_STEPS  # 4.05
 LOOM_RADIUS_M = 0.58
 # |body azimuth| at rise onset. ≥ this is a side loom; below is frontal GF.
 LATERAL_AZ_DEG = 30.0
+# Acceptance bands (von Reyn / Klapoetke): frontolateral collision-course
+# looms gate the official escape score. Eccentric |az|≳70° is report-only
+# because LPLC2/GF are frontally biased.
+FRONTAL_AZ_MAX_DEG = 20.0
+FRONTOLAT_AZ_MIN_DEG = 20.0
+FRONTOLAT_AZ_MAX_DEG = 70.0
 
 
 def xy_extent(traj: np.ndarray) -> tuple[float, float]:
@@ -115,6 +121,92 @@ def visible_approaching_ok(
     if not visible or fire_step is None or closest_step is None:
         return False
     return int(fire_step) <= int(closest_step)
+
+
+def onset_azimuth_band(azimuth_deg: Optional[float]) -> str:
+    """frontal / frontolat / eccentric / unknown. Gate uses frontolat."""
+    if azimuth_deg is None or not np.isfinite(float(azimuth_deg)):
+        return "unknown"
+    a = abs(float(azimuth_deg))
+    if a < FRONTAL_AZ_MAX_DEG:
+        return "frontal"
+    if a <= FRONTOLAT_AZ_MAX_DEG:
+        return "frontolat"
+    return "eccentric"
+
+
+def nearest_wall_ray(xyz, heading_rad: float, room_xy: float = ROOM_XY) -> dict:
+    """First room wall along the heading. Distance (m) and time-of-flight at 1 m/s."""
+    p = np.asarray(xyz, dtype=float)[:2]
+    u = np.array([np.cos(float(heading_rad)), np.sin(float(heading_rad))], dtype=float)
+    best = None
+    faces = (
+        ("+X", np.array([1.0, 0.0]), float(room_xy)),
+        ("-X", np.array([-1.0, 0.0]), float(room_xy)),
+        ("+Y", np.array([0.0, 1.0]), float(room_xy)),
+        ("-Y", np.array([0.0, -1.0]), float(room_xy)),
+    )
+    for name, nrm, lim in faces:
+        denom = float(np.dot(u, nrm))
+        if denom <= 1e-9:
+            continue
+        dist = (lim - float(np.dot(p, nrm))) / denom
+        if dist <= 0:
+            continue
+        hit = p + dist * u
+        if max(abs(hit[0]), abs(hit[1])) > float(room_xy) + 1e-6:
+            continue
+        rec = {"wall": name, "distance_m": float(dist), "hit_xy": (float(hit[0]), float(hit[1]))}
+        if best is None or rec["distance_m"] < best["distance_m"]:
+            best = rec
+    if best is None:
+        return {"wall": None, "distance_m": None, "ttc_s": None, "hit_xy": None}
+    return best
+
+
+def wall_ttc_s(xyz, heading_rad: float, speed_mps: float, room_xy: float = ROOM_XY) -> dict:
+    rec = nearest_wall_ray(xyz, heading_rad, room_xy=room_xy)
+    dist = rec.get("distance_m")
+    rec["speed_mps"] = float(speed_mps)
+    rec["ttc_s"] = None if dist is None else float(dist) / max(float(speed_mps), 1e-6)
+    rec["expansion_rate_1_per_s"] = (
+        None if dist is None else float(speed_mps) / max(float(dist), 1e-6)
+    )
+    return rec
+
+
+def collision_course_object(
+    az_deg: float,
+    distance_m: float,
+    lv_s: float,
+    radius: float = LOOM_RADIUS_M,
+    fly_xyz=(0.0, 0.0, 1.5),
+    fly_yaw: float = 0.0,
+) -> dict:
+    """Dark disc aimed at the fly (impact parameter 0). ``lv_s`` is l/v in seconds."""
+    az = np.radians(float(az_deg)) + float(fly_yaw)
+    fly = np.asarray(fly_xyz, dtype=float)
+    start = fly.copy()
+    start[0] += float(distance_m) * float(np.cos(az))
+    start[1] += float(distance_m) * float(np.sin(az))
+    speed = float(radius) / max(float(lv_s), 1e-6)
+    vel = (-speed * float(np.cos(az)), -speed * float(np.sin(az)), 0.0)
+    if abs(float(az_deg)) < 1e-6:
+        side = "F"
+    else:
+        side = "L" if float(az_deg) > 0 else "R"
+    return {
+        "pose": (float(fly[0]), float(fly[1]), float(fly[2])),
+        "yaw": float(fly_yaw),
+        "vel": (0.02, 0.0, 0.0),
+        "loom_start": (float(start[0]), float(start[1]), float(start[2])),
+        "loom_vel": vel,
+        "az_design_deg": float(az_deg),
+        "lv_s": float(lv_s),
+        "distance_m": float(distance_m),
+        "closing_speed_mps": float(speed),
+        "threat_side": side,
+    }
 
 
 def classify_loom(azimuth_deg: Optional[float], lateral_deg: float = LATERAL_AZ_DEG) -> str:

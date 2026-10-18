@@ -41,3 +41,4 @@ def test_escape_threshold_sits_between_m1_rotation_and_loom():
     assert p.vpn_amp_min > 0.0
     assert p.lat_rest_tau_steps >= 10.0
     assert "0.20" in p.notes["escape"] or "laterality" in p.notes["escape"]
+    assert "20" in p.notes["geometry"] and "70" in p.notes["geometry"]

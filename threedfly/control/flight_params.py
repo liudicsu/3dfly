@@ -186,10 +186,11 @@ class FlightParams:
         "geometry": (
             "Lateral |az|≥30° at rise onset must turn away; frontal GF "
             "must escape/brake without turning into the object. "
-            "Score only fires while the object is visible and approaching "
-            "(after closest approach = fail). Report true angular_size_fire_deg "
-            "and fire_minus_closest. Solid dark disc (not sub-hex checkers): "
-            "Klapoetke/von Reyn GF window 40–60°"
+            "Official gate: frontolateral collision-course |az0| 20–70°, "
+            "visible+approaching (dCA≤0) and turn away (≥80%). Pure frontal "
+            "|az0|<20° must fire (either side / brake ok). Eccentric "
+            "|az|≈90–120° (old official L/R) are report-only: LPLC2/GF "
+            "frontal bias. Solid dark disc; no hide-as-loom."
         ),
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })

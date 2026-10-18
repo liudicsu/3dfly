@@ -13,6 +13,7 @@ from threedfly.control.closed_loop_metrics import (
     body_azimuth_deg,
     classify_loom,
     closest_approach_step,
+    collision_course_object,
     coverage,
     direction_correct_frac,
     escape_turned_away,
@@ -20,7 +21,9 @@ from threedfly.control.closed_loop_metrics import (
     geometry_aware_event_ok,
     geometry_aware_frac,
     object_behind_fly,
+    onset_azimuth_band,
     visible_approaching_ok,
+    wall_ttc_s,
     walls_per_100,
     wrap_heading_delta,
     xy_extent,
@@ -90,6 +93,42 @@ def test_body_azimuth_left_is_positive():
     assert body_azimuth_deg((0.0, 1.0), (0.0, 0.0), 0.0) == pytest.approx(90.0)
     assert body_azimuth_deg((1.0, 0.0), (0.0, 0.0), 0.0) == pytest.approx(0.0)
     assert body_azimuth_deg((0.0, -1.0), (0.0, 0.0), 0.0) == pytest.approx(-90.0)
+
+
+def test_onset_azimuth_bands_and_collision_course():
+    assert onset_azimuth_band(12.0) == "frontal"
+    assert onset_azimuth_band(20.0) == "frontolat"
+    assert onset_azimuth_band(45.0) == "frontolat"
+    assert onset_azimuth_band(70.0) == "frontolat"
+    assert onset_azimuth_band(90.0) == "eccentric"
+    spec = collision_course_object(35.0, 2.4, 0.04)
+    assert spec["threat_side"] == "L"
+    assert spec["loom_start"][1] > 0
+    # Aimed at the origin: velocity is anti-parallel to the start vector.
+    start = np.array(spec["loom_start"][:2])
+    vel = np.array(spec["loom_vel"][:2])
+    assert float(np.dot(start, vel)) < 0
+    spec_r = collision_course_object(-55.0, 2.4, 0.08)
+    assert spec_r["threat_side"] == "R"
+    assert spec_r["loom_start"][1] < 0
+
+
+def test_wall_ttc_yaw220_from_west_is_minus_x_wall():
+    rec = wall_ttc_s((-2.0, 0.0, 1.5), 2.20, 0.40)
+    assert rec["wall"] == "-X"
+    assert rec["distance_m"] > 4.5
+    assert rec["ttc_s"] > 8.0
+    assert rec["expansion_rate_1_per_s"] == pytest.approx(0.40 / rec["distance_m"])
+
+
+def test_escape_turned_into_is_opposite_of_away():
+    into_left = [0.0, 0.08, 0.16, 0.24]
+    away_left = [0.0, -0.08, -0.16, -0.24]
+    from threedfly.control.closed_loop_metrics import escape_turned_into
+
+    assert escape_turned_into(into_left, 0, "L")
+    assert not escape_turned_into(away_left, 0, "L")
+    assert not escape_turned_into(into_left, 0, "R")
 
 
 def test_classify_loom_uses_30deg_lateral():
@@ -164,6 +203,12 @@ def test_noobj_heading_control_requires_zero_fires():
     assert summary["n"] == 4
     assert summary["fires"] == 0
     assert summary["pass"] is True
+    open6 = {f"ctrl_noobj_h{i}": {"brain_escapes": 0, "would_fire": 0, "dnp01_rise_max": 0.1, "steps": 220} for i in range(6)}
+    open6["ctrl_wallloom_yaw220"] = {"brain_escapes": 1, "would_fire": 1, "dnp01_rise_max": 0.4, "steps": 220}
+    s6 = mod._noobj_heading_summary(open6)
+    assert s6["n"] == 6
+    assert s6["fires"] == 0
+    assert s6["pass"] is True
     fail = mod._noobj_heading_summary(
         {"ctrl_noobj_yaw0": {"brain_escapes": 1, "would_fire": 1, "dnp01_rise_max": 0.3, "steps": 220}}
     )
@@ -228,6 +273,63 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert vars_l["far1.4x"]["loom_start"][1] > loom_l["loom_start"][1]
     assert vars_r["offset_x+0.8"]["loom_start"][0] > loom_r["loom_start"][0]
     assert vars_l["stride_hold"]["stride"] == 2
+    fl = {c["tag"]: c for c in mod.frontolateral_gate_cases()}
+    assert any(c["az_design_deg"] == 35.0 for c in fl.values())
+    assert any(c["az_design_deg"] == -55.0 for c in fl.values())
+    assert {c["lv_s"] for c in fl.values()} >= {0.02, 0.04, 0.08}
+    rnd = mod.random_frontolateral_cases()
+    assert [c["seed"] for c in rnd] == list(mod.FRONTOLAT_RANDOM_SEEDS)
+    rnd2 = mod.random_frontolateral_cases()
+    assert rnd[0]["loom_start"] == rnd2[0]["loom_start"]
+    for c in rnd:
+        assert 20.0 <= abs(c["az_design_deg"]) <= 70.0
+    assert {c["lv_s"] for c in rnd} >= {0.02, 0.04, 0.08}
+    assert {c["threat_side"] for c in rnd} >= {"L", "R"}
+    fronts = mod.frontal_gate_cases()
+    assert all(abs(c["az_design_deg"]) < 20.0 for c in fronts)
+    assert len(mod.OPEN_NOOBJ_YAWS) == 6
+    gate = mod._frontolat_gate(
+        {
+            "fl_L_az35_lv0.04_d2.4": {
+                "brain_escapes": 1,
+                "approaching_at_fire": True,
+                "visible_at_fire": True,
+                "escape_direction_correct": 1.0,
+            },
+            "fl_R_az35_lv0.04_d2.4": {
+                "brain_escapes": 1,
+                "approaching_at_fire": False,
+                "visible_at_fire": True,
+                "escape_direction_correct": 1.0,
+            },
+            "side_loom_left": {
+                "brain_escapes": 1,
+                "approaching_at_fire": True,
+                "escape_direction_correct": 1.0,
+            },
+        }
+    )
+    assert gate["n"] == 2
+    assert gate["mean"] == pytest.approx(0.5)
+    assert gate["pass"] is False
+    official = mod._official_pass(
+        {
+            "frontolat_gate": {"pass": True},
+            "frontal_gate": {"pass": True},
+            "ctrl_noobj_headings": {"pass": True},
+        },
+        type("P", (), {"use_engineered_eye_laterality": False, "use_engineered_looming_residual": False})(),
+    )
+    assert official["pass"] is True
+    official_fail = mod._official_pass(
+        {
+            "frontolat_gate": {"pass": False},
+            "frontal_gate": {"pass": True},
+            "ctrl_noobj_headings": {"pass": True},
+        },
+        type("P", (), {"use_engineered_eye_laterality": False, "use_engineered_looming_residual": False})(),
+    )
+    assert official_fail["pass"] is False
     vd = mod._variant_direction(
         {
             "side_loom_left": {"escape_direction_correct": 1.0},

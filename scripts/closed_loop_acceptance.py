@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""Closed-loop M2–M4 acceptance: room flight + lateral loom L/R + open-space.
+"""Closed-loop M2–M4 acceptance.
 
-Single command on the verification box (connectome + flyvis + 3.12):
+Official escape gate: frontolateral collision-course looms (|az0| 20–70°,
+both sides, several l/v and start distances, plus fixed-seed randoms).
+Pass if ≥80% fire while visible and approaching (dCA ≤ 0) and turn away.
+Pure frontal (|az0|<20°) must fire (brake/climb or either side ok).
+Eccentric official L/R (|az|≈90–120°) are report-only.
 
-    python scripts/closed_loop_acceptance.py
-    python scripts/closed_loop_acceptance.py --quick
-    python scripts/closed_loop_acceptance.py --steps 2000 --output output/m2
-
-Writes ``output/<dir>/metrics.json``, ``trajectory.png``, ``escapes.png``.
-Missing data/flyvis is an error (unit tests skip instead).
-
-Metrics live in ``threedfly.control.closed_loop_metrics`` so they can be
-imported without MuJoCo (NumPy 2: use ``np.ptp``, never ``ndarray.ptp``).
-Wall contacts are scored per 100 steps against PR #16's 81/2000 = 4.05.
+    taskset -c 0,1 python scripts/closed_loop_acceptance.py --steps 2000 --output output/m2
 """
 
 from __future__ import annotations
@@ -35,13 +30,17 @@ from threedfly.control.closed_loop_metrics import (
     PR16_WALLS_PER_100,
     ROOM_XY,
     closest_approach_step,
+    collision_course_object,
     coverage,
     direction_correct_frac,
+    escape_turned_into,
     fire_minus_closest,
     geometry_aware_frac,
     loom_geometry,
     object_behind_fly,
+    onset_azimuth_band,
     visible_approaching_ok,
+    wall_ttc_s,
     walls_per_100,
     wrap_heading_delta,
     xy_extent,
@@ -100,6 +99,78 @@ def lateral_loom_object(side: str) -> dict:
             "loom_vel": (-1.40, 1.35, 0.0),
         }
     raise ValueError(f"side must be L or R, got {side!r}")
+
+
+# Fixed RNG list for unseen frontolateral collision-course seeds.
+# Chosen so the generator (not a hand-picked loom) covers L/R and 0.02/0.04/0.08.
+FRONTOLAT_RANDOM_SEEDS = (14578, 11038, 11, 6527)
+# Six headings at the room centre (far from walls). yaw 2.20 from (−2,0)
+# is a wall-loom, not this gate.
+OPEN_NOOBJ_YAWS = tuple(i * (2.0 * np.pi / 6.0) for i in range(6))
+WALL_LOOM_YAW = 2.20
+
+
+def frontolateral_gate_cases() -> list:
+    """Collision-course looms with design |az| in 20–70° (both sides, several l/v)."""
+    cases = []
+    for az, lv, dist in (
+        (35.0, 0.04, 3.6),
+        (-35.0, 0.04, 3.6),
+        (55.0, 0.04, 3.2),
+        (-55.0, 0.04, 3.2),
+        (45.0, 0.08, 3.4),
+        (-45.0, 0.08, 3.4),
+        (60.0, 0.08, 3.0),
+        (-60.0, 0.08, 3.0),
+        (45.0, 0.02, 4.0),
+        (-45.0, 0.02, 4.0),
+        (30.0, 0.04, 4.0),
+        (-30.0, 0.04, 4.0),
+    ):
+        spec = collision_course_object(az, dist, lv)
+        side = spec["threat_side"]
+        tag = f"fl_{side}_az{int(abs(az))}_lv{lv:g}_d{dist:g}"
+        spec["tag"] = tag
+        spec["band"] = "frontolat"
+        # Fast l/v looms last a few control steps; do not skip flyvis frames.
+        spec["stride"] = 1
+        cases.append(spec)
+    return cases
+
+
+def random_frontolateral_cases(seeds=FRONTOLAT_RANDOM_SEEDS) -> list:
+    cases = []
+    for seed in seeds:
+        rng = np.random.default_rng(int(seed))
+        side = "L" if int(rng.integers(0, 2)) == 0 else "R"
+        az = float(rng.uniform(25.0, 65.0)) * (1.0 if side == "L" else -1.0)
+        lv = float(rng.choice([0.02, 0.04, 0.08]))
+        dist = float(rng.uniform(2.2, 3.2))
+        spec = collision_course_object(az, dist, lv)
+        spec["tag"] = f"fl_seed{int(seed)}"
+        spec["band"] = "frontolat"
+        spec["seed"] = int(seed)
+        spec["stride"] = 1
+        cases.append(spec)
+    return cases
+
+
+def frontal_gate_cases() -> list:
+    """Pure frontal (|az| < 20°): must fire; brake/climb or either side ok."""
+    cases = []
+    for az, lv, dist in ((0.0, 0.04, 3.6), (12.0, 0.04, 3.6)):
+        spec = collision_course_object(az, dist, lv)
+        spec["tag"] = f"front_az{int(az)}_lv{lv:g}"
+        spec["band"] = "frontal"
+        spec["stride"] = 1
+        cases.append(spec)
+    return cases
+
+
+def loom_horizon_steps(distance_m: float, lv_s: float, extra: int = 28, dt: float = 0.02) -> int:
+    speed = 0.58 / max(float(lv_s), 1e-6)
+    ttc = float(distance_m) / max(speed, 1e-6)
+    return int(max(40, np.ceil(ttc / dt) + extra))
 
 
 def loom_variants(side: str) -> list:
@@ -168,6 +239,7 @@ def _run_scenario(
     prewarm=None,
     loom_start=None,
     loom_vel=None,
+    loom_band=None,
 ) -> dict:
     env.reset(seed=0)
     if pose is not None:
@@ -324,6 +396,26 @@ def _run_scenario(
         # After closest approach, or fire with no visible object = fail.
         dir_ok = 0.0
         geo_ok = 0.0
+    band = loom_band or onset_azimuth_band(az_on)
+    if band == "frontal":
+        fired = int(ctl.brain_escape_count) > 0
+        into = False
+        if (
+            fired
+            and threat_side in ("L", "R")
+            and az_on is not None
+            and abs(float(az_on)) >= 8.0
+            and headings_arr.size
+        ):
+            into = escape_turned_into(
+                headings_arr, int(ctl.escape_events[0].step), threat_side
+            )
+        # Must fire. Brake/climb or either-side turn is ok; turning *into* fails.
+        front_ok = 1.0 if fired and not into and (va_ok or not fired) else 0.0
+        if fired and not va_ok:
+            front_ok = 0.0
+        dir_ok = front_ok
+        geo_ok = front_ok
     pre_toward = False
     if threat_side and rise_onset is not None and headings_arr.size:
         i0 = int(np.clip(rise_onset["step"], 0, headings_arr.size - 1))
@@ -362,6 +454,7 @@ def _run_scenario(
         "escape_direction_correct": None if np.isnan(dir_ok) else float(dir_ok),
         "geometry_aware_correct": None if np.isnan(geo_ok) else float(geo_ok),
         "loom_class": None if rise_onset is None else rise_onset["class"],
+        "loom_band": band,
         "azimuth_onset_deg": az_on,
         "angular_size_onset_deg": None if rise_onset is None else float(rise_onset["angular_size_deg"]),
         "azimuth_lock_deg": None if geo_lock is None else float(geo_lock["azimuth_deg"]),
@@ -441,8 +534,117 @@ def _is_loom_variant(name: str) -> bool:
     return name.startswith("side_loom_") or name.startswith("loomL_") or name.startswith("loomR_")
 
 
+def _is_frontolat(name: str) -> bool:
+    return name.startswith("fl_")
+
+
+def _is_frontal(name: str) -> bool:
+    return name.startswith("front_")
+
+
+def _case_ok(sc: dict, *, require_away: bool) -> float:
+    """1 if fire while visible+approaching (and turn away when required)."""
+    if int(sc.get("brain_escapes") or 0) <= 0:
+        return 0.0
+    if not sc.get("approaching_at_fire") and not sc.get("visible_at_fire"):
+        return 0.0
+    if sc.get("approaching_at_fire") is False:
+        return 0.0
+    if require_away:
+        d = sc.get("escape_direction_correct")
+        if d is None or float(d) < 0.8:
+            return 0.0
+    return 1.0
+
+
+def _frontolat_gate(scenarios: dict) -> dict:
+    """Official escape gate: frontolateral collision-course, ≥80%."""
+    per = {}
+    details = {}
+    scores = []
+    for name, sc in scenarios.items():
+        if not _is_frontolat(name):
+            continue
+        ok = _case_ok(sc, require_away=True)
+        per[name] = ok
+        details[name] = {
+            "ok": ok,
+            "azimuth_onset_deg": sc.get("azimuth_onset_deg"),
+            "loom_band": sc.get("loom_band") or onset_azimuth_band(sc.get("azimuth_onset_deg")),
+            "angular_size_fire_deg": sc.get("angular_size_fire_deg"),
+            "fire_minus_closest": sc.get("fire_minus_closest"),
+            "visible_at_fire": sc.get("visible_at_fire"),
+            "approaching_at_fire": sc.get("approaching_at_fire"),
+            "escape_direction_correct": sc.get("escape_direction_correct"),
+            "brain_escapes": sc.get("brain_escapes"),
+            "threat_locked": sc.get("threat_locked"),
+            "dnp01_rise_max": sc.get("dnp01_rise_max"),
+        }
+        scores.append(ok)
+    mean = float(np.mean(scores)) if scores else None
+    return {
+        "per_scenario": per,
+        "details": details,
+        "mean": mean,
+        "n": int(len(scores)),
+        "pass": bool(scores) and float(mean) >= 0.80,
+    }
+
+
+def _frontal_gate(scenarios: dict) -> dict:
+    """Pure frontal: must fire, not turn into (either side / brake ok)."""
+    per = {}
+    details = {}
+    scores = []
+    for name, sc in scenarios.items():
+        if not _is_frontal(name):
+            continue
+        ok = _case_ok(sc, require_away=False)
+        # Turning into a slightly-offset frontal object fails (geo already applied).
+        g = sc.get("geometry_aware_correct")
+        if g is not None and float(g) < 0.5:
+            ok = 0.0
+        per[name] = ok
+        details[name] = {
+            "ok": ok,
+            "azimuth_onset_deg": sc.get("azimuth_onset_deg"),
+            "angular_size_fire_deg": sc.get("angular_size_fire_deg"),
+            "fire_minus_closest": sc.get("fire_minus_closest"),
+            "brain_escapes": sc.get("brain_escapes"),
+            "braked": sc.get("braked"),
+            "pre_escape_yaw_toward": sc.get("pre_escape_yaw_toward"),
+            "dnp01_rise_max": sc.get("dnp01_rise_max"),
+        }
+        scores.append(ok)
+    mean = float(np.mean(scores)) if scores else None
+    return {
+        "per_scenario": per,
+        "details": details,
+        "mean": mean,
+        "n": int(len(scores)),
+        "pass": bool(scores) and float(mean) >= 1.0,
+    }
+
+
+def _official_pass(summary: dict, params) -> dict:
+    """Gates that still decide acceptance. Eccentric L/R and yaw-2.20 do not."""
+    fl = summary.get("frontolat_gate") or {}
+    fr = summary.get("frontal_gate") or {}
+    no = summary.get("ctrl_noobj_headings") or {}
+    brain_only = (not bool(getattr(params, "use_engineered_eye_laterality", False))) and (
+        not bool(getattr(params, "use_engineered_looming_residual", False))
+    )
+    gates = {
+        "frontolat": bool(fl.get("pass")),
+        "frontal": bool(fr.get("pass")),
+        "noobj_open": bool(no.get("pass")),
+        "brain_only": brain_only,
+    }
+    return {"pass": all(gates.values()), "gates": gates}
+
+
 def _variant_direction(scenarios: dict) -> dict:
-    """Raw ≥80% away across official + offset/speed/stride L/R variants."""
+    """Report-only raw away-score for eccentric official L/R + far/slow/offset."""
     dirs = []
     per = {}
     for name, sc in scenarios.items():
@@ -458,11 +660,12 @@ def _variant_direction(scenarios: dict) -> dict:
         "mean": float(np.mean(dirs)) if dirs else None,
         "n": int(len(dirs)),
         "pass": bool(dirs) and float(np.mean(dirs)) >= 0.80,
+        "gate": False,
     }
 
 
 def _variant_geometry_aware(scenarios: dict) -> dict:
-    """Geometry-aware variant score. Lateral no-escape is 0; do not relabel."""
+    """Report-only geometry-aware score for eccentric laterals. Do not gate."""
     dirs = []
     per = {}
     details = {}
@@ -497,6 +700,7 @@ def _variant_geometry_aware(scenarios: dict) -> dict:
         "mean": float(np.mean(dirs)) if dirs else None,
         "n": int(len(dirs)),
         "pass": bool(dirs) and float(np.mean(dirs)) >= 0.80,
+        "gate": False,
     }
 
 
@@ -532,8 +736,22 @@ def _plot_trajectory(scenarios: dict, path: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    prefer = [
+        "room",
+        "open_space",
+        "headon_wall",
+        "side_loom_left",
+        "side_loom_right",
+        "front_az0_lv0.04",
+        "fl_L_az35_lv0.04_d3.6",
+        "fl_R_az35_lv0.04_d3.6",
+        "ctrl_noobj_h0",
+        "ctrl_wallloom_yaw220",
+    ]
+    names = [n for n in prefer if n in scenarios] or list(scenarios)
     fig, ax = plt.subplots(figsize=(7, 7))
-    for name, sc in scenarios.items():
+    for name in names:
+        sc = scenarios[name]
         t = sc["trajectory"]
         if t.size == 0:
             continue
@@ -559,8 +777,9 @@ def _plot_escapes(scenarios: dict, path: Path, delta_hz: float) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    names = list(scenarios)
-    ncols = 3 if len(names) > 4 else 1
+    prefer = [n for n in scenarios if n.startswith(("fl_", "front_", "side_loom_", "ctrl_noobj_", "ctrl_wallloom_", "room"))]
+    names = prefer or list(scenarios)
+    ncols = 4 if len(names) > 6 else 3 if len(names) > 4 else 1
     nrows = int(math.ceil(len(names) / float(ncols)))
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 2.2 * nrows), sharex=False)
     flat = np.atleast_1d(axes).ravel()
@@ -645,10 +864,60 @@ def main(argv=None) -> int:
         vel=(0.30, 0.0, 0.0),
     )
     scenarios = {"room": room}
+
+    def _run_loom_case(spec, n_steps, name=None):
+        name = name or spec["tag"]
+        prev = int(brain.params.flyvis_stride)
+        if spec.get("stride"):
+            brain.params.flyvis_stride = int(spec["stride"])
+        print(
+            f"Scenario {name} az={spec.get('az_design_deg')} lv={spec.get('lv_s')} "
+            f"d={spec.get('distance_m')}…",
+            flush=True,
+        )
+        threat = spec.get("threat_side")
+        if threat == "F":
+            threat = None
+        sc = _run_scenario(
+            name,
+            env,
+            brain,
+            ctl,
+            n_steps,
+            pose=spec["pose"],
+            yaw=spec["yaw"],
+            vel=spec["vel"],
+            threat_side=threat,
+            loom_start=spec["loom_start"],
+            loom_vel=spec["loom_vel"],
+            loom_band=spec.get("band"),
+        )
+        sc["az_design_deg"] = spec.get("az_design_deg")
+        sc["lv_s"] = spec.get("lv_s")
+        sc["seed"] = spec.get("seed")
+        brain.params.flyvis_stride = prev
+        return sc
+
+    fl_cases = frontolateral_gate_cases()
+    if not args.quick:
+        fl_cases = fl_cases + random_frontolateral_cases()
+    else:
+        fl_cases = fl_cases[:2]
+    print("Gate: frontolateral collision-course (|az| 20–70°)…", flush=True)
+    for spec in fl_cases:
+        n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"])
+        scenarios[spec["tag"]] = _run_loom_case(spec, n)
+
+    print("Gate: pure frontal (|az|<20°)…", flush=True)
+    for spec in frontal_gate_cases()[: 1 if args.quick else None]:
+        n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"])
+        scenarios[spec["tag"]] = _run_loom_case(spec, n)
+
+    print("Report-only: eccentric official L/R + far/slow/offset (LPLC2/GF frontal bias)…", flush=True)
     for side in ("L", "R"):
         spec = lateral_loom_object(side)
         name = f"side_loom_{'left' if side == 'L' else 'right'}"
-        print(f"Scenario {name} (dark object from {side}, stride={brain.params.flyvis_stride})…", flush=True)
+        print(f"Scenario {name} (eccentric report-only)…", flush=True)
         scenarios[name] = _run_scenario(
             name,
             env,
@@ -661,11 +930,12 @@ def main(argv=None) -> int:
             threat_side=side,
             loom_start=spec["loom_start"],
             loom_vel=spec["loom_vel"],
+            loom_band="eccentric",
         )
         if not args.quick:
             for var in loom_variants(side):
                 vname = f"loom{side}_{var['tag']}"
-                print(f"Scenario {vname}…", flush=True)
+                print(f"Scenario {vname} (eccentric report-only)…", flush=True)
                 prev = int(brain.params.flyvis_stride)
                 if var.get("stride"):
                     brain.params.flyvis_stride = int(var["stride"])
@@ -681,6 +951,7 @@ def main(argv=None) -> int:
                     threat_side=side,
                     loom_start=var["loom_start"],
                     loom_vel=var["loom_vel"],
+                    loom_band="eccentric",
                 )
                 brain.params.flyvis_stride = prev
     print("Scenario headon_wall…", flush=True)
@@ -720,22 +991,45 @@ def main(argv=None) -> int:
         vel=(0.55, 0.0, 0.0),
         prewarm=16,
     )
-    print("Control: no-object headings ≥200 steps after prewarm, 0 fires…", flush=True)
-    heading_yaws = (0.0, 0.70, -0.70, 2.20)
+    print("Control: 6-heading no-object from room centre (far from walls), 0 fires…", flush=True)
     noobj_steps = 80 if args.quick else 220
-    for i, hyaw in enumerate(heading_yaws):
-        name = f"ctrl_noobj_yaw{i}"
-        speed = 0.40
+    noobj_pose = (0.0, 0.0, 1.5)
+    noobj_speed = 0.35
+    yaws = OPEN_NOOBJ_YAWS[:2] if args.quick else OPEN_NOOBJ_YAWS
+    for i, hyaw in enumerate(yaws):
+        name = f"ctrl_noobj_h{i}"
         scenarios[name] = _run_scenario(
             name,
             env,
             brain,
             ctl,
             noobj_steps,
-            pose=(-2.0, 0.0, 1.5),
+            pose=noobj_pose,
             yaw=float(hyaw),
-            vel=(speed * float(np.cos(hyaw)), speed * float(np.sin(hyaw)), 0.0),
+            vel=(noobj_speed * float(np.cos(hyaw)), noobj_speed * float(np.sin(hyaw)), 0.0),
             prewarm=16 if args.quick else 80,
+        )
+    print("Report-only: yaw 2.20 from (−2,0) — wall/structure loom…", flush=True)
+    wall_yaw = float(WALL_LOOM_YAW)
+    wall_speed = 0.40
+    wall_pose = (-2.0, 0.0, 1.5)
+    wall_info = wall_ttc_s(wall_pose, wall_yaw, wall_speed)
+    scenarios["ctrl_wallloom_yaw220"] = _run_scenario(
+        "ctrl_wallloom_yaw220",
+        env,
+        brain,
+        ctl,
+        noobj_steps,
+        pose=wall_pose,
+        yaw=wall_yaw,
+        vel=(wall_speed * float(np.cos(wall_yaw)), wall_speed * float(np.sin(wall_yaw)), 0.0),
+        prewarm=16 if args.quick else 80,
+    )
+    wall_sc = scenarios["ctrl_wallloom_yaw220"]
+    wall_sc["wall_ray"] = wall_info
+    if wall_sc["trajectory"].size and wall_sc["headings"].size:
+        wall_sc["wall_ray_end"] = wall_ttc_s(
+            wall_sc["trajectory"][-1], float(wall_sc["headings"][-1]), wall_speed
         )
     env.close()
 
@@ -790,6 +1084,18 @@ def main(argv=None) -> int:
             "headon_brain_escapes": scenarios["headon_wall"]["brain_escapes"],
             "ctrl_center_16_escapes": scenarios["ctrl_center_short_prewarm"]["brain_escapes"],
             "ctrl_noobj_headings": _noobj_heading_summary(scenarios),
+            "ctrl_wallloom_yaw220": {
+                "escapes": scenarios["ctrl_wallloom_yaw220"]["brain_escapes"],
+                "rise_max": scenarios["ctrl_wallloom_yaw220"].get("dnp01_rise_max"),
+                "wall_ray": scenarios["ctrl_wallloom_yaw220"].get("wall_ray"),
+                "wall_ray_end": scenarios["ctrl_wallloom_yaw220"].get("wall_ray_end"),
+                "note": (
+                    "Heading 2.20 rad from (−2,0) aims at the −X wall "
+                    "(start ~5.1 m, TTC ~12.7 s at 0.4 m/s, expansion ~0.08 /s). "
+                    "Real expanding wall texture, not residual DC. Report-only; "
+                    "the no-object gate is 6 headings from the room centre."
+                ),
+            },
             "room_escape_sides": _escape_side_counts(room),
             "room_escape_one_sided": _escape_one_sided(room),
             "side_L_would_fire": side_l.get("would_fire"),
@@ -800,8 +1106,24 @@ def main(argv=None) -> int:
             "side_R_fire_minus_closest": side_r.get("fire_minus_closest"),
             "side_L_visible_at_fire": side_l.get("visible_at_fire"),
             "side_R_visible_at_fire": side_r.get("visible_at_fire"),
+            "frontolat_gate": _frontolat_gate(scenarios),
+            "frontal_gate": _frontal_gate(scenarios),
             "variant_direction_correct": _variant_direction(scenarios),
             "variant_geometry_aware": _variant_geometry_aware(scenarios),
+            "eccentric_note": (
+                "Official L/R + far/slow/offset stay report-only: |az|≈90–120° "
+                "at onset. LPLC2/GF are frontally biased (Klapoetke); hex x0=60° "
+                "open-loop DNp01 rise 0.20 is ~90°. Do not retune the brain for them."
+            ),
+            "known_limitations": (
+                "Hex-native open-loop centered discs at l/v=0.04 fire DNp01 rise "
+                "0.20 at 38–49°. The same l/v as a 3D camera disc on a collision "
+                "course (20 ms tick) peaks at ~0.06–0.11 while approaching — too "
+                "few hex-dark frames for GF. Slow 3D collision-course (l/v~0.3) "
+                "can fire on the way in but at 75–120°, matching the late "
+                "eccentric GF. Room coverage stays ~0.06 after VPN rest (false "
+                "left kicks gone). Do not retune the controller to chase either."
+            ),
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
             "ms_per_step_mean": room.get("ms_per_step_brain_flyvis_mean"),
             "ms_flyvis_frame_median": room.get("ms_flyvis_frame_median"),
@@ -815,6 +1137,7 @@ def main(argv=None) -> int:
             "room_yaw_terms": room.get("yaw_terms"),
         },
     }
+    metrics["summary"]["official_pass"] = _official_pass(metrics["summary"], params)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print(json.dumps(metrics["summary"], indent=2))
     _print_variant_tables(metrics["summary"])
@@ -823,13 +1146,40 @@ def main(argv=None) -> int:
 
 
 def _print_variant_tables(summary: dict) -> None:
+    fl = summary.get("frontolat_gate") or {}
+    if fl.get("details"):
+        print("\nFrontolateral collision-course GATE (|az0| 20–70°, visible+approaching, turn away):", flush=True)
+        print(
+            f"{'scenario':<28} {'ok':>4} {'az0':>7} {'angF':>6} {'dCA':>5} {'away':>5} {'esc':>4} {'rise':>6}",
+            flush=True,
+        )
+        for name, d in fl["details"].items():
+            print(
+                f"{name:<28} {_fmt(d.get('ok')):>4} {_fmt(d.get('azimuth_onset_deg')):>7} "
+                f"{_fmt(d.get('angular_size_fire_deg')):>6} {_fmt(d.get('fire_minus_closest')):>5} "
+                f"{_fmt(d.get('escape_direction_correct')):>5} {str(d.get('brain_escapes')):>4} "
+                f"{_fmt(d.get('dnp01_rise_max')):>6}",
+                flush=True,
+            )
+        print(f"frontolat mean={fl.get('mean')} n={fl.get('n')} pass={fl.get('pass')}", flush=True)
+    fr = summary.get("frontal_gate") or {}
+    if fr.get("details"):
+        print("\nFrontal GATE (|az0|<20°, must fire, either side / brake ok):", flush=True)
+        for name, d in fr["details"].items():
+            print(
+                f"  {name} ok={d.get('ok')} az0={_fmt(d.get('azimuth_onset_deg'))} "
+                f"angF={_fmt(d.get('angular_size_fire_deg'))} esc={d.get('brain_escapes')} "
+                f"rise={_fmt(d.get('dnp01_rise_max'))} braked={d.get('braked')}",
+                flush=True,
+            )
+        print(f"frontal mean={fr.get('mean')} pass={fr.get('pass')}", flush=True)
     raw = summary.get("variant_direction_correct") or {}
     geo = summary.get("variant_geometry_aware") or {}
     details = geo.get("details") or {}
     names = list(details) or list(raw.get("per_scenario") or {})
     if not names:
         return
-    print("\nRaw direction (must turn away from scenario side):", flush=True)
+    print("\nEccentric REPORT-ONLY (do not gate; LPLC2/GF frontal bias):", flush=True)
     print(
         f"{'scenario':<28} {'raw':>6} {'geo':>6} {'class':>8} {'az0':>7} {'angF':>6} "
         f"{'dCA':>5} {'vis':>3} {'esc':>4} {'lock':>4} {'toward':>6}",
@@ -855,7 +1205,11 @@ def _print_variant_tables(summary: dict) -> None:
     )
     noobj = summary.get("ctrl_noobj_headings") or {}
     print(
-        f"no-object headings fires={noobj.get('fires')} n={noobj.get('n')} pass={noobj.get('pass')} | "
+        f"OFFICIAL pass={(summary.get('official_pass') or {}).get('pass')} gates={(summary.get('official_pass') or {}).get('gates')} | "
+        f"frontolat gate mean={summary.get('frontolat_gate', {}).get('mean')} pass={summary.get('frontolat_gate', {}).get('pass')} | "
+        f"frontal pass={summary.get('frontal_gate', {}).get('pass')} | "
+        f"no-object (open) fires={noobj.get('fires')} n={noobj.get('n')} pass={noobj.get('pass')} | "
+        f"wallloom yaw2.20 esc={(summary.get('ctrl_wallloom_yaw220') or {}).get('escapes')} | "
         f"room sides={summary.get('room_escape_sides')} one_sided={summary.get('room_escape_one_sided')} | "
         f"ang_fire L/R={summary.get('side_L_angular_size_fire_deg')}/{summary.get('side_R_angular_size_fire_deg')} | "
         f"dCA L/R={summary.get('side_L_fire_minus_closest')}/{summary.get('side_R_fire_minus_closest')} | "
