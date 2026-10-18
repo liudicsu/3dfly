@@ -277,6 +277,30 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
     assert any(c["az_design_deg"] == 35.0 for c in fl.values())
     assert any(c["az_design_deg"] == -55.0 for c in fl.values())
     assert {c["lv_s"] for c in fl.values()} >= {0.02, 0.04, 0.08}
+    from threedfly.control.closed_loop_metrics import (
+        LOOM_RADIUS_M,
+        angular_size_deg,
+        start_distance_for_angular_size,
+        visible_loom_placement,
+    )
+
+    d5 = start_distance_for_angular_size(5.0)
+    assert angular_size_deg(d5, LOOM_RADIUS_M) == pytest.approx(5.0, abs=0.05)
+    for c in fl.values():
+        assert angular_size_deg(c["distance_m"], LOOM_RADIUS_M) <= 5.05
+        assert c.get("present_at_prewarm") is True
+    vis, rad = visible_loom_placement((13.3, 0.0, 1.5), (0.0, 0.0, 1.5))
+    assert vis[0] <= 4.61
+    assert rad < 0.58
+    statics = {c["tag"]: c for c in mod.static_onset_gate_cases()}
+    assert statics
+    assert any(c.get("appear_after_prewarm") for c in statics.values())
+    recedes = mod.receding_gate_cases()
+    assert len(recedes) == 2
+    assert recedes[0]["loom_vel"][0] > 0.0  # moving away from origin along +X/+Y
+    unseen = mod.unseen_frontolat_cases()
+    assert len(unseen) == 16
+    assert {abs(c["az_design_deg"]) for c in unseen} >= {25.0, 40.0, 50.0, 65.0}
     rnd = mod.random_frontolateral_cases()
     assert [c["seed"] for c in rnd] == list(mod.FRONTOLAT_RANDOM_SEEDS)
     rnd2 = mod.random_frontolateral_cases()
@@ -317,6 +341,8 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
             "frontolat_gate": {"pass": True},
             "frontal_gate": {"pass": True},
             "ctrl_noobj_headings": {"pass": True},
+            "static_onset_gate": {"pass": True},
+            "recede_gate": {"pass": True},
         },
         type("P", (), {"use_engineered_eye_laterality": False, "use_engineered_looming_residual": False})(),
     )
@@ -326,6 +352,8 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
             "frontolat_gate": {"pass": False},
             "frontal_gate": {"pass": True},
             "ctrl_noobj_headings": {"pass": True},
+            "static_onset_gate": {"pass": True},
+            "recede_gate": {"pass": True},
         },
         type("P", (), {"use_engineered_eye_laterality": False, "use_engineered_looming_residual": False})(),
     )

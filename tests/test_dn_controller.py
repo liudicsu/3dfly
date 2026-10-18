@@ -363,6 +363,40 @@ def test_lc4_ipsilateral_laterality_sets_threat():
     assert act[4] < -0.05
 
 
+def test_frontal_both_gf_cross_with_expanding_vpn_fires_escape():
+    """Both DNp01 sides crossing 0.20 with expanding VPN is a GF takeoff."""
+    c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)
+    rest = DNReadout(
+        dnp01_L=0.50,
+        dnp01_R=0.50,
+        dnp03_L=0.20,
+        dnp03_R=0.20,
+        lc4_L=0.20,
+        lc4_R=0.20,
+        lplc2_L=0.20,
+        lplc2_R=0.20,
+        dng02_amp=5.0,
+    )
+    c.capture_baseline(rest)
+    for i in range(8):
+        z = 0.50 + 0.08 * (i + 1)
+        v = 0.20 + 0.25 * (i + 1)
+        c.compute(
+            DNReadout(
+                dnp01_L=z,
+                dnp01_R=z,
+                dnp03_L=0.22,
+                dnp03_R=0.22,
+                lc4_L=v,
+                lc4_R=v,
+                lplc2_L=v,
+                lplc2_R=v,
+                dng02_amp=5.0,
+            )
+        )
+    assert c.brain_escape_count >= 1
+
+
 def test_bilateral_dnp01_climb_without_loom_laterality_does_not_escape():
     """r6: 16-step-prewarm centre control. DNp01 settle climb is not a loom."""
     c = _ctl(dnp01_warmup_steps=0, dnp01_post_baseline_steps=0, dnp01_escape_hold_steps=1)

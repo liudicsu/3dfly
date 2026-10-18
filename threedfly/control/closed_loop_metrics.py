@@ -19,6 +19,10 @@ PR16_STEPS = 2000
 PR16_WALLS_PER_100 = 100.0 * PR16_WALLS / PR16_STEPS  # 4.05
 # Must match mjcf loom_geom sphere radius.
 LOOM_RADIUS_M = 0.58
+# Official looms start no larger than this (grow from a point / start far).
+LOOM_START_ANG_MAX_DEG = 5.0
+# Place a matching-angle sphere inside the room when the virtual object is outside.
+ROOM_LOOM_CLEARANCE_M = 4.6
 # |body azimuth| at rise onset. ≥ this is a side loom; below is frontal GF.
 LATERAL_AZ_DEG = 30.0
 # Acceptance bands (von Reyn / Klapoetke): frontolateral collision-course
@@ -72,6 +76,39 @@ def object_behind_fly(obj_xyz, fly_xyz, heading_rad: float, behind_m: float = -0
     rel = np.asarray(obj_xyz, dtype=float)[:2] - np.asarray(fly_xyz, dtype=float)[:2]
     fwd = np.array([np.cos(float(heading_rad)), np.sin(float(heading_rad))], dtype=float)
     return float(np.dot(rel, fwd)) < float(behind_m)
+
+
+def start_distance_for_angular_size(
+    ang_deg: float, radius: float = LOOM_RADIUS_M
+) -> float:
+    """Distance (m) at which a sphere of ``radius`` subtends ``ang_deg``."""
+    return float(radius) / max(float(np.tan(np.radians(0.5 * float(ang_deg)))), 1e-9)
+
+
+def visible_loom_placement(
+    virtual_xyz,
+    fly_xyz,
+    radius: float = LOOM_RADIUS_M,
+    max_range: float = ROOM_LOOM_CLEARANCE_M,
+) -> tuple[tuple[float, float, float], float]:
+    """In-room sphere on the same bearing whose visual angle matches ``virtual_xyz``.
+
+    The room is ±5 m, so a 5° start of a 0.58 m disc sits outside the walls.
+    Eyes see this placed sphere; metrics keep the virtual collision-course.
+    """
+    virt = np.asarray(virtual_xyz, dtype=float).reshape(3)
+    fly = np.asarray(fly_xyz, dtype=float).reshape(3)
+    rel = virt - fly
+    d_virt = float(np.hypot(rel[0], rel[1]))
+    az = float(np.arctan2(rel[1], rel[0]))
+    theta = 2.0 * np.arctan(float(radius) / max(d_virt, 1e-6))
+    d_place = min(d_virt, float(max_range))
+    r_place = float(d_place) * float(np.tan(0.5 * theta))
+    pos = fly.copy()
+    pos[0] += d_place * float(np.cos(az))
+    pos[1] += d_place * float(np.sin(az))
+    pos[2] = virt[2]
+    return (float(pos[0]), float(pos[1]), float(pos[2])), float(max(r_place, 1e-4))
 
 
 def angular_size_deg(distance: float, radius: float = LOOM_RADIUS_M) -> float:

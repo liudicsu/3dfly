@@ -177,6 +177,7 @@ class ClosedLoopBrain:
         self.eyes = eyes
         self.halt_idx = np.asarray(halt_idx if halt_idx is not None else [], dtype=np.int64)
         self.params = params or FlightParams()
+        self.visual_dt = float(getattr(self.params, "visual_dt", 0.02))
         self.last_ms: Dict[str, float] = {}
         self.n_steps = 0
         self._flyvis_hold: Optional[Tuple[dict, dict]] = None
@@ -233,11 +234,19 @@ class ClosedLoopBrain:
         angular_velocity: Optional[np.ndarray] = None,
         hex_L: Optional[np.ndarray] = None,
         hex_R: Optional[np.ndarray] = None,
+        left_side_img: Optional[np.ndarray] = None,
+        right_side_img: Optional[np.ndarray] = None,
     ) -> BrainStep:
         t0 = time.perf_counter()
         if hex_L is None or hex_R is None:
             # Rendered pixels only. No mocap / object pose / radius.
-            hex_L, hex_R = stereo_to_hex(left_img, right_img)
+            hex_L, hex_R = stereo_to_hex(
+                left_img,
+                right_img,
+                left_side_img=left_side_img,
+                right_side_img=right_side_img,
+                dt=float(getattr(self, "visual_dt", 0.02)),
+            )
         t1 = time.perf_counter()
         stride = max(1, int(getattr(self.params, "flyvis_stride", 1)))
         flyvis_ran = self._flyvis_hold is None or (self.n_steps % stride) == 0
@@ -284,6 +293,8 @@ class ClosedLoopBrain:
         right_img: np.ndarray,
         angular_velocity: Optional[np.ndarray] = None,
         n: Optional[int] = None,
+        left_side_img: Optional[np.ndarray] = None,
+        right_side_img: Optional[np.ndarray] = None,
     ) -> Optional[BrainStep]:
         """Settle flyvis + RateCore on the initial images before takeoff.
 
@@ -303,7 +314,13 @@ class ClosedLoopBrain:
         window: list[float] = []
         try:
             for i in range(max_n):
-                last = self.step(left_img, right_img, angular_velocity)
+                last = self.step(
+                    left_img,
+                    right_img,
+                    angular_velocity,
+                    left_side_img=left_side_img,
+                    right_side_img=right_side_img,
+                )
                 d01 = max(float(last.readout.dnp01_L), float(last.readout.dnp01_R))
                 window.append(d01)
                 if i + 1 >= n and tol > 0.0 and len(window) >= 8:

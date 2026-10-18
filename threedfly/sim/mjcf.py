@@ -159,15 +159,20 @@ FLY_MJCF = """
         <geom name="head_geom" type="mesh" mesh="head_mesh" 
               material="fly_body_mat" mass="0.0002" contype="0" conaffinity="0"/>
         
-        <!-- Wide forward FOV, no cant. Each hex samples its own body-frame
-         ray (threedfly/brain/eyes.py). Lattice centre = body-frontal so
-         LPLC2/LC4 see 0–70° looms; 40° out / 20° down had put that
-         sector on the nasal periphery. Image-right = −Y (body right). -->
+        <!-- Forward 150° + ipsilateral 150° side camera. One pinhole
+         cannot cover −15°…+165°. Lattice centre = body-frontal.
+         Image-right = −Y on the forward pair; side cameras look ±Y. -->
         <camera name="left_eye" pos="0.003 0.006 0.002"
                 xyaxes="0.000 -1.000 0.000  0.000 0.000 1.000"
                 fovy="150" mode="fixed"/>
+        <camera name="left_eye_side" pos="0.003 0.006 0.002"
+                xyaxes="1.000 0.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
         <camera name="right_eye" pos="0.003 -0.006 0.002"
                 xyaxes="0.000 -1.000 0.000  0.000 0.000 1.000"
+                fovy="150" mode="fixed"/>
+        <camera name="right_eye_side" pos="0.003 -0.006 0.002"
+                xyaxes="-1.000 0.000 0.000  0.000 0.000 1.000"
                 fovy="150" mode="fixed"/>
       </body>
       
@@ -295,10 +300,11 @@ def get_fly_mjcf() -> str:
     return FLY_MJCF.format(meshdir=meshdir, texturedir=texdir, wall_tex=wall.name)
 
 
-# Forward wide-FOV cameras. Hex rays (not the optical axis) set laterality.
+# Forward + ipsilateral side cameras. Hex rays set laterality.
 # 40° outward / 20° down / 120° packed UV put frontal 0–70° on the periphery.
 EYE_CANT_DEG = 0.0
 EYE_DOWN_DEG = 0.0
+EYE_SIDE_CANT_DEG = 90.0
 EYE_FOVY_DEG = 150.0
 # 320 px @ 150° → 0.47°/px ≪ 5° acceptance (160 px was already ~1° AA).
 EYE_PIXELS = 320

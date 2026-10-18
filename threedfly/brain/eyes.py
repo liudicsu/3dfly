@@ -4,15 +4,17 @@ Eye input is rendered pixels (or an explicit hex movie). No sim object
 pose, radius, or mocap state is read here.
 
 Each hex ommatidium has a body-frame direction taken from the flyvis
-lattice (``hex_degrees``). That lattice is the frontal ~150° of each eye;
-its origin is the binocular field, not the camera optical axis.
+lattice (``hex_degrees``). The 721-hex lattice is a ±75° projection of
+one compound eye: lattice (0, 0) stays body-frontal (LPLC2/LC4), 1:1
+degrees so a 40° disc still covers several hexes. One 150° +X pinhole
+drops the ipsilateral rim, so each eye has a forward camera and an
+ipsilateral side camera (cant 90°). The rear 75–165° of the biological
+eye has no flyvis cells.
 
-Drosophila: each eye covers roughly −15°…+170° azimuth ipsilateral with
-~10–20° frontal overlap (Buchner / Heisenberg). flyvis only has the
-frontal 150° patch, so hex (xd, yd) maps to body (az=±xd, el=yd). Hexes
-outside that eye's biological envelope stay mid-gray: a +35° object is
-left-eye only (right eye's contra limit is +15°). Cameras look along +X
-with a wide square FOV so the remaining rays hit the image.
+    Drosophila: each eye covers roughly −15°…+165° azimuth ipsilateral with
+~10–20° frontal overlap (Buchner / Heisenberg). Hexes outside that
+envelope stay mid-gray: a +35° object is left-eye only (right eye's
+contra limit is +15°).
 
 ``box_eye_uv`` (legacy) packed the lattice into a square pinhole. Combined
 with a 40° outward / 20° down cant that put the frontal 0–70° sector on
@@ -29,14 +31,19 @@ import numpy as np
 from threedfly.brain.constants import DT, HEX_DEG, HEX_EXTENT, N_HEX
 from threedfly.brain.stimuli import hex_degrees
 
-# Must match threedfly/sim/mjcf.py (forward wide-FOV, no cant).
+# Must match threedfly/sim/mjcf.py (forward + ipsilateral side cameras).
 EYE_FOVY_DEG = 150.0
 EYE_CANT_DEG = 0.0
 EYE_DOWN_DEG = 0.0
-# Biological envelope (for coverage plots / tests; sampling is unclamped).
+EYE_SIDE_CANT_DEG = 90.0
+# Biological envelope (Buchner / Heisenberg). Lattice (0,0) = frontal;
+# xd/yd are scaled onto this extent so rear hexes are real directions.
 BIO_AZ_CONTRA_DEG = 15.0
-BIO_AZ_IPSI_DEG = 170.0
+BIO_AZ_IPSI_DEG = 165.0
+BIO_EL_MAX_DEG = 70.0
 UNSEEN_GRAY = 0.5
+# Scene-independent photoreceptor rest (flyvis gray / calib mean).
+LUM_REST_INIT = 0.5
 # flyvis neighbor spacing (hex_to_pixel × HEX_DEG). BoxEye averages a
 # box of this size, then samples the hex centre — not a 5° Gaussian on
 # top of an already 5.8° lattice (that delayed DNp01 61° → 147°).
@@ -48,13 +55,11 @@ ACCEPT_N = 5
 # flyvis ContrastBrightness around a p80 background. 1.10 is in the
 # training log-normal (c≈1, std 0.2). Disc is matte black.
 FLYVIS_CONTRAST_GAIN = 1.10
-# Photoreceptor-like luminance rest: seconds, not frozen and not per-frame.
-# 5 s at the brain DT (100 Hz). A 0.5–0.7 s loom barely moves rest; seconds
-# of still 1/f are tracked. Global p80 alone left spatial texture, which
-# tonically drove T4/LC4 and froze DNp01 rest above a 60° loom.
+# Photoreceptor-like luminance rest. Rest follows input with
+# exp(−dt/τ), τ = 5 s. Initialised to the calibration mean, never to
+# frame 1 (that mapped a static scene to exactly 0.5 on frame 2).
 LUM_TAU_S = 5.0
-LUM_DT_S = float(DT)
-LUM_TAU_STEPS = LUM_TAU_S / LUM_DT_S
+LUM_DT_S = 0.02  # default visual / control tick; override per step.
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
@@ -102,16 +107,36 @@ def box_eye_uv(extent: int = HEX_EXTENT, fovy_deg: float = EYE_FOVY_DEG) -> np.n
     return np.clip(np.stack([u, v], axis=1), 0.0, 1.0).astype(np.float32)
 
 
+@lru_cache(maxsize=4)
+def _lattice_xy_deg(extent: int = HEX_EXTENT) -> tuple[np.ndarray, np.ndarray]:
+    _, _, xd, yd = hex_degrees(extent)
+    return np.asarray(xd, dtype=np.float32), np.asarray(yd, dtype=np.float32)
+
+
+def lattice_span_deg(extent: int = HEX_EXTENT) -> tuple[float, float]:
+    """Raw flyvis (xd, yd) half-spans in degrees (≈75°)."""
+    xd, yd = _lattice_xy_deg(extent)
+    return float(np.max(np.abs(xd))), float(np.max(np.abs(yd)))
+
+
+def hex_world_spacing_deg(extent: int = HEX_EXTENT) -> float:
+    """Neighbor spacing in body degrees. flyvis is a 5.8° lattice."""
+    return float(HEX_SPACING_DEG)
+
+
 def hex_body_azel_deg(side: str, extent: int = HEX_EXTENT) -> tuple[np.ndarray, np.ndarray]:
     """Body-frame azimuth / elevation (deg) of each flyvis hex.
 
-    +azimuth = left (+Y). Left-eye +xd looks left; right-eye +xd looks right
-    so a mirrored object falls on the same lattice site of the other eye.
-    Lattice centre (0, 0) is body-frontal — the LPLC2/LC4-sensitive site.
+    +azimuth = left (+Y). Lattice centre (0, 0) stays body-frontal
+    (LPLC2/LC4). flyvis is a ±75° projection of the eye — 1:1 degrees
+    so a 40° disc still covers several hexes. The rear 75–165° of the
+    biological eye has no flyvis cells. Right-eye +xd looks right.
+    A second (90° cant) camera covers hexes a single 150° +X pinhole
+    drops at the rim.
     """
     if side not in ("L", "R"):
         raise ValueError(f"side must be L or R, got {side!r}")
-    _, _, xd, yd = hex_degrees(extent)
+    xd, yd = _lattice_xy_deg(extent)
     az = xd if side == "L" else -xd
     return np.asarray(az, dtype=np.float32), np.asarray(yd, dtype=np.float32)
 
@@ -180,9 +205,9 @@ def project_dirs_to_uv(
 def hex_in_bio_envelope(side: str, az_deg) -> np.ndarray:
     """True where *az_deg* lies on that eye's Drosophila azimuth range.
 
-    Left: −15° (contra) … +170° (ipsi). Right: mirrored. flyvis only
-    spans ~±75°, so the unused rear ~95° stays empty; the contra cut is
-    what makes a frontolat loom monocular.
+    Left: −15° (contra) … +165° (ipsi). Right: mirrored. The lattice is
+    scaled onto that extent; the contra cut makes a frontolat loom
+    monocular.
     """
     if side not in ("L", "R"):
         raise ValueError(f"side must be L or R, got {side!r}")
@@ -263,50 +288,34 @@ def _sample_image_hex_weighted(
 
 
 class _BgRest:
-    """Per-eye p80 (first frame) plus per-hex rest (later frames)."""
+    """Per-hex luminance rest. Starts at the calibration mean, not frame 1."""
 
     def __init__(self) -> None:
-        self.L: Optional[float] = None
-        self.R: Optional[float] = None
         self.hex_L: Optional[np.ndarray] = None
         self.hex_R: Optional[np.ndarray] = None
 
     def reset(self) -> None:
-        self.L = None
-        self.R = None
         self.hex_L = None
         self.hex_R = None
 
-    def update(self, side: str, bg_now: float) -> float:
-        prev = self.L if side == "L" else self.R
-        bg_now = float(bg_now)
-        if prev is None:
-            rest = bg_now
-        else:
-            rest = float(prev) + (bg_now - float(prev)) / float(LUM_TAU_STEPS)
-        if side == "L":
-            self.L = rest
-        else:
-            self.R = rest
-        return rest
-
-    def update_hex(self, side: str, hex_frame: np.ndarray) -> Optional[np.ndarray]:
-        """Return the previous per-hex rest, or None on the first sample."""
+    def update_hex(
+        self, side: str, hex_frame: np.ndarray, dt: Optional[float] = None
+    ) -> np.ndarray:
+        """Advance rest toward ``hex_frame`` with exp(−dt/τ). Return rest."""
         x = np.asarray(hex_frame, dtype=np.float32)
+        step = float(LUM_DT_S if dt is None else dt)
+        alpha = float(1.0 - np.exp(-step / float(LUM_TAU_S)))
         prev = self.hex_L if side == "L" else self.hex_R
         if prev is None or prev.shape != x.shape:
-            rest = x.copy()
-            if side == "L":
-                self.hex_L = rest
-            else:
-                self.hex_R = rest
-            return None
-        rest = (prev + (x - prev) / float(LUM_TAU_STEPS)).astype(np.float32)
+            rest = np.full(x.shape, float(LUM_REST_INIT), dtype=np.float32)
+        else:
+            rest = prev
+        rest = (rest + alpha * (x - rest)).astype(np.float32)
         if side == "L":
             self.hex_L = rest
         else:
             self.hex_R = rest
-        return prev
+        return rest
 
 
 BG_REST = _BgRest()
@@ -318,27 +327,25 @@ def reset_luminance_rest() -> None:
 
 
 def _luminance_to_gray(
-    hex_frame: np.ndarray, valid: np.ndarray, side: str = "L"
+    hex_frame: np.ndarray,
+    valid: np.ndarray,
+    side: str = "L",
+    dt: Optional[float] = None,
 ) -> np.ndarray:
-    """Match flyvis input stats: background → 0.5, fixed contrast gain.
+    """Match flyvis input stats: rest → 0.5, fixed contrast gain.
 
-    First frame: global p80 → 0.5 so geometry tests still see spatial
-    contrast. Later frames: per-hex rest (seconds) so standing 1/f is
-    mid-gray and only temporal change (a loom) remains. p99 handoff
-    stays on the fixed calib set. Generic; no object geometry.
+    Rest starts at the calibration mean (scene-independent) and follows
+    the hex luminance with exp(−dt/τ), τ = 5 s. A static scene keeps
+    ~37% of its initial contrast at t = τ. p99 handoff stays on the
+    fixed calib set. Generic; no object geometry.
     """
     out = np.asarray(hex_frame, dtype=np.float32).copy()
     m = np.asarray(valid, dtype=bool)
     if np.count_nonzero(m) < 8:
         return out
-    hex_prev = BG_REST.update_hex(side, out)
-    if hex_prev is None:
-        bg_now = float(np.percentile(out[m], 80.0))
-        bg = BG_REST.update(side, bg_now)
-        out[m] = np.clip(UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - bg), 0.0, 1.0)
-        return out
+    rest = BG_REST.update_hex(side, out, dt=dt)
     out[m] = np.clip(
-        UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - hex_prev[m]), 0.0, 1.0
+        UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - rest[m]), 0.0, 1.0
     )
     return out
 
@@ -347,7 +354,9 @@ def hex_coverage(side: str) -> dict:
     """Body-frame az/el actually sampled by each hex (for plots / tests)."""
     az, el = hex_body_azel_deg(side)
     look, x_ax, y_ax = eye_camera_axes(side)
-    uv, valid = hex_camera_uv(side, 160, 160)
+    uv, valid_f = hex_camera_uv(side, 160, 160)
+    _, valid_s = hex_camera_uv(side, 160, 160, cant_deg=EYE_SIDE_CANT_DEG)
+    valid = valid_f | valid_s
     bio = hex_in_bio_envelope(side, az)
     return {
         "side": side,
@@ -355,6 +364,8 @@ def hex_coverage(side: str) -> dict:
         "el_deg": el,
         "uv": uv,
         "valid": valid,
+        "valid_front": valid_f,
+        "valid_side": valid_s,
         "bio": bio,
         "look": look,
         "x_axis": x_ax,
@@ -413,9 +424,9 @@ def image_to_hex(
 
 
 def hex_box_kernel_px(height: int, fovy_deg: float = EYE_FOVY_DEG) -> int:
-    """flyvis BoxEye kernel: one hex-spacing box in camera pixels."""
+    """flyvis BoxEye kernel: one (scaled) hex-spacing box in camera pixels."""
     deg_per_px = float(fovy_deg) / max(float(height), 1.0)
-    return max(1, int(round(HEX_SPACING_DEG / max(deg_per_px, 1e-6))))
+    return max(1, int(round(hex_world_spacing_deg() / max(deg_per_px, 1e-6))))
 
 
 def _box_filter_gray(image: np.ndarray, k: int) -> np.ndarray:
@@ -434,29 +445,51 @@ def _box_filter_gray(image: np.ndarray, k: int) -> np.ndarray:
     return uniform_filter(g, size=int(k), mode="nearest").astype(np.float32)
 
 
-def _image_to_hex_box(image: np.ndarray, side: str) -> np.ndarray:
-    """flyvis BoxEye: box-average at hex spacing, then sample hex centres."""
+def _sample_hex_box(
+    image: np.ndarray, side: str, cant_deg: float = EYE_CANT_DEG
+) -> tuple[np.ndarray, np.ndarray]:
+    """Box-average + hex-centre sample. Returns (hex, valid)."""
     image = np.asarray(image)
     h, w = int(image.shape[0]), int(image.shape[1])
     k = hex_box_kernel_px(h)
     filt = _box_filter_gray(image, k)
-    uv, hex_ok = hex_camera_uv(side, h, w)
+    uv, hex_ok = hex_camera_uv(side, h, w, cant_deg=cant_deg)
     hex_frame = _sample_image_hex(filt, uv)
     hex_frame = np.where(hex_ok, hex_frame, UNSEEN_GRAY).astype(np.float32)
-    return _luminance_to_gray(hex_frame, hex_ok, side=side)
+    return hex_frame, hex_ok
+
+
+def _image_to_hex_box(
+    image: np.ndarray,
+    side: str,
+    side_image: Optional[np.ndarray] = None,
+    dt: Optional[float] = None,
+) -> np.ndarray:
+    """flyvis BoxEye on the front camera, fill rear hexes from the side view."""
+    hex_frame, hex_ok = _sample_hex_box(image, side, cant_deg=EYE_CANT_DEG)
+    if side_image is not None:
+        hex_s, ok_s = _sample_hex_box(side_image, side, cant_deg=EYE_SIDE_CANT_DEG)
+        fill = (~hex_ok) & ok_s
+        hex_frame = np.where(fill, hex_s, hex_frame).astype(np.float32)
+        hex_ok = hex_ok | ok_s
+    return _luminance_to_gray(hex_frame, hex_ok, side=side, dt=dt)
 
 
 def stereo_to_hex(
     left_img: np.ndarray,
     right_img: np.ndarray,
     uv: Optional[np.ndarray] = None,
+    left_side_img: Optional[np.ndarray] = None,
+    right_side_img: Optional[np.ndarray] = None,
+    dt: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Left and right rendered eye images → (721,), (721,) hex frames.
 
-    Official path: flyvis BoxEye (hex-spacing box average, then hex
-    centre). Not a 5° Gaussian on top of the 5.8° lattice. Then
-    flyvis-style luminance (adaptive p80 → 0.5, fixed contrast gain).
-    Generic for every geom. No sim object pose/radius.
+    Official path: flyvis BoxEye (scaled hex-spacing box average, then
+    hex centre) on the forward camera, with rear hexes filled from the
+    ipsilateral side camera. Then photoreceptor rest (τ=5 s, init at
+    the calibration mean). Generic for every geom. No sim object
+    pose/radius.
     """
     left_img = np.asarray(left_img)
     right_img = np.asarray(right_img)
@@ -467,4 +500,7 @@ def stereo_to_hex(
         uv_r = uv.copy()
         uv_r[:, 0] = 1.0 - uv_r[:, 0]
         return image_to_hex(left_img, uv=uv), image_to_hex(right_img, uv=uv_r)
-    return _image_to_hex_box(left_img, "L"), _image_to_hex_box(right_img, "R")
+    return (
+        _image_to_hex_box(left_img, "L", side_image=left_side_img, dt=dt),
+        _image_to_hex_box(right_img, "R", side_image=right_side_img, dt=dt),
+    )

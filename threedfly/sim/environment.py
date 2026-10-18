@@ -64,7 +64,24 @@ class FlyEnvironment:
         # Camera IDs
         self.left_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_eye")
         self.right_eye_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_eye")
+        self.left_eye_side_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_eye_side"
+        )
+        self.right_eye_side_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_eye_side"
+        )
+        self.last_side_images: Tuple[Optional[np.ndarray], Optional[np.ndarray]] = (None, None)
         self._loom_mocap = -1
+        self._loom_geom_id = -1
+        try:
+            self._loom_geom_id = int(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "loom_geom")
+            )
+        except Exception:
+            self._loom_geom_id = -1
+        self._loom_radius0 = (
+            float(self.model.geom_size[self._loom_geom_id, 0]) if self._loom_geom_id >= 0 else 0.58
+        )
         try:
             loom_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "loom_target")
             if loom_bid >= 0:
@@ -186,14 +203,24 @@ class FlyEnvironment:
             self.data.qvel[0:3] = np.asarray(vel, dtype=np.float64).reshape(3)
         mujoco.mj_forward(self.model, self.data)
 
-    def set_loom_object(self, xyz) -> None:
+    def set_loom_radius(self, radius: Optional[float] = None) -> None:
+        """Set the loom sphere radius (metres). None restores the MJCF default."""
+        if self._loom_geom_id < 0:
+            return
+        r = self._loom_radius0 if radius is None else float(radius)
+        self.model.geom_size[self._loom_geom_id, 0] = max(r, 1e-4)
+
+    def set_loom_object(self, xyz, radius: Optional[float] = None) -> None:
         """Place the compact dark loom mocap (metres). Hidden at z=−8 by default."""
         if self._loom_mocap < 0:
             return
+        if radius is not None:
+            self.set_loom_radius(radius)
         self.data.mocap_pos[self._loom_mocap] = np.asarray(xyz, dtype=np.float64).reshape(3)
         mujoco.mj_forward(self.model, self.data)
 
     def hide_loom_object(self) -> None:
+        self.set_loom_radius(None)
         self.set_loom_object((0.0, 0.0, -8.0))
 
     def step(
@@ -312,7 +339,9 @@ class FlyEnvironment:
         if self.renderer is None:
             # Headless mode: return dummy images
             shape = (self.camera_height, self.camera_width, 3)
-            return np.zeros(shape, dtype=np.uint8), np.zeros(shape, dtype=np.uint8)
+            blank = np.zeros(shape, dtype=np.uint8)
+            self.last_side_images = (blank, blank)
+            return blank, blank
         
         # The 150° eyes sit on the head; hide the fly mesh so self-body
         # does not paint a static dark blob onto ventral/central hexes.
@@ -322,29 +351,30 @@ class FlyEnvironment:
             saved = self.model.geom_rgba[fly_ids].copy()
             self.model.geom_rgba[fly_ids, 3] = 0.0
         try:
-            self.renderer.update_scene(self.data, camera=self.left_eye_id)
-            # Generic two-sided raster: single-sided culling drops interiors
-            # of any closed geom (walls, objects) once the camera is inside.
-            # No fog/haze/spec — a black loom must stay black (Klapoetke).
-            fl = self.renderer.scene.flags
-            fl[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_FOG)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_HAZE)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_REFLECTION)] = False
-            left_img = self.renderer.render()
-            self.renderer.update_scene(self.data, camera=self.right_eye_id)
-            fl = self.renderer.scene.flags
-            fl[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_FOG)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_HAZE)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = False
-            fl[int(mujoco.mjtRndFlag.mjRND_REFLECTION)] = False
-            right_img = self.renderer.render()
+            left_img = self._render_eye(self.left_eye_id)
+            right_img = self._render_eye(self.right_eye_id)
+            left_side = (
+                self._render_eye(self.left_eye_side_id) if self.left_eye_side_id >= 0 else None
+            )
+            right_side = (
+                self._render_eye(self.right_eye_side_id) if self.right_eye_side_id >= 0 else None
+            )
+            self.last_side_images = (left_side, right_side)
         finally:
             if saved is not None:
                 self.model.geom_rgba[fly_ids] = saved
         return left_img.copy(), right_img.copy()
+
+    def _render_eye(self, camera_id: int) -> np.ndarray:
+        """One eye camera. Two-sided, no fog/haze/shadow (Klapoetke black)."""
+        self.renderer.update_scene(self.data, camera=int(camera_id))
+        fl = self.renderer.scene.flags
+        fl[int(mujoco.mjtRndFlag.mjRND_CULL_FACE)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_FOG)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_HAZE)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = False
+        fl[int(mujoco.mjtRndFlag.mjRND_REFLECTION)] = False
+        return self.renderer.render()
     
     def get_fly_position(self) -> np.ndarray:
         """Get fly body position (x, y, z)."""

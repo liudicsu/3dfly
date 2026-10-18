@@ -25,6 +25,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from threedfly.control.closed_loop_metrics import (
+    LOOM_RADIUS_M,
+    LOOM_START_ANG_MAX_DEG,
     PR16_STEPS,
     PR16_WALLS,
     PR16_WALLS_PER_100,
@@ -39,7 +41,9 @@ from threedfly.control.closed_loop_metrics import (
     loom_geometry,
     object_behind_fly,
     onset_azimuth_band,
+    start_distance_for_angular_size,
     visible_approaching_ok,
+    visible_loom_placement,
     wall_ttc_s,
     walls_per_100,
     wrap_heading_delta,
@@ -110,58 +114,118 @@ OPEN_NOOBJ_YAWS = tuple(i * (2.0 * np.pi / 6.0) for i in range(6))
 WALL_LOOM_YAW = 2.20
 
 
+def _loom_start_distance_m() -> float:
+    """Far enough that a 0.58 m disc starts at ≤5° (flyvis loom() start)."""
+    return start_distance_for_angular_size(LOOM_START_ANG_MAX_DEG)
+
+
 def frontolateral_gate_cases() -> list:
-    """Collision-course looms with design |az| in 20–70° (both sides, several l/v)."""
+    """Collision-course looms with design |az| in 20–70° (both sides, several l/v).
+
+    Every official loom starts ≤5° and is present from prewarm so onset
+    of a 20–30° disc cannot drive the gate.
+    """
+    dist = _loom_start_distance_m()
     cases = []
-    for az, lv, dist in (
-        (35.0, 0.04, 3.6),
-        (-35.0, 0.04, 3.6),
-        (55.0, 0.04, 3.2),
-        (-55.0, 0.04, 3.2),
-        (45.0, 0.08, 3.4),
-        (-45.0, 0.08, 3.4),
-        (60.0, 0.08, 3.0),
-        (-60.0, 0.08, 3.0),
-        (45.0, 0.02, 4.0),
-        (-45.0, 0.02, 4.0),
-        (30.0, 0.04, 4.0),
-        (-30.0, 0.04, 4.0),
+    for az, lv in (
+        (35.0, 0.04),
+        (-35.0, 0.04),
+        (55.0, 0.04),
+        (-55.0, 0.04),
+        (45.0, 0.08),
+        (-45.0, 0.08),
+        (60.0, 0.08),
+        (-60.0, 0.08),
+        (45.0, 0.02),
+        (-45.0, 0.02),
+        (30.0, 0.04),
+        (-30.0, 0.04),
     ):
         spec = collision_course_object(az, dist, lv)
         side = spec["threat_side"]
         tag = f"fl_{side}_az{int(abs(az))}_lv{lv:g}_d{dist:g}"
         spec["tag"] = tag
         spec["band"] = "frontolat"
-        # Fast l/v looms last a few control steps; do not skip flyvis frames.
+        spec["present_at_prewarm"] = True
         spec["stride"] = 1
         cases.append(spec)
     return cases
 
 
 def random_frontolateral_cases(seeds=FRONTOLAT_RANDOM_SEEDS) -> list:
+    dist = _loom_start_distance_m()
     cases = []
     for seed in seeds:
         rng = np.random.default_rng(int(seed))
         side = "L" if int(rng.integers(0, 2)) == 0 else "R"
         az = float(rng.uniform(25.0, 65.0)) * (1.0 if side == "L" else -1.0)
         lv = float(rng.choice([0.02, 0.04, 0.08]))
-        dist = float(rng.uniform(2.2, 3.2))
         spec = collision_course_object(az, dist, lv)
         spec["tag"] = f"fl_seed{int(seed)}"
         spec["band"] = "frontolat"
         spec["seed"] = int(seed)
+        spec["present_at_prewarm"] = True
+        spec["stride"] = 1
+        cases.append(spec)
+    return cases
+
+
+def unseen_frontolat_cases() -> list:
+    """Fixed az/l/v grid matching the box unseen audit (start ≤5°)."""
+    dist = _loom_start_distance_m()
+    cases = []
+    for az in (25.0, 40.0, 50.0, 65.0, -25.0, -40.0, -50.0, -65.0):
+        for lv in (0.05, 0.03):
+            spec = collision_course_object(az, dist, lv)
+            side = spec["threat_side"]
+            spec["tag"] = f"unseen_{side}_az{int(abs(az))}_lv{lv:g}"
+            spec["band"] = "unseen"
+            spec["present_at_prewarm"] = True
+            spec["stride"] = 1
+            cases.append(spec)
+    return cases
+
+
+def static_onset_gate_cases() -> list:
+    """A 30–40° disc that appears and stays still must not fire."""
+    cases = []
+    for az, ang in ((40.0, 34.0), (-40.0, 34.0), (30.0, 34.0), (-30.0, 34.0)):
+        dist = start_distance_for_angular_size(ang)
+        spec = collision_course_object(az, dist, 0.04)
+        spec["loom_vel"] = (0.0, 0.0, 0.0)
+        spec["tag"] = f"static_{'L' if az > 0 else 'R'}_az{int(abs(az))}"
+        spec["band"] = "static_onset"
+        spec["appear_after_prewarm"] = True
+        spec["present_at_prewarm"] = False
+        spec["stride"] = 1
+        cases.append(spec)
+    return cases
+
+
+def receding_gate_cases() -> list:
+    """A receding disc (az 40°, start 1.5 m) must not fire."""
+    cases = []
+    for az in (40.0, -40.0):
+        spec = collision_course_object(az, 1.5, 0.04)
+        vx, vy, vz = spec["loom_vel"]
+        spec["loom_vel"] = (-float(vx), -float(vy), -float(vz))
+        spec["tag"] = f"recede_{'L' if az > 0 else 'R'}_az{int(abs(az))}"
+        spec["band"] = "recede"
+        spec["present_at_prewarm"] = True
         spec["stride"] = 1
         cases.append(spec)
     return cases
 
 
 def frontal_gate_cases() -> list:
-    """Pure frontal (|az| < 20°): must fire; brake/climb or either side ok."""
+    """Pure frontal (|az| < 20°): must fire; both-GF climb counts."""
+    dist = _loom_start_distance_m()
     cases = []
-    for az, lv, dist in ((0.0, 0.04, 3.6), (12.0, 0.04, 3.6)):
+    for az, lv in ((0.0, 0.04), (5.0, 0.04), (12.0, 0.04)):
         spec = collision_course_object(az, dist, lv)
         spec["tag"] = f"front_az{int(az)}_lv{lv:g}"
         spec["band"] = "frontal"
+        spec["present_at_prewarm"] = True
         spec["stride"] = 1
         cases.append(spec)
     return cases
@@ -226,6 +290,18 @@ def open_space_pose() -> dict:
     }
 
 
+def _eye_pack(env):
+    left_img, right_img = env.get_eye_images()
+    side = getattr(env, "last_side_images", (None, None))
+    return left_img, right_img, side[0], side[1]
+
+
+def _show_loom(env, virtual_xyz, fly_xyz=None):
+    fly = env.get_fly_position() if fly_xyz is None else np.asarray(fly_xyz, dtype=float)
+    vis, rad = visible_loom_placement(virtual_xyz, fly, radius=LOOM_RADIUS_M)
+    env.set_loom_object(vis, radius=rad)
+
+
 def _run_scenario(
     name: str,
     env,
@@ -240,6 +316,8 @@ def _run_scenario(
     loom_start=None,
     loom_vel=None,
     loom_band=None,
+    present_at_prewarm: bool = True,
+    appear_after_prewarm: bool = False,
 ) -> dict:
     env.reset(seed=0)
     if pose is not None:
@@ -257,6 +335,7 @@ def _run_scenario(
     ms_flyvis = []
     ms_flyvis_frame = []
     ms_total = []
+    ms_loop = []
     wall = 0
     yaw_terms = []
     rise_geometry = []
@@ -267,30 +346,45 @@ def _run_scenario(
     n_esc_seen = 0
     distances = []
     t_wall = time.perf_counter()
-    left_img, right_img = env.get_eye_images()
-    n_pre = int(ctl.params.prewarm_steps if prewarm is None else prewarm)
-    warmed = brain.prewarm(left_img, right_img, env.get_fly_angular_velocity(), n=n_pre)
-    if warmed is not None:
-        ctl.capture_baseline(warmed.readout)
     loom_pos = None if loom_start is None else np.asarray(loom_start, dtype=float).copy()
     loom_v = None if loom_vel is None else np.asarray(loom_vel, dtype=float)
-    if loom_pos is not None:
-        env.set_loom_object(loom_pos)
-    left_img, right_img = env.get_eye_images()
+    show_now = loom_pos is not None and present_at_prewarm and not appear_after_prewarm
+    if show_now:
+        _show_loom(env, loom_pos)
+    left_img, right_img, left_side, right_side = _eye_pack(env)
+    n_pre = int(ctl.params.prewarm_steps if prewarm is None else prewarm)
+    warmed = brain.prewarm(
+        left_img,
+        right_img,
+        env.get_fly_angular_velocity(),
+        n=n_pre,
+        left_side_img=left_side,
+        right_side_img=right_side,
+    )
+    if warmed is not None:
+        ctl.capture_baseline(warmed.readout)
+    if loom_pos is not None and not show_now:
+        _show_loom(env, loom_pos)
+    left_img, right_img, left_side, right_side = _eye_pack(env)
     for step in range(n_steps):
+        t_loop = time.perf_counter()
         if loom_pos is not None and loom_v is not None:
             # Do not teleport/hide: sudden disappearance of a large dark
-            # object is itself a loom (every official R fire was 1–12
-            # steps after hide). The object continues past/away.
+            # object is itself a loom. Virtual object continues past/away;
+            # the in-room sphere matches its visual angle.
             loom_pos = loom_pos + loom_v * float(env.control_dt)
-            env.set_loom_object(loom_pos)
+            _show_loom(env, loom_pos)
         res = brain.step(
             left_img,
             right_img,
             env.get_fly_angular_velocity(),
+            left_side_img=left_side,
+            right_side_img=right_side,
         )
         action = ctl.compute(res.readout)
         left_img, right_img, info = env.step(action, wing_strokes=ctl.last_wing_strokes)
+        left_side, right_side = getattr(env, "last_side_images", (None, None))
+        ms_loop.append(1000.0 * (time.perf_counter() - t_loop))
         pos = np.asarray(info["position"], dtype=float)
         heading = heading_from_quaternion(info["orientation"])
         traj.append(pos)
@@ -426,10 +520,9 @@ def _run_scenario(
             into = escape_turned_into(
                 headings_arr, int(ctl.escape_events[0].step), threat_side
             )
-        # Must fire. Brake/climb or either-side turn is ok; turning *into* fails.
-        front_ok = 1.0 if fired and not into and (va_ok or not fired) else 0.0
-        if fired and not va_ok:
-            front_ok = 0.0
+        # Both-GF takeoff counts as fired even a few steps after geometric
+        # CA (the disc already fills the field). Turning *into* still fails.
+        front_ok = 1.0 if fired and not into else 0.0
         dir_ok = front_ok
         geo_ok = front_ok
     pre_toward = False
@@ -522,6 +615,8 @@ def _run_scenario(
         "ms_per_step_flyvis": float(np.median(ms_flyvis)) if ms_flyvis else 0.0,
         "ms_per_step_brain_flyvis": float(np.median(ms_total)) if ms_total else 0.0,
         "ms_per_step_brain_flyvis_mean": float(np.mean(ms_total)) if ms_total else 0.0,
+        "ms_per_step_full_loop": float(np.median(ms_loop)) if ms_loop else 0.0,
+        "ms_per_step_full_loop_mean": float(np.mean(ms_loop)) if ms_loop else 0.0,
         "ms_flyvis_frame_median": float(np.median(ms_flyvis_frame)) if ms_flyvis_frame else 0.0,
         "ms_flyvis_frame_mean": float(np.mean(ms_flyvis_frame)) if ms_flyvis_frame else 0.0,
         "room_coverage": coverage(traj),
@@ -592,6 +687,18 @@ def _is_frontal(name: str) -> bool:
     return name.startswith("front_")
 
 
+def _is_static_onset(name: str) -> bool:
+    return name.startswith("static_")
+
+
+def _is_recede(name: str) -> bool:
+    return name.startswith("recede_")
+
+
+def _is_unseen(name: str) -> bool:
+    return name.startswith("unseen_")
+
+
 def _case_ok(sc: dict, *, require_away: bool) -> float:
     """1 if fire while visible+approaching (and turn away when required)."""
     if int(sc.get("brain_escapes") or 0) <= 0:
@@ -651,11 +758,8 @@ def _frontal_gate(scenarios: dict) -> dict:
     for name, sc in scenarios.items():
         if not _is_frontal(name):
             continue
-        ok = _case_ok(sc, require_away=False)
-        # Turning into a slightly-offset frontal object fails (geo already applied).
-        g = sc.get("geometry_aware_correct")
-        if g is not None and float(g) < 0.5:
-            ok = 0.0
+        # Item 5: both-GF DNp01 cross is the escape, not brake-only / va_ok.
+        ok = 1.0 if int(sc.get("brain_escapes") or 0) > 0 else 0.0
         per[name] = ok
         details[name] = {
             "ok": ok,
@@ -678,11 +782,75 @@ def _frontal_gate(scenarios: dict) -> dict:
     }
 
 
+def _zero_fire_gate(scenarios: dict, pred) -> dict:
+    """Pass only if every matching scenario has zero brain escapes."""
+    per = {}
+    details = {}
+    scores = []
+    for name, sc in scenarios.items():
+        if not pred(name):
+            continue
+        n = int(sc.get("brain_escapes") or 0)
+        ok = 1.0 if n == 0 else 0.0
+        per[name] = ok
+        details[name] = {
+            "ok": ok,
+            "brain_escapes": n,
+            "dnp01_rise_max": sc.get("dnp01_rise_max"),
+            "angular_size_fire_deg": sc.get("angular_size_fire_deg"),
+            "azimuth_onset_deg": sc.get("azimuth_onset_deg"),
+        }
+        scores.append(ok)
+    mean = float(np.mean(scores)) if scores else None
+    return {
+        "per_scenario": per,
+        "details": details,
+        "mean": mean,
+        "n": int(len(scores)),
+        "pass": bool(scores) and float(mean) >= 1.0,
+    }
+
+
+def _unseen_gate(scenarios: dict) -> dict:
+    """Report-only unseen-like frontolat grid (same scoring as official)."""
+    per = {}
+    details = {}
+    scores = []
+    for name, sc in scenarios.items():
+        if not _is_unseen(name):
+            continue
+        ok = _case_ok(sc, require_away=True)
+        per[name] = ok
+        details[name] = {
+            "ok": ok,
+            "azimuth_onset_deg": sc.get("azimuth_onset_deg"),
+            "angular_size_fire_deg": sc.get("angular_size_fire_deg"),
+            "fire_minus_closest": sc.get("fire_minus_closest"),
+            "escape_direction_correct": sc.get("escape_direction_correct"),
+            "brain_escapes": sc.get("brain_escapes"),
+            "dnp01_rise_max": sc.get("dnp01_rise_max"),
+            "true_side": "L" if "_L_" in name else ("R" if "_R_" in name else None),
+            "fire_diag": sc.get("fire_diag"),
+        }
+        scores.append(ok)
+    mean = float(np.mean(scores)) if scores else None
+    return {
+        "per_scenario": per,
+        "details": details,
+        "mean": mean,
+        "n": int(len(scores)),
+        "pass": bool(scores) and float(mean) >= 0.80,
+        "gate": False,
+    }
+
+
 def _official_pass(summary: dict, params) -> dict:
     """Gates that still decide acceptance. Eccentric L/R and yaw-2.20 do not."""
     fl = summary.get("frontolat_gate") or {}
     fr = summary.get("frontal_gate") or {}
     no = summary.get("ctrl_noobj_headings") or {}
+    st = summary.get("static_onset_gate") or {}
+    rc = summary.get("recede_gate") or {}
     brain_only = (not bool(getattr(params, "use_engineered_eye_laterality", False))) and (
         not bool(getattr(params, "use_engineered_looming_residual", False))
     )
@@ -690,6 +858,8 @@ def _official_pass(summary: dict, params) -> dict:
         "frontolat": bool(fl.get("pass")),
         "frontal": bool(fr.get("pass")),
         "noobj_open": bool(no.get("pass")),
+        "static_onset": bool(st.get("pass")),
+        "recede": bool(rc.get("pass")),
         "brain_only": brain_only,
     }
     return {"pass": all(gates.values()), "gates": gates}
@@ -925,8 +1095,10 @@ def main(argv=None) -> int:
         # Gate looms use the brain DT (10 ms). 20 ms × stride 2 was skipping
         # the hex frames the open-loop sweep used.
         prev_dt, prev_sub = env.control_dt, env.n_substeps
+        prev_vdt = float(getattr(brain, "visual_dt", 0.02))
         env.control_dt = 0.01
         env.n_substeps = max(1, int(round(0.01 / float(env.model.opt.timestep))))
+        brain.visual_dt = 0.01
         print(
             f"Scenario {name} az={spec.get('az_design_deg')} lv={spec.get('lv_s')} "
             f"d={spec.get('distance_m')} dt=0.01…",
@@ -948,6 +1120,8 @@ def main(argv=None) -> int:
             loom_start=spec["loom_start"],
             loom_vel=spec["loom_vel"],
             loom_band=spec.get("band"),
+            present_at_prewarm=bool(spec.get("present_at_prewarm", True)),
+            appear_after_prewarm=bool(spec.get("appear_after_prewarm", False)),
         )
         sc["az_design_deg"] = spec.get("az_design_deg")
         sc["lv_s"] = spec.get("lv_s")
@@ -955,6 +1129,7 @@ def main(argv=None) -> int:
         brain.params.flyvis_stride = prev
         env.control_dt = prev_dt
         env.n_substeps = prev_sub
+        brain.visual_dt = prev_vdt
         return sc
 
     fl_cases = frontolateral_gate_cases()
@@ -969,6 +1144,20 @@ def main(argv=None) -> int:
 
     print("Gate: pure frontal (|az|<20°)…", flush=True)
     for spec in frontal_gate_cases()[: 1 if args.quick else None]:
+        n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"], dt=0.01)
+        scenarios[spec["tag"]] = _run_loom_case(spec, n)
+
+    print("Gate: static 30–40° onset must not fire…", flush=True)
+    for spec in static_onset_gate_cases()[: 1 if args.quick else None]:
+        scenarios[spec["tag"]] = _run_loom_case(spec, 40 if args.quick else 80)
+
+    print("Gate: receding disc must not fire…", flush=True)
+    for spec in receding_gate_cases()[: 1 if args.quick else None]:
+        scenarios[spec["tag"]] = _run_loom_case(spec, 40 if args.quick else 80)
+
+    print("Report-only: unseen-like frontolat grid (start ≤5°)…", flush=True)
+    unseen_cases = unseen_frontolat_cases()[: 2 if args.quick else None]
+    for spec in unseen_cases:
         n = 40 if args.quick else loom_horizon_steps(spec["distance_m"], spec["lv_s"], dt=0.01)
         scenarios[spec["tag"]] = _run_loom_case(spec, n)
 
@@ -1167,6 +1356,9 @@ def main(argv=None) -> int:
             "side_R_visible_at_fire": side_r.get("visible_at_fire"),
             "frontolat_gate": _frontolat_gate(scenarios),
             "frontal_gate": _frontal_gate(scenarios),
+            "static_onset_gate": _zero_fire_gate(scenarios, _is_static_onset),
+            "recede_gate": _zero_fire_gate(scenarios, _is_recede),
+            "unseen_frontolat": _unseen_gate(scenarios),
             "variant_direction_correct": _variant_direction(scenarios),
             "variant_geometry_aware": _variant_geometry_aware(scenarios),
             "eccentric_note": (
@@ -1176,24 +1368,35 @@ def main(argv=None) -> int:
             ),
             "known_limitations": (
                 "No sim object pose/radius reaches stereo_to_hex or the "
-                "controller. LPi* are in coreTplus (Glu/GABA sign −1; "
-                "T4/T5→LPi→LPLC2 present). Per-hex photoreceptor rest "
-                "(τ=5 s at DT=0.01, first frame keeps spatial contrast) "
-                "so standing 1/f is mid-gray; p99 stays on the fixed "
-                "calib set. Still-fly az35 l/v0.04: DNp01 rest 0.008 "
-                "(was 0.47), 0.20-onset 54° vs hex_ref 61.5° (was 157°). "
-                "Merge bar: frontolat 12/16, frontal 1/2, no-object 0/6, "
-                "walls 0.30/100, 12.7 ms/frame, brain-only. Leftover "
-                "frontolat misses are slow l/v=0.02 fires after the "
-                "object has passed, plus one az55 dCA=+1. Script "
-                "official_pass still wants 13/16 and both frontals. "
-                "Do not lower the 0.20 fire bar."
+                "controller. Photoreceptor rest τ=5 s, exp(−dt/τ), init "
+                "at calib mean 0.5 (not frame 1); static contrast is "
+                "~37% at 5 s. Official looms start ≤5° and are present "
+                "at prewarm. Static 30–40° onset and receding discs "
+                "are 0-fire gates (pass). Frontal both-GF DNp01 ≥ 0.20 "
+                "is a takeoff (az0/az5/az12 all fire). Each eye has a "
+                "forward + ipsilateral side camera so the flyvis ±75° "
+                "lattice is fully sampled (1:1 deg; rear 75–165° has "
+                "no flyvis cells). Frontolat on-time turn-away is the "
+                "remaining miss: without the 20–30° onset cheat, "
+                "DNp01 still crosses after closest approach (or not "
+                "at all at |az|≥55 / l/v=0.08). No-object 0/6. Report "
+                "brain+flyvis and full-loop ms/step separately; "
+                "full-loop need not hit 25 ms. Do not lower the 0.20 "
+                "fire bar."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],
             "ms_per_step_mean": room.get("ms_per_step_brain_flyvis_mean"),
+            "ms_per_step_full_loop": room.get("ms_per_step_full_loop"),
+            "ms_per_step_full_loop_mean": room.get("ms_per_step_full_loop_mean"),
             "ms_flyvis_frame_median": room.get("ms_flyvis_frame_median"),
             "ms_flyvis_frame_mean": room.get("ms_flyvis_frame_mean"),
+            "timing_note": (
+                "brain+flyvis is ClosedLoopBrain.step only (sample + "
+                "flyvis + rate core). full-loop is render (2× front + "
+                "2× side) + brain + controller + physics. Full-loop "
+                "does not need to hit 25 ms; brain+flyvis is the 25 ms bar."
+            ),
             "flyvis_path": getattr(brain, "flyvis_path", {}),
             "flyvis_stride": int(params.flyvis_stride),
             "beats_pr16_walls": beats_pr16_walls(room["wall_contacts"], room["steps"]),
@@ -1256,6 +1459,43 @@ def _print_variant_tables(summary: dict) -> None:
                 flush=True,
             )
         print(f"frontal mean={fr.get('mean')} pass={fr.get('pass')}", flush=True)
+    st = summary.get("static_onset_gate") or {}
+    if st.get("details"):
+        print("\nStatic 30–40° onset GATE (must be 0 fires):", flush=True)
+        for name, d in st["details"].items():
+            print(
+                f"  {name} ok={d.get('ok')} esc={d.get('brain_escapes')} "
+                f"rise={_fmt(d.get('dnp01_rise_max'))}",
+                flush=True,
+            )
+        print(f"static_onset pass={st.get('pass')} n={st.get('n')}", flush=True)
+    rc = summary.get("recede_gate") or {}
+    if rc.get("details"):
+        print("\nReceding disc GATE (must be 0 fires):", flush=True)
+        for name, d in rc["details"].items():
+            print(
+                f"  {name} ok={d.get('ok')} esc={d.get('brain_escapes')} "
+                f"rise={_fmt(d.get('dnp01_rise_max'))}",
+                flush=True,
+            )
+        print(f"recede pass={rc.get('pass')} n={rc.get('n')}", flush=True)
+    un = summary.get("unseen_frontolat") or {}
+    if un.get("details"):
+        print("\nUnseen-like frontolat (report-only, start ≤5°):", flush=True)
+        print(
+            f"{'scenario':<28} {'ok':>4} {'az0':>7} {'angF':>6} {'dCA':>5} "
+            f"{'away':>5} {'esc':>4} {'rise':>6}",
+            flush=True,
+        )
+        for name, d in un["details"].items():
+            print(
+                f"{name:<28} {_fmt(d.get('ok')):>4} {_fmt(d.get('azimuth_onset_deg')):>7} "
+                f"{_fmt(d.get('angular_size_fire_deg')):>6} {_fmt(d.get('fire_minus_closest')):>5} "
+                f"{_fmt(d.get('escape_direction_correct')):>5} {str(d.get('brain_escapes')):>4} "
+                f"{_fmt(d.get('dnp01_rise_max')):>6}",
+                flush=True,
+            )
+        print(f"unseen mean={un.get('mean')} n={un.get('n')} pass={un.get('pass')}", flush=True)
     raw = summary.get("variant_direction_correct") or {}
     geo = summary.get("variant_geometry_aware") or {}
     details = geo.get("details") or {}
@@ -1299,11 +1539,16 @@ def _print_variant_tables(summary: dict) -> None:
         f"OFFICIAL pass={(summary.get('official_pass') or {}).get('pass')} gates={(summary.get('official_pass') or {}).get('gates')} | "
         f"frontolat gate mean={summary.get('frontolat_gate', {}).get('mean')} pass={summary.get('frontolat_gate', {}).get('pass')} | "
         f"frontal pass={summary.get('frontal_gate', {}).get('pass')} | "
+        f"static_onset pass={(summary.get('static_onset_gate') or {}).get('pass')} | "
+        f"recede pass={(summary.get('recede_gate') or {}).get('pass')} | "
+        f"unseen mean={(summary.get('unseen_frontolat') or {}).get('mean')} | "
         f"no-object (open) fires={noobj.get('fires')} n={noobj.get('n')} pass={noobj.get('pass')} | "
         f"wallloom yaw2.20 esc={(summary.get('ctrl_wallloom_yaw220') or {}).get('escapes')} | "
         f"room sides={summary.get('room_escape_sides')} one_sided={summary.get('room_escape_one_sided')} | "
         f"ang_fire L/R={summary.get('side_L_angular_size_fire_deg')}/{summary.get('side_R_angular_size_fire_deg')} | "
         f"dCA L/R={summary.get('side_L_fire_minus_closest')}/{summary.get('side_R_fire_minus_closest')} | "
+        f"brain+flyvis={summary.get('ms_per_step_brain_flyvis')} "
+        f"full-loop={summary.get('ms_per_step_full_loop')} "
         f"flyvis_frame={summary.get('ms_flyvis_frame_mean')} path={summary.get('flyvis_path')}",
         flush=True,
     )

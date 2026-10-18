@@ -146,6 +146,8 @@ class FlightParams:
     engineered_loom_gain: float = 3.0
 
     # --- Closed-loop timing ---
+    # Visual / photoreceptor tick. Room loop is 20 ms; loom gates use 10 ms.
+    visual_dt: float = 0.02
     prewarm_steps: int = 80
     # One prewarm for every scenario (settle DNp01; no short side-loom path).
     side_loom_prewarm_steps: int = 80
@@ -185,24 +187,23 @@ class FlightParams:
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
         "hse": "compensatory yaw -= tanh((L−R)/20)",
         "camera": (
-            "Forward 150° square-FOV cameras; flyvis BoxEye hex-box "
-            "average (5.8° lattice, not a 5° Gaussian on top). Lattice "
-            "centre = frontal. Drosophila envelope (−15°…+170° ipsilateral, "
-            "~15° overlap). Adaptive p80 (τ=5 s) → 0.5, fixed contrast "
-            "gain. Matte-black loom. 320 px. 1/f RMS 0.05, gain 1.10. "
-            "Laterality is per-side DNp01 rise. LPi (Glu/−) T4/T5→LPi→"
-            "LPLC2 is in coreTplus. "
+            "Forward 150° + ipsilateral 150° side camera per eye so the "
+            "flyvis ±75° lattice (1:1 deg, centre = frontal) is fully "
+            "sampled; rear 75–165° has no flyvis cells. Photoreceptor rest "
+            "τ=5 s, exp(−dt/τ), init at calib mean 0.5 (not frame 1). "
+            "BoxEye hex-box at the scaled spacing. Matte-black loom. "
+            "320 px. 1/f RMS 0.05, gain 1.10. Laterality is per-side "
+            "DNp01 rise. LPi (Glu/−) T4/T5→LPi→LPLC2 is in coreTplus. "
             "Eye input is rendered pixels only — no sim object pose/radius. "
             "No U-flip, no 40° cant."
         ),
         "geometry": (
             "Lateral |az|≥30° at rise onset must turn away; frontal GF "
-            "must escape/brake without turning into the object. "
-            "Official gate: frontolateral collision-course |az0| 20–70°, "
-            "visible+approaching (dCA≤0) and turn away (≥80%). Pure frontal "
-            "|az0|<20° must fire (either side / brake ok). Eccentric "
-            "|az|≈90–120° (old official L/R) are report-only: LPLC2/GF "
-            "frontal bias. Solid dark disc; no hide-as-loom."
+            "takeoff when both DNp01 sides cross 0.20 (brake alone is "
+            "not the escape). Official looms start ≤5° and are present "
+            "at prewarm. Static 30–40° onset and receding discs must "
+            "not fire. Frontolat |az0| 20–70° visible+approaching and "
+            "turn away (≥80%). Eccentric |az|≈90–120° are report-only."
         ),
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })

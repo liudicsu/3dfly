@@ -64,6 +64,10 @@ def test_right_eye_looks_forward_not_backward():
     assert look_L[0] > 0.95, f"left eye should look +X, got {look_L}"
     assert look_R[0] > 0.95, f"right eye should look +X, got {look_R}"
     assert abs(look_L[1]) < 0.1 and abs(look_R[1]) < 0.1
+    look_Ls = mjcf.camera_look_direction(mjcf.parse_eye_xyaxes(mjcf.FLY_MJCF, "left_eye_side"))
+    look_Rs = mjcf.camera_look_direction(mjcf.parse_eye_xyaxes(mjcf.FLY_MJCF, "right_eye_side"))
+    assert look_Ls[1] > 0.95, f"left side camera should look +Y, got {look_Ls}"
+    assert look_Rs[1] < -0.95, f"right side camera should look −Y, got {look_Rs}"
     assert 'fovy="150"' in mjcf.FLY_MJCF
     assert 'type="skybox"' in mjcf.FLY_MJCF
     xml_L = mjcf.parse_eye_xyaxes(mjcf.FLY_MJCF, "left_eye")
@@ -108,6 +112,10 @@ def test_hex_fovy_matches_camera():
     assert EYE_CANT_DEG == pytest.approx(mjcf_mod.EYE_CANT_DEG)
     assert EYE_DOWN_DEG == pytest.approx(mjcf_mod.EYE_DOWN_DEG)
     assert HEX_SPACING_DEG == pytest.approx(5.8, abs=0.05)
+    from threedfly.brain.eyes import hex_world_spacing_deg
+
+    spacing = hex_world_spacing_deg()
+    assert spacing == pytest.approx(5.8, abs=0.05)
     assert hex_box_kernel_px(320, 150.0) == 12
     assert hex_box_kernel_px(160, 150.0) == 6
 
@@ -136,6 +144,11 @@ def test_hex_rays_put_lattice_centre_on_body_frontal():
     in_fl = (cov["az_deg"] >= 20.0) & (cov["az_deg"] <= 70.0) & (np.abs(cov["el_deg"]) < 15.0)
     assert int(np.count_nonzero(in_fl)) > 20
     assert float(np.mean(cov["valid"][in_fl])) > 0.9
+    # Side camera recovers the ipsilateral rim a single +X 150° pinhole drops.
+    valid_az = cov["az_deg"][cov["valid"]]
+    assert float(np.max(valid_az)) > 70.0
+    assert float(np.min(valid_az)) > -20.0
+    assert float(np.min(valid_az)) < 0.0
     # Biological envelope: ipsilateral hexes stay under 170°, some cross midline.
     assert float(np.max(cov["az_deg"])) < BIO_AZ_CONTRA_DEG + 160.0
     assert float(np.min(cov["az_deg"])) < 0.0
@@ -154,9 +167,10 @@ def test_stereo_to_hex_pair():
     assert hL.shape == hR.shape == (N_HEX,)
     _, ok_L = hex_camera_uv("L", 32, 32)
     _, ok_R = hex_camera_uv("R", 32, 32)
-    # Uniform images sit at flyvis gray after median luminance shift.
+    # Uniform mid-gray sits at flyvis 0.5 (rest = calib mean). Uniform
+    # black is darker than rest, not remapped to 0.5 by a per-scene p80.
     assert hL[ok_L].mean() == pytest.approx(0.5, abs=0.05)
-    assert hR[ok_R].mean() == pytest.approx(0.5, abs=0.05)
+    assert float(hR[ok_R].mean()) < 0.15
 
 
 def test_right_eye_hex_mirrors_body_azimuth():
@@ -175,11 +189,11 @@ def test_right_eye_hex_mirrors_body_azimuth():
     ipsi = hR[ok_R & (az_R < -15.0)].mean()
     nasal = hR[ok_R & (az_R > 5.0)].mean()
     assert ipsi > nasal + 0.15, f"ipsi={ipsi:.3f} nasal={nasal:.3f}"
-    # Left image is uniform: luminance shift puts in-view hexes at gray.
+    # Left image is uniform black: darker than the calib-mean rest.
     from threedfly.brain.eyes import hex_camera_uv
 
     _, ok_L = hex_camera_uv("L", h, w)
-    assert float(hL[ok_L].mean()) == pytest.approx(0.5, abs=0.05)
+    assert float(hL[ok_L].mean()) < 0.15
 
 
 def test_frontolat_body_az_is_monocular():
@@ -209,7 +223,6 @@ def test_camera_disc_lands_on_hex_disc_site():
     """
     pytest.importorskip("mujoco")
     from threedfly.brain.eyes import reset_luminance_rest
-    from threedfly.brain.stimuli import hex_degrees
     from threedfly.control.closed_loop_metrics import LOOM_RADIUS_M
     from threedfly.sim import FlyEnvironment
 
@@ -223,12 +236,12 @@ def test_camera_disc_lands_on_hex_disc_site():
     reset_luminance_rest()
     hL, hR = stereo_to_hex(*env.get_eye_images())
     env.close()
-    _, _, xd, yd = hex_degrees()
-    disc_L = np.hypot(xd - 35.0, yd) <= 0.5 * ang
-    # Right-eye xd=−35 looks at body +35° — outside the 15° contra envelope.
-    disc_R_frontolat = np.hypot(xd + 35.0, yd) <= 0.5 * ang
-    assert int(np.count_nonzero(disc_L)) > 10
     az_L, el_L = hex_body_azel_deg("L")
+    az_R, el_R = hex_body_azel_deg("R")
+    disc_L = np.hypot(az_L - 35.0, el_L) <= 0.5 * ang
+    # Right-eye sites looking at body +35° are outside the 15° contra envelope.
+    disc_R_frontolat = np.hypot(az_R - 35.0, el_R) <= 0.5 * ang
+    assert int(np.count_nonzero(disc_L)) > 3
     bg = (~disc_L) & hex_in_bio_envelope("L", az_L) & (np.abs(el_L) < 40.0)
     assert float(hL[disc_L].mean()) < 0.35
     assert float(hR[disc_R_frontolat].mean()) > 0.35
@@ -256,29 +269,42 @@ def test_stereo_to_hex_has_no_loom_oracle():
     assert not hasattr(env_mod.FlyEnvironment, "loom_radius")
 
 
-def test_per_hex_rest_zeros_still_texture_keeps_a_darkening():
-    """Standing 1/f must not tonic-drive T4; a new dark patch must stay dark.
+def test_per_hex_rest_decays_to_e_fold_at_tau():
+    """Static contrast follows exp(−t/τ); τ=5 s → ~37% left, not instant 0.5.
 
-    Frame 1 keeps spatial contrast (geometry tests). Frame 2 of the same
-    image is mid-gray. A later local darkening is a change, not a DC.
+    Rest starts at the calibration mean (scene-independent), not frame 1.
+    A later local darkening is still a change.
     """
+    from threedfly.brain.eyes import LUM_TAU_S, hex_camera_uv
+
     h = w = 64
     tex = np.zeros((h, w, 3), dtype=np.uint8)
-    # Coarse checks so BoxEye does not average the first frame to gray.
     yy, xx = np.indices((h, w))
     tex[(yy // 16 + xx // 16) % 2 == 0] = 40
     tex[(yy // 16 + xx // 16) % 2 == 1] = 220
+    dt = 0.02
+    n_tau = int(round(LUM_TAU_S / dt))
     reset_luminance_rest()
-    first, _ = stereo_to_hex(tex, tex)
-    second, _ = stereo_to_hex(tex, tex)
-    assert float(np.std(first)) > 0.04
-    assert float(np.mean(second)) == pytest.approx(0.5, abs=0.04)
-    assert float(np.std(second)) < 0.03
+    first, _ = stereo_to_hex(tex, tex, dt=dt)
+    _, ok = hex_camera_uv("L", h, w)
+    std0 = float(np.std(first[ok]))
+    assert std0 > 0.04
+    mid = None
+    last = first
+    for i in range(1, n_tau + 1):
+        last, _ = stereo_to_hex(tex, tex, dt=dt)
+        if i == 4:
+            mid = last
+    std_tau = float(np.std(last[ok]))
+    # Frame 2 must still have contrast (the old bug mapped it to 0.5 exactly).
+    assert float(np.std(mid[ok])) > 0.5 * std0
+    assert std_tau == pytest.approx(std0 * np.exp(-1.0), abs=0.04)
+    ratio = std_tau / max(std0, 1e-6)
+    assert 0.28 < ratio < 0.46
     dark = tex.copy()
     dark[20:44, 20:44] = 0
-    changed, _ = stereo_to_hex(dark, dark)
-    assert float(np.min(changed)) < 0.25
-    assert float(np.mean(changed)) > 0.35
+    changed, _ = stereo_to_hex(dark, dark, dt=dt)
+    assert float(np.min(changed)) < 0.35
 
 
 def test_empty_room_hex_is_left_right_symmetric():

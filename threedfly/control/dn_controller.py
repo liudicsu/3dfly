@@ -644,6 +644,22 @@ class DNFlightController:
             # Residual L DC is in lat_rest; only a laterality *rise* counts.
             same = (self.last_lat_delta * lat_int) > 0.0 or abs(self.last_lat_delta) < 0.5 * lat_min
             lat_ok = abs(lat_int) >= lat_min and same and vpn_ok
+        # Frontal GF: both giant fibers crossing the fire bar, with
+        # LPLC2 on both sides, is a takeoff/climb — not a laterality-
+        # gated side dodge. Translation LC4 (HSE-matched) is not LPLC2.
+        # Brake without this fire is not an escape.
+        both_gf = False
+        if self.dnp01_rest_L is not None and self.dnp01_rest_R is not None:
+            gf_L, gf_R = self._dnp01_rises(readout)
+            both_gf = min(float(gf_L), float(gf_R)) >= fire_delta
+            lplc_L = float(readout.lplc2_L)
+            lplc_R = float(readout.lplc2_R)
+            if self._base is not None:
+                lplc_L -= float(self._base.lplc2_L)
+                lplc_R -= float(self._base.lplc2_R)
+            both_lplc = min(lplc_L, lplc_R) >= 0.08
+            if both_gf and both_lplc:
+                lat_ok = True
         would_fire = (
             warmed
             and post_base
