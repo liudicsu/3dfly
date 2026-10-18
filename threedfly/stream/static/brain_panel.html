@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3dfly · brain panel</title>
+<style>
+  html,body{margin:0;height:100%;background:#070a10;color:#cfd8e3;font:12px/1.35 ui-monospace,Menlo,monospace;overflow:hidden}
+  #wrap{display:grid;grid-template-columns:1fr 220px;height:100vh}
+  #view{position:relative;min-width:0}
+  #view canvas{display:block;width:100%;height:100%}
+  #hud{position:absolute;left:10px;top:8px;background:#0b1220cc;padding:8px 10px;border:1px solid #1e2a3a;border-radius:6px;max-width:460px;pointer-events:none;z-index:2}
+  #hud b{color:#8fb3ff}
+  #side{border-left:1px solid #1a2433;padding:10px;overflow:auto;background:#0a1018}
+  #side h2{margin:0 0 8px;font-size:13px;color:#8fb3ff;letter-spacing:.04em}
+  label{display:block;margin:6px 0 2px;color:#9aa7b5}
+  select,button,input[type=range]{width:100%;box-sizing:border-box;background:#121a26;color:#e6edf3;border:1px solid #2a3a4e;border-radius:4px;padding:6px}
+  button{cursor:pointer;margin-top:8px}
+  button:hover{border-color:#4a6a8e}
+  .stat{color:#9aa7b5;margin-top:10px;font-size:11px;white-space:pre-wrap}
+  .ok{color:#59d38a}.bad{color:#ff5d5d}.warn{color:#ffb454}
+  #filters{max-height:42vh;overflow:auto;border:1px solid #1e2a3a;border-radius:4px;padding:4px;margin-top:4px;opacity:.45}
+  #filters label.chk{display:flex;gap:6px;align-items:center;margin:2px 0;color:#cfd8e3}
+  #filters input{width:auto}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="view">
+    <div id="hud">
+      <div><b>coreTplus brain panel</b> · <span id="nshow">…</span></div>
+      <div>stream: <span id="src">…</span> · <span id="fps">—</span></div>
+      <div>asset hash: <span id="ahash">…</span></div>
+      <div>hello hash: <span id="hhash">…</span></div>
+      <div>frame <span id="fi">—</span> · t=<span id="st">—</span>s · <span id="act">—</span></div>
+    </div>
+  </div>
+  <aside id="side">
+    <h2>Controls</h2>
+    <label>Point size</label>
+    <input id="psize" type="range" min="1" max="12" step="0.5" value="3.5">
+    <label>Activity gain</label>
+    <input id="gain" type="range" min="0.4" max="5" step="0.1" value="1.4">
+    <label>Cell-type filter</label>
+    <select id="preset">
+      <option value="all">All types</option>
+      <option value="pathway">Signal-flow pathway</option>
+      <option value="dn">DNs + LPLC2/LC4</option>
+      <option value="t4t5">T4 / T5</option>
+      <option value="custom">Custom…</option>
+    </select>
+    <div id="filters"></div>
+    <button id="resetCam" type="button">Reset camera</button>
+    <div class="stat" id="status">boot</div>
+  </aside>
+</div>
+<script type="module">
+import * as THREE from './vendor/three.module.js';
+import { OrbitControls } from './vendor/OrbitControls.js';
+import { GLTFLoader } from './vendor/GLTFLoader.js';
+import { BrainStream, Section, activityLUT } from './brain_stream.js';
+
+const qs = new URLSearchParams(location.search);
+const WS_URL = qs.get('ws') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+const ASSET_BASE = qs.get('assets') || '/brain-assets';
+const statusEl = document.getElementById('status');
+const setStatus = (t, cls) => { statusEl.className = 'stat ' + (cls || ''); statusEl.textContent = t; };
+
+const meta = await (await fetch(`${ASSET_BASE}/meta.json`)).json();
+const N = meta.n_neurons;
+const bins = meta.bins || {
+  positions_u16: 'positions_u16.bin',
+  type_codes: 'type_codes.bin',
+  has_soma: 'has_soma.bin',
+};
+const [posBuf, typeBuf, somaBuf] = await Promise.all([
+  fetch(`${ASSET_BASE}/${bins.positions_u16}`).then(r => r.arrayBuffer()),
+  fetch(`${ASSET_BASE}/${bins.type_codes}`).then(r => r.arrayBuffer()),
+  fetch(`${ASSET_BASE}/${bins.has_soma}`).then(r => r.arrayBuffer()),
+]);
+const posU16 = new Uint16Array(posBuf);
+const typeCodes = new Uint16Array(typeBuf);
+const hasSoma = new Uint8Array(somaBuf);
+const typeNames = meta.type_names;
+const lo = meta.lo_nm, hi = meta.hi_nm;
+const S = 1 / 300000;
+const C = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+const toScene = (x, y, z) => [(x - C[0]) * S, -(y - C[1]) * S, -(z - C[2]) * S];
+
+const pos = new Float32Array(N * 3);
+const rate = new Float32Array(N);
+const visible = new Float32Array(N);
+for (let i = 0; i < N; i++) {
+  const x = lo[0] + posU16[3 * i] / 65535 * (hi[0] - lo[0]);
+  const y = lo[1] + posU16[3 * i + 1] / 65535 * (hi[1] - lo[1]);
+  const z = lo[2] + posU16[3 * i + 2] / 65535 * (hi[2] - lo[2]);
+  pos.set(toScene(x, y, z), 3 * i);
+  visible[i] = 1;
+}
+document.getElementById('nshow').textContent =
+  `${N.toLocaleString()} neurons · ${meta.n_with_soma.toLocaleString()} with soma`;
+document.getElementById('ahash').textContent = meta.body_ids_sha1;
+document.getElementById('src').textContent = WS_URL;
+
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+const rateAttr = new THREE.BufferAttribute(rate, 1);
+rateAttr.setUsage(THREE.DynamicDrawUsage);
+geo.setAttribute('rate', rateAttr);
+const visAttr = new THREE.BufferAttribute(visible, 1);
+visAttr.setUsage(THREE.DynamicDrawUsage);
+geo.setAttribute('visible', visAttr);
+
+const uniforms = { size: { value: 3.5 }, gain: { value: 1.4 } };
+const mat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, uniforms,
+  vertexShader: `
+    attribute float rate; attribute float visible;
+    varying float vR; varying float vV;
+    uniform float size; uniform float gain;
+    void main(){
+      vR = clamp(rate * gain, 0.0, 1.0);
+      vV = visible;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      float s = size * (0.45 + 2.8 * vR) * (280.0 / max(-mv.z, 1.0));
+      gl_PointSize = max(vV * s, 0.0);
+    }`,
+  fragmentShader: `
+    varying float vR; varying float vV;
+    vec3 inferno(float t){
+      return clamp(vec3(1.6*t, 1.6*t*t, 0.25+0.6*t*t*t)+vec3(0.06,0.02,0.10),0.0,1.0);
+    }
+    void main(){
+      if (vV < 0.5) discard;
+      vec2 c = gl_PointCoord - 0.5;
+      float d = dot(c,c);
+      if (d > 0.25) discard;
+      float a = (0.07 + 0.93 * vR) * (1.0 - d * 4.0);
+      gl_FragColor = vec4(inferno(vR) * a, a);
+    }`
+});
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070a10);
+scene.add(new THREE.Points(geo, mat));
+
+const shellMat = new THREE.MeshBasicMaterial({
+  color: 0x3a5f8f, transparent: true, opacity: 0.07, depthWrite: false, side: THREE.DoubleSide
+});
+const wantShells = qs.get('shells') !== '0';
+if (wantShells) {
+  const loader = new GLTFLoader();
+  for (const file of Object.values(meta.shells || {})) {
+    loader.load(`${ASSET_BASE}/${file}`, (g) => {
+      g.scene.traverse((o) => {
+        if (!o.isMesh) return;
+        o.material = shellMat;
+        const a = o.geometry.attributes.position;
+        for (let i = 0; i < a.count; i++) {
+          const p = toScene(a.getX(i), a.getY(i), a.getZ(i));
+          a.setXYZ(i, p[0], p[1], p[2]);
+        }
+        a.needsUpdate = true;
+        o.geometry.computeBoundingSphere();
+      });
+      scene.add(g.scene);
+    });
+  }
+}
+
+const el = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+el.appendChild(renderer.domElement);
+const cam = new THREE.PerspectiveCamera(40, 1, 0.01, 100);
+cam.position.set(0.25, 0.85, 2.7);
+const ctl = new OrbitControls(cam, renderer.domElement);
+ctl.target.set(0, 0, 0);
+ctl.enableDamping = true;
+function resize() {
+  const w = el.clientWidth, h = el.clientHeight;
+  renderer.setSize(w, h, false);
+  cam.aspect = w / Math.max(h, 1);
+  cam.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+document.getElementById('resetCam').onclick = () => {
+  cam.position.set(0.25, 0.85, 2.7); ctl.target.set(0, 0, 0); ctl.update();
+};
+document.getElementById('psize').oninput = (e) => { uniforms.size.value = +e.target.value; };
+document.getElementById('gain').oninput = (e) => { uniforms.gain.value = +e.target.value; };
+
+const PATHWAY = ['Tm','T2','T3','T4a','T4b','T4c','T4d','T5a','T5b','T5c','T5d','LPi','LPLC1','LPLC2','LPLC4','LC4','HSE','DNp01','DNp03','DNa02','DNp15','DNg02','TTMn','PSI','SApp'];
+const DN = ['DNp01','DNp03','DNa02','DNp15','LPLC2','LC4','DNg02'];
+const T4T5 = ['T4a','T4b','T4c','T4d','T5a','T5b','T5c','T5d'];
+const filterBox = document.getElementById('filters');
+const checks = {};
+const popular = [...new Set([...PATHWAY, ...DN, ...T4T5])];
+for (const t of popular.sort()) {
+  const lab = document.createElement('label'); lab.className = 'chk';
+  const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true;
+  lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + t));
+  filterBox.appendChild(lab); checks[t] = cb;
+}
+function typeMatches(name, keys) {
+  for (const k of keys) {
+    if (k === 'DNg02' || k === 'Tm' || k === 'LPi' || k === 'SApp' || k === 'T2' || k === 'T3') {
+      if (k === 'T2' || k === 'T3') { if (name === k || name.startsWith(k)) return true; }
+      else if (name.startsWith(k)) return true;
+    } else if (name === k) return true;
+  }
+  return false;
+}
+function applyFilter() {
+  const preset = document.getElementById('preset').value;
+  let keys = null;
+  if (preset === 'pathway') keys = PATHWAY;
+  else if (preset === 'dn') keys = DN;
+  else if (preset === 't4t5') keys = T4T5;
+  else if (preset === 'custom') keys = Object.keys(checks).filter(k => checks[k].checked);
+  filterBox.style.opacity = preset === 'custom' ? '1' : '0.45';
+  let shown = 0;
+  for (let i = 0; i < N; i++) {
+    const on = keys === null ? true : typeMatches(typeNames[typeCodes[i]], keys);
+    visible[i] = on ? 1 : 0;
+    if (on) shown++;
+  }
+  visAttr.needsUpdate = true;
+  setStatus(`filter=${preset}  shown=${shown.toLocaleString()}/${N.toLocaleString()}`, 'ok');
+}
+document.getElementById('preset').onchange = applyFilter;
+Object.values(checks).forEach(cb => cb.addEventListener('change', () => {
+  document.getElementById('preset').value = 'custom'; applyFilter();
+}));
+applyFilter();
+
+let lut = null, hashOk = null;
+const stream = new BrainStream(WS_URL, {
+  onStatus: (s) => setStatus('ws: ' + s, s === 'connected' ? 'ok' : 'warn'),
+  onHello: (hello) => {
+    window.__hello = hello;
+    lut = activityLUT(hello);
+    hashOk = hello.body_ids_sha1 === meta.body_ids_sha1 && hello.n_neurons === N;
+    const hh = document.getElementById('hhash');
+    hh.textContent = (hashOk ? '✓ ' : '✗ ') + (hello.body_ids_sha1 || 'missing');
+    hh.className = hashOk ? 'ok' : 'bad';
+    setStatus(hashOk
+      ? `HELLO ok · n=${hello.n_neurons} · hash match`
+      : `HASH MISMATCH\nasset=${meta.body_ids_sha1}\nhello=${hello.body_ids_sha1}`,
+      hashOk ? 'ok' : 'bad');
+    window.__hashOk = hashOk;
+  },
+  onFrame: (msg) => {
+    const act = msg.sections[Section.ACTIVITY];
+    if (!act || act.length !== N || !lut) return;
+    const cap = stream.meta.activity.cap || 200;
+    const denom = Math.log1p(cap);
+    let nz = 0;
+    for (let i = 0; i < N; i++) {
+      const hz = lut[act[i]];
+      rate[i] = Math.min(1, Math.log1p(hz) / denom);
+      if (act[i]) nz++;
+    }
+    rateAttr.needsUpdate = true;
+    const stats = msg.sections[Section.STATS];
+    document.getElementById('fi').textContent = String(msg.frameIndex);
+    document.getElementById('st').textContent = msg.simTime.toFixed(2);
+    if (stats) {
+      document.getElementById('act').textContent =
+        `active ${Math.round(stats[3])} (${(100 * stats[2]).toFixed(1)}%) · max ${stats[1].toFixed(1)} Hz`;
+    }
+    const r = stream.rates();
+    document.getElementById('fps').textContent = `${r.fps.toFixed(1)} fps · ${(r.bps / 1024).toFixed(0)} KiB/s`;
+    window.__last = {
+      frameIndex: msg.frameIndex,
+      simTime: msg.simTime,
+      nActive: stats ? +stats[3] : null,
+      maxRate: stats ? +stats[1] : null,
+      nonzeroCodes: nz,
+      hashOk,
+      meanRate: rate.reduce((a, b) => a + b, 0) / N,
+    };
+  }
+});
+
+let __paused = false;
+function loop() {
+  if (!__paused) { ctl.update(); renderer.render(scene, cam); }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+window.__pause = (v=true) => { __paused = !!v; if (!__paused) return; ctl.update(); renderer.render(scene, cam); };
+window.__capture = () => {
+  window.__pause(true);
+  const w = 720, h = 480;
+  renderer.setSize(w, h, false);
+  cam.aspect = w / h; cam.updateProjectionMatrix();
+  renderer.render(scene, cam);
+  return renderer.domElement.toDataURL('image/jpeg', 0.85);
+};
+window.__ready = true;
+</script>
+</body>
+</html>

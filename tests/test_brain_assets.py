@@ -126,3 +126,13 @@ def test_committed_asset_matches_core_bundle():
     assert asset.n_neurons == int(len(b["body_ids"]))
     # size sanity: compressed npz should stay well under 2 MiB
     assert ASSET.stat().st_size < 2 * 1024 * 1024
+
+
+@pytest.mark.skipif(not ASSET.is_file(), reason="committed asset not present yet")
+def test_committed_asset_bins_exist():
+    d = default_asset_dir(ROOT)
+    for name in ("positions_u16.bin", "type_codes.bin", "has_soma.bin", "sides.bin"):
+        assert (d / name).is_file(), name
+        assert (d / name).stat().st_size > 1000
+    meta = json.loads((d / META_NAME).read_text())
+    assert "bins" in meta

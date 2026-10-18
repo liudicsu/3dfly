@@ -268,6 +268,17 @@ def save_asset(asset: BrainAsset, out_dir: Path, shells: Optional[Dict[str, Path
             if src.resolve() != dest.resolve():
                 dest.write_bytes(src.read_bytes())
             meta["shells"][name] = dest.name
+    # Flat bins for the browser (avoids in-browser npz inflate).
+    (out_dir / "positions_u16.bin").write_bytes(np.ascontiguousarray(asset.positions_u16).tobytes())
+    (out_dir / "type_codes.bin").write_bytes(np.ascontiguousarray(asset.type_codes, dtype="<u2").tobytes())
+    (out_dir / "has_soma.bin").write_bytes(asset.has_soma.astype(np.uint8).tobytes())
+    (out_dir / "sides.bin").write_bytes(np.ascontiguousarray(asset.sides).tobytes())
+    meta["bins"] = {
+        "positions_u16": "positions_u16.bin",
+        "type_codes": "type_codes.bin",
+        "has_soma": "has_soma.bin",
+        "sides": "sides.bin",
+    }
     (out_dir / META_NAME).write_text(json.dumps(meta, indent=2) + "\n")
     return npz_path
 

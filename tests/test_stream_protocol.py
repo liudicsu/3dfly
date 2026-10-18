@@ -199,3 +199,42 @@ def test_recording_roundtrip(tmp_path):
     hello, back = read_recording(path)
     assert decode_message(hello).msg_type == MsgType.HELLO
     assert back == frames
+
+
+def test_brain_panel_and_assets_http_routes():
+    """PR4: /brain panel page + /brain-assets/* from assets/brain."""
+    from pathlib import Path
+    import urllib.request
+
+    from threedfly.stream.builder import FrameBuilder
+    from threedfly.stream.server import BrainStreamServer
+    from threedfly.viz.brain_assets import ASSET_NAME, default_asset_dir
+
+    asset_dir = default_asset_dir()
+    if not (asset_dir / ASSET_NAME).is_file():
+        import pytest
+        pytest.skip("brain assets not present")
+
+    fb = FrameBuilder(n_neurons=16, include_eye_layout=False)
+    srv = BrainStreamServer(host="127.0.0.1", port=0, max_hz=30).start()
+    try:
+        srv.set_hello(fb.hello())
+        base = f"http://127.0.0.1:{srv.port}"
+        panel = urllib.request.urlopen(base + "/brain", timeout=5).read()
+        assert b"brain panel" in panel.lower() or b"coreTplus" in panel
+        assert b"three.module.js" in panel
+        meta = urllib.request.urlopen(base + "/brain-assets/meta.json", timeout=5).read()
+        assert b"body_ids_sha1" in meta
+        pos = urllib.request.urlopen(base + "/brain-assets/positions_u16.bin", timeout=5).read()
+        assert len(pos) > 1000
+        # path traversal rejected
+        import urllib.error
+        try:
+            urllib.request.urlopen(base + "/brain-assets/../../pyproject.toml", timeout=5)
+            raised = False
+        except urllib.error.HTTPError as exc:
+            raised = True
+            assert exc.code == 404
+        assert raised, "traversal should 404"
+    finally:
+        srv.stop()
