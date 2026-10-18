@@ -26,7 +26,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from threedfly.brain.constants import HEX_DEG, HEX_EXTENT, N_HEX
+from threedfly.brain.constants import DT, HEX_DEG, HEX_EXTENT, N_HEX
 from threedfly.brain.stimuli import hex_degrees
 
 # Must match threedfly/sim/mjcf.py (forward wide-FOV, no cant).
@@ -49,10 +49,11 @@ ACCEPT_N = 5
 # training log-normal (c≈1, std 0.2). Disc is matte black.
 FLYVIS_CONTRAST_GAIN = 1.10
 # Photoreceptor-like luminance rest: seconds, not frozen and not per-frame.
-# 5 s at 50 Hz. A 0.5–0.7 s loom barely moves rest; 4 s of 1/f cruise is tracked.
-# 2 s was too fast: still-fly DNp01 0.20-onset slipped to 157°.
+# 5 s at the brain DT (100 Hz). A 0.5–0.7 s loom barely moves rest; seconds
+# of still 1/f are tracked. Global p80 alone left spatial texture, which
+# tonically drove T4/LC4 and froze DNp01 rest above a 60° loom.
 LUM_TAU_S = 5.0
-LUM_DT_S = 0.02
+LUM_DT_S = float(DT)
 LUM_TAU_STEPS = LUM_TAU_S / LUM_DT_S
 
 
@@ -262,15 +263,19 @@ def _sample_image_hex_weighted(
 
 
 class _BgRest:
-    """Per-eye p80 with photoreceptor-like adaptation (seconds)."""
+    """Per-eye p80 (first frame) plus per-hex rest (later frames)."""
 
     def __init__(self) -> None:
         self.L: Optional[float] = None
         self.R: Optional[float] = None
+        self.hex_L: Optional[np.ndarray] = None
+        self.hex_R: Optional[np.ndarray] = None
 
     def reset(self) -> None:
         self.L = None
         self.R = None
+        self.hex_L = None
+        self.hex_R = None
 
     def update(self, side: str, bg_now: float) -> float:
         prev = self.L if side == "L" else self.R
@@ -284,6 +289,24 @@ class _BgRest:
         else:
             self.R = rest
         return rest
+
+    def update_hex(self, side: str, hex_frame: np.ndarray) -> Optional[np.ndarray]:
+        """Return the previous per-hex rest, or None on the first sample."""
+        x = np.asarray(hex_frame, dtype=np.float32)
+        prev = self.hex_L if side == "L" else self.hex_R
+        if prev is None or prev.shape != x.shape:
+            rest = x.copy()
+            if side == "L":
+                self.hex_L = rest
+            else:
+                self.hex_R = rest
+            return None
+        rest = (prev + (x - prev) / float(LUM_TAU_STEPS)).astype(np.float32)
+        if side == "L":
+            self.hex_L = rest
+        else:
+            self.hex_R = rest
+        return prev
 
 
 BG_REST = _BgRest()
@@ -299,18 +322,24 @@ def _luminance_to_gray(
 ) -> np.ndarray:
     """Match flyvis input stats: background → 0.5, fixed contrast gain.
 
-    p80 is the background. Rest adapts with a seconds-scale tau
-    (photoreceptors), so standing 1/f is not contrast growth and a
-    0.5 s loom still stays dark. Then ``0.5 + G*(x − rest)``.
-    Generic; no object geometry.
+    First frame: global p80 → 0.5 so geometry tests still see spatial
+    contrast. Later frames: per-hex rest (seconds) so standing 1/f is
+    mid-gray and only temporal change (a loom) remains. p99 handoff
+    stays on the fixed calib set. Generic; no object geometry.
     """
     out = np.asarray(hex_frame, dtype=np.float32).copy()
     m = np.asarray(valid, dtype=bool)
     if np.count_nonzero(m) < 8:
         return out
-    bg_now = float(np.percentile(out[m], 80.0))
-    bg = BG_REST.update(side, bg_now)
-    out[m] = np.clip(UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - bg), 0.0, 1.0)
+    hex_prev = BG_REST.update_hex(side, out)
+    if hex_prev is None:
+        bg_now = float(np.percentile(out[m], 80.0))
+        bg = BG_REST.update(side, bg_now)
+        out[m] = np.clip(UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - bg), 0.0, 1.0)
+        return out
+    out[m] = np.clip(
+        UNSEEN_GRAY + FLYVIS_CONTRAST_GAIN * (out[m] - hex_prev[m]), 0.0, 1.0
+    )
     return out
 
 

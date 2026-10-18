@@ -1177,12 +1177,17 @@ def main(argv=None) -> int:
             "known_limitations": (
                 "No sim object pose/radius reaches stereo_to_hex or the "
                 "controller. LPi* are in coreTplus (Glu/GABA sign −1; "
-                "T4/T5→LPi→LPLC2 present). Adaptive p80 τ=5 s. flyvis "
-                "BoxEye hex-box (not Gaussian). Still-fly az35 l/v0.04: "
-                "DNp01 peak 1.25 vs hex_ref 1.72; 0.20-onset 157° vs "
-                "61.5° (LC4 onset 18° — GF climb is late, not sampling). "
-                "Frontolat leftover fails are dCA>0. Lock matches true "
-                "side. 3px-AA centre sample dropped frontolat to 7/16."
+                "T4/T5→LPi→LPLC2 present). Per-hex photoreceptor rest "
+                "(τ=5 s at DT=0.01, first frame keeps spatial contrast) "
+                "so standing 1/f is mid-gray; p99 stays on the fixed "
+                "calib set. Still-fly az35 l/v0.04: DNp01 rest 0.008 "
+                "(was 0.47), 0.20-onset 54° vs hex_ref 61.5° (was 157°). "
+                "Merge bar: frontolat 12/16, frontal 1/2, no-object 0/6, "
+                "walls 0.30/100, 12.7 ms/frame, brain-only. Leftover "
+                "frontolat misses are slow l/v=0.02 fires after the "
+                "object has passed, plus one az55 dCA=+1. Script "
+                "official_pass still wants 13/16 and both frontals. "
+                "Do not lower the 0.20 fire bar."
             ),
             "no_object_state_in_eye_or_controller": True,
             "ms_per_step_brain_flyvis": room["ms_per_step_brain_flyvis"],

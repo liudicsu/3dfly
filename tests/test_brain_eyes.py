@@ -256,6 +256,31 @@ def test_stereo_to_hex_has_no_loom_oracle():
     assert not hasattr(env_mod.FlyEnvironment, "loom_radius")
 
 
+def test_per_hex_rest_zeros_still_texture_keeps_a_darkening():
+    """Standing 1/f must not tonic-drive T4; a new dark patch must stay dark.
+
+    Frame 1 keeps spatial contrast (geometry tests). Frame 2 of the same
+    image is mid-gray. A later local darkening is a change, not a DC.
+    """
+    h = w = 64
+    tex = np.zeros((h, w, 3), dtype=np.uint8)
+    # Coarse checks so BoxEye does not average the first frame to gray.
+    yy, xx = np.indices((h, w))
+    tex[(yy // 16 + xx // 16) % 2 == 0] = 40
+    tex[(yy // 16 + xx // 16) % 2 == 1] = 220
+    reset_luminance_rest()
+    first, _ = stereo_to_hex(tex, tex)
+    second, _ = stereo_to_hex(tex, tex)
+    assert float(np.std(first)) > 0.04
+    assert float(np.mean(second)) == pytest.approx(0.5, abs=0.04)
+    assert float(np.std(second)) < 0.03
+    dark = tex.copy()
+    dark[20:44, 20:44] = 0
+    changed, _ = stereo_to_hex(dark, dark)
+    assert float(np.min(changed)) < 0.25
+    assert float(np.mean(changed)) > 0.35
+
+
 def test_empty_room_hex_is_left_right_symmetric():
     """Mirrored empty room: L/R hex means match, so L DC is not an eye-mask artifact."""
     pytest.importorskip("mujoco")

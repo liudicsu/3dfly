@@ -164,6 +164,9 @@ def camera_movie(env, lv, dist0, dt, pre, stim, translate=False, cruise=CRUISE_M
     env.set_pose(tuple(fly), yaw=0.0, vel=(cruise, 0.0, 0.0) if translate else (0.0, 0.0, 0.0))
     env.hide_loom_object()
     reset_luminance_rest()
+    # Prime per-hex rest on the still room so stored frames are change-only
+    # (standing 1/f → mid-gray). The loom then looks like hex_ref.
+    stereo_to_hex(*env.get_eye_images())
     room = stereo_to_hex(*env.get_eye_images())
     for _ in range(n_pre):
         if translate:
