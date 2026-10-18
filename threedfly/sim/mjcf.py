@@ -18,7 +18,7 @@ ASSETS_ROOT = Path(__file__).parent.parent.parent / "assets"
 ASSETS_DIR = ASSETS_ROOT / "fly_meshes"
 
 
-def write_one_over_f_png(path: Path, n: int = 256, contrast: float = 0.20, seed: int = 2) -> Path:
+def write_one_over_f_png(path: Path, n: int = 256, contrast: float = 0.12, seed: int = 2) -> Path:
     """Natural-like 1/f wall texture (real-fly test backgrounds, not hard checkers)."""
     import struct
     import zlib

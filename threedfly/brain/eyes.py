@@ -45,7 +45,10 @@ ACCEPT_N = 5
 # (log-normal, std 0.2). We recenter the background (p80) to 0.5, then
 # apply a fixed gain in that band so a rendered dark disc reaches ~0
 # without stretching every wall texel to black.
-FLYVIS_CONTRAST_GAIN = 1.70
+# flyvis ContrastBrightness around a p80 background. 1.35 is within the
+# training log-normal (std 0.2). Higher (1.7) blackened still discs but
+# turned 1/f texels into open-space looms.
+FLYVIS_CONTRAST_GAIN = 1.35
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
