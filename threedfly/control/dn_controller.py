@@ -73,6 +73,7 @@ class DNFlightController:
         self._steep_hist: List[bool] = []
         self._loom_threat = ""
         self._lat_sign_hist: List[int] = []
+        self._d01_sign_hist: List[int] = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
         self.last_lat_delta = 0.0
@@ -88,6 +89,8 @@ class DNFlightController:
         self.last_lock_step: Optional[int] = None
         self.last_yaw_terms: Dict[str, float] = {}
         self._course_rest = {"dna02": 0.0, "dnp15": 0.0, "hse": 0.0}
+        self._course_sigma: Optional[float] = None
+        self.last_course_deadzone = 0.0
         self.last_gf_score = 0.0
         self._rise_hist: List[float] = []
         self._rise_L_hist: List[float] = []
@@ -131,6 +134,7 @@ class DNFlightController:
         self._steep_hist = []
         self._loom_threat = ""
         self._lat_sign_hist = []
+        self._d01_sign_hist = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
         self.last_lat_delta = 0.0
@@ -146,6 +150,8 @@ class DNFlightController:
         self.last_lock_step = None
         self.last_yaw_terms = {}
         self._course_rest = {"dna02": 0.0, "dnp15": 0.0, "hse": 0.0}
+        self._course_sigma = None
+        self.last_course_deadzone = 0.0
         self.last_gf_score = 0.0
         self._rise_hist = []
         self._rise_L_hist = []
@@ -177,6 +183,7 @@ class DNFlightController:
         self._steep_hist = []
         self._loom_threat = ""
         self._lat_sign_hist = []
+        self._d01_sign_hist = []
         self.last_lat_integrated = 0.0
         self.last_lat_now = 0.0
         self.last_lat_delta = 0.0
@@ -200,6 +207,7 @@ class DNFlightController:
         # Standing course DC is already in ``_base``; restart the rest
         # so a pre-baseline compute cannot invert the L−R.
         self._course_rest = {"dna02": 0.0, "dnp15": 0.0, "hse": 0.0}
+        self._course_sigma = None
         if self.params.use_engineered_eye_laterality:
             eye = float(readout.eye_L) - float(readout.eye_R)
             if abs(eye) >= float(self.params.eye_threat_min):
@@ -255,6 +263,38 @@ class DNFlightController:
             out.append(float(raw) - rest)
         return float(out[0]), float(out[1])
 
+    def _course_deadzone(self, course_pre: float) -> float:
+        """Course (DNa02 + DNp15) plant threshold, relative to its own noise.
+
+        ``course_deadzone`` is the cap (the old absolute 0.15). With
+        ``course_deadzone_sigma_k`` > 0 the threshold is k·σ of the
+        high-passed course residual, σ tracked as an EMA RMS over
+        *quiet* steps only (no DNp01 climb, no VPN expansion), floored at
+        ``course_deadzone_floor``. Quiet cruise with a noisy residual keeps
+        ≈ the old bar; a quiet residual lets a real DNa02/DNp15 transient
+        through. Loom terms are untouched. No stimulus or object state.
+        """
+        p = self.params
+        cap = float(getattr(p, "course_deadzone", 0.0) or 0.0)
+        k = float(getattr(p, "course_deadzone_sigma_k", 0.0) or 0.0)
+        if cap <= 0.0:
+            return 0.0
+        if k <= 0.0:
+            return cap
+        quiet = self.last_rise < 0.08 and not self._vpn_expanding()
+        if self._course_sigma is None:
+            # Start at the cap: no evidence yet that the residual is quiet.
+            self._course_sigma = cap / k
+        elif quiet:
+            tau = max(float(getattr(p, "course_sigma_tau_steps", 100.0)), 1.0)
+            var = float(self._course_sigma) ** 2
+            var += (float(course_pre) ** 2 - var) / tau
+            self._course_sigma = float(np.sqrt(max(var, 0.0)))
+        floor = float(getattr(p, "course_deadzone_floor", 0.0) or 0.0)
+        dz = float(np.clip(k * float(self._course_sigma), floor, cap))
+        self.last_course_deadzone = dz
+        return dz
+
     def _steer_terms(self, ro: DNReadout) -> Dict[str, float]:
         """Per-source yaw before the escape burst. Official path has eye=0."""
         p = self.params
@@ -277,8 +317,9 @@ class DNFlightController:
             dna02, dnp15 = self._course_highpass(dna02, dnp15, tau)
         # Plant-side threshold: residual course after symmetry/baseline
         # must not fire a saccade-scale torque. Loom terms are untouched.
-        dz = float(getattr(p, "course_deadzone", 0.0) or 0.0)
-        if dz > 0.0 and abs(float(dna02) + float(dnp15)) < dz:
+        course_pre = float(dna02) + float(dnp15)
+        dz = self._course_deadzone(course_pre)
+        if dz > 0.0 and abs(course_pre) < dz:
             dna02 = 0.0
             dnp15 = 0.0
         d03, vpn = self._loom_yaw_parts(ro)
@@ -293,6 +334,8 @@ class DNFlightController:
             "vpn_loom": float(vpn),
             "eye": float(eye),
             "escape_kick": 0.0,
+            "course_pre_dz": float(course_pre),
+            "course_deadzone": float(dz),
         }
 
     def _vpn_sides(self, ro: DNReadout) -> tuple[float, float]:
@@ -484,6 +527,7 @@ class DNFlightController:
         if self.last_rise < float(p.dnp01_rearm_delta_hz) and not expanding:
             self._lat_hist = []
             self._lat_sign_hist = []
+            self._d01_sign_hist = []
             self._peak_lc4_L = 0.0
             self._peak_lc4_R = 0.0
             self._loom_threat = ""
@@ -516,6 +560,31 @@ class DNFlightController:
             )
             lock_rise = float(getattr(p, "threat_lock_rise_hz", 0.12))
             lat_min = float(p.dnp01_loom_lat_min)
+            # Onset DNp01 laterality: the same |L−R rise| ≥ 0.08 bar
+            # _threat_side uses, held for n_lock steps while the disc is
+            # still small/monocular. Once it is huge (binocular) or the
+            # fly is mid-saccade, instantaneous VPN/DNp01 L−R is not the
+            # threat side any more (box r11: 3.4 m L45 loom saccaded
+            # right, then GF fired with VPN saying R → turned back in).
+            r_L, r_R = self._dnp01_laterality()
+            d01 = float(r_L) - float(r_R)
+            self._d01_sign_hist.append(1 if d01 >= 0.08 else (-1 if d01 <= -0.08 else 0))
+            if len(self._d01_sign_hist) > keep + 2:
+                self._d01_sign_hist.pop(0)
+            d_tail = self._d01_sign_hist[-n_lock:]
+            d01_consistent = (
+                bool(getattr(p, "threat_lock_onset_dnp01", True))
+                and len(d_tail) >= n_lock
+                and d_tail[0] != 0
+                and all(s == d_tail[0] for s in d_tail)
+            )
+            if (
+                not self._loom_threat
+                and d01_consistent
+                and (self.last_rise >= lock_rise or expanding)
+            ):
+                self._loom_threat = "L" if d_tail[0] > 0 else "R"
+                self.last_lock_step = int(self.steps)
             if (
                 not self._loom_threat
                 and consistent
@@ -542,6 +611,10 @@ class DNFlightController:
             eye = self._raw_eye_lr()
             if abs(eye) >= float(self.params.eye_threat_min):
                 return "L" if eye > 0.0 else "R"
+        # Episode lock first: it was taken while the loom was small and
+        # lateralised; at GF fire the disc is ≥40° and binocular.
+        if self._loom_threat and bool(getattr(self.params, "threat_lock_first", True)):
+            return self._loom_threat
         if self._base is not None:
             rise_L, rise_R = self._dnp01_laterality()
             d01 = float(rise_L) - float(rise_R)

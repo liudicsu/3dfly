@@ -68,6 +68,11 @@ class FlightParams:
     # Do not lock side on the first noisy sample (self-motion / early yaw).
     threat_lock_consistent: int = 4
     threat_lock_rise_hz: float = 0.12
+    # Lock also on onset DNp01 L−R (|Δrise| ≥ 0.08 for threat_lock_consistent
+    # steps) and let the episode lock win at GF fire over instantaneous
+    # binocular VPN/DNp01 L−R. Controller logic, not brain weights.
+    threat_lock_onset_dnp01: bool = True
+    threat_lock_first: bool = True
     # Standing L−R DC (self-motion / residual LC4_L) is tracked as rest.
     # Only laterality *above* that rest is a loom.
     lat_rest_tau_steps: float = 25.0
@@ -131,7 +136,14 @@ class FlightParams:
     # threshold (unit DNa02 term ≈ 0.53; post-baseline residual ≪ 0.1).
     # Documented with the saccade plant; not a gate retune.
     steer_deadzone: float = 0.0
+    # Cap of the course (DNa02+DNp15) threshold; the live bar is
+    # clip(k·σ_quiet, floor, cap) with σ the EMA RMS of the high-passed
+    # course residual on quiet steps (no DNp01 climb / VPN expansion).
+    # k = 0 restores the old absolute 0.15.
     course_deadzone: float = 0.15
+    course_deadzone_sigma_k: float = 2.5
+    course_deadzone_floor: float = 0.06
+    course_sigma_tau_steps: float = 100.0
     # Slow rest on course L−R (DNa02 / DNp15 only). Scene/connectome DC
     # after baseline is subtracted; a 50–80 ms saccade is a transient
     # and is passed. HSE is not rested — it is the optomotor damp.
@@ -251,7 +263,9 @@ class FlightParams:
             "Tammero & Dickinson 2002; Muijres et al. 2014. "
             "scripts/calibrate_saccade_plant.py. Izz ~1e-8, "
             "τ=I/kd ~4 ms — not inertia-limited. Course deadzone "
-            "0.15 (unit DNa02 ≈ 0.53). HSE torque ÷12."
+            "= clip(k·σ_rest, floor, 0.15) with σ_rest the quiet-step "
+            "RMS of the high-passed DNa02+DNp15 (unit DNa02 ≈ 0.53). "
+            "HSE torque ÷12."
         ),
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })

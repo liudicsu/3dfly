@@ -50,6 +50,8 @@ def test_escape_threshold_sits_between_m1_rotation_and_loom():
     assert p.saccade_plant_scale == 12.0
     assert p.course_rest_tau_steps == 40.0
     assert p.course_deadzone == 0.15
+    assert p.course_deadzone_sigma_k > 0.0
+    assert 0.0 < p.course_deadzone_floor < p.course_deadzone
     assert p.steer_deadzone == 0.0
     assert "Fry" in p.notes["saccade_plant"]
     assert "calibrate_saccade_plant" in p.notes["saccade_plant"]
