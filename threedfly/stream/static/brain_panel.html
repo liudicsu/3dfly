@@ -65,6 +65,8 @@
         <option value="custom">Custom…</option>
       </select>
       <div id="filters"></div>
+      <label>Replay recording (.bin)</label>
+      <input id="recFile" type="file" accept=".bin,application/octet-stream">
       <button id="resetCam" type="button">Reset camera</button>
       <div class="stat" id="status">boot</div>
     </div>
@@ -76,9 +78,12 @@ import { OrbitControls } from './vendor/OrbitControls.js';
 import { GLTFLoader } from './vendor/GLTFLoader.js';
 import { BrainStream, Section, activityLUT } from './brain_stream.js';
 import { DashboardPanels } from './dashboard_panels.js';
+import { RecordingPlayer } from './recording.js';
 
 const qs = new URLSearchParams(location.search);
 const WS_URL = qs.get('ws') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+const REC_URL = qs.get('rec');  // local/static recording (.bin); skips websocket
+const REC_HZ = +(qs.get('hz') || 10);
 const ASSET_BASE = qs.get('assets') || '/brain-assets';
 const statusEl = document.getElementById('status');
 const setStatus = (t, cls) => { statusEl.className = 'stat ' + (cls || ''); statusEl.textContent = t; };
@@ -261,8 +266,13 @@ const dash = new DashboardPanels({
 window.__dash = dash;
 
 let lut = null, hashOk = null;
-const stream = new BrainStream(WS_URL, {
-  onStatus: (s) => setStatus('ws: ' + s, s === 'connected' ? 'ok' : 'warn'),
+let stream = null; // BrainStream | RecordingPlayer
+
+const handlers = {
+  onStatus: (s) => {
+    const kind = REC_URL || window.__recMode ? 'rec' : 'ws';
+    setStatus(kind + ': ' + s, (s === 'connected' || s === 'recording' || s === 'loop') ? 'ok' : 'warn');
+  },
   onHello: (hello) => {
     window.__hello = hello;
     lut = activityLUT(hello);
@@ -280,7 +290,7 @@ const stream = new BrainStream(WS_URL, {
   onFrame: (msg) => {
     const act = msg.sections[Section.ACTIVITY];
     if (!act || act.length !== N || !lut) return;
-    const cap = stream.meta.activity.cap || 200;
+    const cap = (stream && stream.meta && stream.meta.activity && stream.meta.activity.cap) || 200;
     const denom = Math.log1p(cap);
     let nz = 0;
     for (let i = 0; i < N; i++) {
@@ -306,6 +316,7 @@ const stream = new BrainStream(WS_URL, {
       nonzeroCodes: nz,
       hashOk,
       meanRate: rate.reduce((a, b) => a + b, 0) / N,
+      source: window.__recMode ? 'recording' : 'websocket',
     };
     dash.onFrame(msg, {
       DN: msg.sections[Section.DN],
@@ -315,6 +326,37 @@ const stream = new BrainStream(WS_URL, {
       STATS: stats,
     });
   }
+};
+
+function startRecording(arrayBuffer, label) {
+  if (stream && stream.stop) stream.stop();
+  if (stream && stream.ws) try { stream.ws.close(); } catch (_) {}
+  window.__recMode = true;
+  document.getElementById('src').textContent = label || 'recording';
+  stream = new RecordingPlayer(arrayBuffer, { ...handlers, hz: REC_HZ, loop: true });
+  window.__stream = stream;
+  stream.start();
+}
+
+async function startFromUrl(url) {
+  setStatus('fetching ' + url, 'warn');
+  const buf = await (await fetch(url)).arrayBuffer();
+  startRecording(buf, url);
+}
+
+if (REC_URL) {
+  document.getElementById('src').textContent = REC_URL;
+  startFromUrl(REC_URL).catch((e) => setStatus('rec error: ' + e, 'bad'));
+} else {
+  document.getElementById('src').textContent = WS_URL;
+  stream = new BrainStream(WS_URL, handlers);
+  window.__stream = stream;
+}
+
+document.getElementById('recFile').addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  startRecording(await f.arrayBuffer(), f.name);
 });
 
 let __paused = false;

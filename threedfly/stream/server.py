@@ -33,6 +33,8 @@ _ROUTES = {
     "/brain": "brain_panel.html",
     "/brain_panel.html": "brain_panel.html",
     "/panel": "brain_panel.html",
+    "/demo": "demo.html",
+    "/demo.html": "demo.html",
 }
 
 def _default_brain_asset_dir() -> Path:
@@ -49,6 +51,7 @@ class BrainStreamServer:
         compression: Optional[str] = "deflate",
         static_dir: Path = STATIC_DIR,
         asset_dir: Optional[Path] = None,
+        recording_path: Optional[Path] = None,
     ):
         self.host = host
         self.port = int(port)
@@ -56,6 +59,7 @@ class BrainStreamServer:
         self.compression = compression
         self.static_dir = Path(static_dir)
         self.asset_dir = Path(asset_dir) if asset_dir is not None else _default_brain_asset_dir()
+        self.recording_path = Path(recording_path) if recording_path else None
         self._hello: Optional[bytes] = None
         self._latest: Optional[bytes] = None
         self._seq = 0
@@ -192,6 +196,12 @@ class BrainStreamServer:
             return _response(200, json.dumps(meta).encode(), "application/json")
         if path == "/stats.json":
             return _response(200, json.dumps(self.stats()).encode(), "application/json")
+        # PR6: expose the active recording for browser-side ?rec=/recording.bin
+        if path == "/recording.bin" and self.recording_path is not None:
+            f = self.recording_path.resolve()
+            if not f.is_file():
+                return _response(404, b"not found", "text/plain")
+            return _response(200, f.read_bytes(), "application/octet-stream")
         # Brain-panel static assets (PR3): /brain-assets/<file>
         if path.startswith("/brain-assets/"):
             rel = path[len("/brain-assets/"):]

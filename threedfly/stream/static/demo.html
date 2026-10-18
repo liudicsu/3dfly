@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3dfly · local demo (PR6)</title>
+<style>
+  html,body{margin:0;background:#070a10;color:#cfd8e3;font:13px/1.45 ui-monospace,Menlo,monospace}
+  main{max-width:880px;margin:0 auto;padding:28px 20px 60px}
+  h1{font-size:18px;color:#8fb3ff;margin:0 0 8px}
+  h2{font-size:14px;color:#8fb3ff;margin:22px 0 8px}
+  a{color:#6fb6ff}
+  .card{background:#0b1220;border:1px solid #1e2a3a;border-radius:8px;padding:14px 16px;margin:12px 0}
+  code,pre{background:#121a26;border-radius:4px;padding:2px 6px}
+  pre{padding:10px 12px;overflow:auto;border:1px solid #1e2a3a}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  button,input[type=file]{background:#121a26;color:#e6edf3;border:1px solid #2a3a4e;border-radius:4px;padding:8px 12px;cursor:pointer}
+  button:hover{border-color:#4a6a8e}
+  .ok{color:#59d38a}.warn{color:#ffb454}.muted{color:#9aa7b5}
+  #dash{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:280px}
+  #dash .card{margin:0;min-height:160px}
+  canvas{width:100%;height:140px;display:block;background:#070a10}
+  #eyes{display:flex;gap:6px} #eyes canvas{width:50%;aspect-ratio:1;height:auto}
+</style>
+</head>
+<body>
+<main>
+  <h1>3dfly local demo · record → replay</h1>
+  <p class="muted">Local-only static page (not GitHub Pages). Uses protocol-v1 recordings
+  from PR2 (<code>stream_client.py --dump</code> / <code>--stream-record</code>) and the
+  browser player in <code>recording.js</code>.</p>
+
+  <div class="card">
+    <h2>1 · Load a recording</h2>
+    <p>Pick a <code>.bin</code> (u32-length-prefixed HELLO+FRAMEs), or open the full
+    brain panel with <code>?rec=</code>.</p>
+    <div class="row">
+      <input id="file" type="file" accept=".bin,application/octet-stream">
+      <button id="play" type="button" disabled>Play here</button>
+      <a id="openPanel" href="/brain">Open /brain (live WS)</a>
+    </div>
+    <p id="info" class="muted" style="margin-top:8px">no file yet</p>
+  </div>
+
+  <div class="card">
+    <h2>2 · Dashboard preview</h2>
+    <div id="dash">
+      <div class="card"><h3 style="margin:0 0 4px;font-size:11px;color:#8fb3ff">HEX EYES</h3><div id="eyes"><canvas id="eyeL"></canvas><canvas id="eyeR"></canvas></div></div>
+      <div class="card"><h3 style="margin:0 0 4px;font-size:11px;color:#8fb3ff">PATHWAY</h3><canvas id="flow"></canvas></div>
+      <div class="card"><h3 style="margin:0 0 4px;font-size:11px;color:#8fb3ff">DN TRACES</h3><canvas id="dn"></canvas></div>
+      <div class="card"><h3 style="margin:0 0 4px;font-size:11px;color:#8fb3ff">HEATMAP</h3><canvas id="heat"></canvas></div>
+    </div>
+    <canvas id="timeline" style="width:100%;height:80px;margin-top:8px;background:#070a10"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>3 · How to record &amp; serve locally</h2>
+<pre># A) Record from a live stream
+python scripts/stream_client.py --url ws://localhost:8765 --seconds 20 \
+  --dump output/ui_verify/pr6/live_frames.bin
+
+# B) Or record while simulating (no client required)
+threedfly run-interactive --stream-port 8765 --stream-record output/demo.bin …
+
+# C) Replay through the server (websocket fan-out)
+python scripts/stream_replay.py output/ui_verify/pr2/live_frames.bin --port 8767 --hz 10
+#    → http://localhost:8767/demo
+#    → http://localhost:8767/brain?rec=/recording.bin
+
+# D) Or plain static tree (assets + panel; use file picker for the .bin)
+python -m http.server 8971 --directory .
+#    → http://localhost:8971/threedfly/stream/static/demo.html
+</pre>
+    <p class="warn">Do not publish this page to GitHub Pages — assets and recordings are for local verification only.</p>
+  </div>
+</main>
+<script type="module">
+import { Section } from './brain_stream.js';
+import { DashboardPanels } from './dashboard_panels.js';
+import { RecordingPlayer, parseRecording } from './recording.js';
+
+const dash = new DashboardPanels({
+  eyeL: document.getElementById('eyeL'),
+  eyeR: document.getElementById('eyeR'),
+  flow: document.getElementById('flow'),
+  dn: document.getElementById('dn'),
+  heat: document.getElementById('heat'),
+  timeline: document.getElementById('timeline'),
+});
+window.__dash = dash;
+
+let buf = null, player = null;
+const info = document.getElementById('info');
+const playBtn = document.getElementById('play');
+const openPanel = document.getElementById('openPanel');
+
+document.getElementById('file').addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  buf = await f.arrayBuffer();
+  const { framesRaw } = parseRecording(buf);
+  info.textContent = `${f.name} · ${(buf.byteLength/1024).toFixed(0)} KiB · ${framesRaw.length} frames`;
+  info.className = 'ok';
+  playBtn.disabled = false;
+  // object URL so /brain?rec= can also be used if we served the file — for file picker we play in-page
+  openPanel.textContent = 'Open /brain (use file picker there too)';
+  openPanel.href = '/brain';
+});
+
+playBtn.addEventListener('click', () => {
+  if (!buf) return;
+  if (player && player.stop) player.stop();
+  player = new RecordingPlayer(buf, {
+    hz: 10,
+    loop: true,
+    onStatus: (s) => { info.textContent = 'player: ' + s; },
+    onHello: (h) => { dash.onHello(h); info.textContent = `HELLO n=${h.n_neurons} · playing`; info.className = 'ok'; },
+    onFrame: (msg) => {
+      dash.onFrame(msg, {
+        DN: msg.sections[Section.DN],
+        CELLTYPE: msg.sections[Section.CELLTYPE],
+        EYE_L: msg.sections[Section.EYE_L],
+        EYE_R: msg.sections[Section.EYE_R],
+        STATS: msg.sections[Section.STATS],
+      });
+      window.__last = { frameIndex: msg.frameIndex, simTime: msg.simTime, source: 'recording' };
+    },
+  });
+  window.__player = player;
+  player.start();
+});
+
+// Optional: ?rec=/recording.bin when served by stream_replay
+const qs = new URLSearchParams(location.search);
+if (qs.get('rec')) {
+  fetch(qs.get('rec')).then(r => r.arrayBuffer()).then((b) => {
+    buf = b;
+    const { framesRaw } = parseRecording(buf);
+    info.textContent = `${qs.get('rec')} · ${framesRaw.length} frames`;
+    info.className = 'ok';
+    playBtn.disabled = false;
+    openPanel.href = '/brain?rec=' + encodeURIComponent(qs.get('rec'));
+    playBtn.click();
+  }).catch((e) => { info.textContent = String(e); info.className = 'warn'; });
+}
+</script>
+</body>
+</html>

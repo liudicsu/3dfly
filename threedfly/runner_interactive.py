@@ -44,6 +44,7 @@ def run_interactive_simulation(
     stream_port: int = 8765,
     stream_hz: float = 30.0,
     stream_log: str = None,
+    stream_record: str = None,
 ):
     """
     Run interactive 3dfly simulation with unified web interface.
@@ -213,9 +214,11 @@ def run_interactive_simulation(
 
     stream = None
     frame_builder = None
-    if stream_port:
+    stream_record_frames = []
+    stream_record_hello = None
+    stream_record_last = 0.0
+    if stream_port or stream_record:
         from threedfly.stream.builder import FrameBuilder
-        from threedfly.stream.server import BrainStreamServer
 
         if use_core:
             frame_builder = FrameBuilder(
@@ -225,9 +228,21 @@ def run_interactive_simulation(
             )
         else:
             frame_builder = FrameBuilder(n_neurons=n_neurons)
-        stream = BrainStreamServer(host=host, port=stream_port, max_hz=stream_hz).start()
-        stream.set_hello(frame_builder.hello())
-        print(f"  ✓ Brain stream (protocol v1) {stream.url}  inspector: http://localhost:{stream.port}/")
+        if stream_port:
+            from threedfly.stream.server import BrainStreamServer
+
+            stream = BrainStreamServer(
+                host=host,
+                port=stream_port,
+                max_hz=stream_hz,
+                recording_path=Path(stream_record) if stream_record else None,
+            ).start()
+            stream.set_hello(frame_builder.hello())
+            print(f"  ✓ Brain stream (protocol v1) {stream.url}  inspector: http://localhost:{stream.port}/")
+        if stream_record:
+            stream_record_hello = frame_builder.hello()
+            Path(stream_record).parent.mkdir(parents=True, exist_ok=True)
+            print(f"  ✓ Stream recording → {stream_record}")
     stream_stats_t = time.time()
     
     print("\n[8/8] Starting interactive simulation...")
@@ -436,23 +451,32 @@ def run_interactive_simulation(
             
             # Binary brain stream: fold every step into the window max; encode
             # only when a client is connected and a display frame is due.
-            if stream is not None:
+            if stream is not None or stream_record:
                 frame_builder.accumulate(brain_activity)
-                if stream.wants_frame():
-                    stream.publish(
-                        frame_builder.build(
-                            sim_time=step * sim_dt,
-                            readout=core_step.readout if core_step is not None else None,
-                            position=fly_pos,
-                            orientation=env.get_fly_orientation(),
-                            velocity=fly_velocity,
-                            wing_angles=env.get_wing_angles(),
-                            hex_L=core_step.hex_L if core_step is not None else None,
-                            hex_R=core_step.hex_R if core_step is not None else None,
-                            control=action,
-                        )
+                now_perf = time.perf_counter()
+                due_ws = stream is not None and stream.wants_frame()
+                due_rec = False
+                if stream_record:
+                    min_dt = 1.0 / stream_hz if stream_hz > 0 else 0.0
+                    due_rec = (now_perf - stream_record_last) >= min_dt
+                if due_ws or due_rec:
+                    frame_bytes = frame_builder.build(
+                        sim_time=step * sim_dt,
+                        readout=core_step.readout if core_step is not None else None,
+                        position=fly_pos,
+                        orientation=env.get_fly_orientation(),
+                        velocity=fly_velocity,
+                        wing_angles=env.get_wing_angles(),
+                        hex_L=core_step.hex_L if core_step is not None else None,
+                        hex_R=core_step.hex_R if core_step is not None else None,
+                        control=action,
                     )
-                if stream_log and time.time() - stream_stats_t > 5.0:
+                    if due_ws:
+                        stream.publish(frame_bytes)
+                    if due_rec:
+                        stream_record_frames.append(frame_bytes)
+                        stream_record_last = now_perf
+                if stream is not None and stream_log and time.time() - stream_stats_t > 5.0:
                     stream_stats_t = time.time()
                     import json as _json
 
@@ -606,6 +630,11 @@ def run_interactive_simulation(
         pass
     
     # Cleanup
+    if stream_record and stream_record_hello is not None and stream_record_frames:
+        from threedfly.stream.client import write_recording
+
+        write_recording(stream_record, stream_record_hello, stream_record_frames)
+        print(f"✓ Wrote stream recording: {stream_record} ({len(stream_record_frames)} frames)")
     if stream is not None:
         stream.stop()
     viz.close()

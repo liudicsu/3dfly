@@ -454,7 +454,13 @@ def run(subgraph, steps, viz_mode, headless, save_output, simulator_type, seed, 
 )
 @click.option("--stream-hz", type=float, default=30.0, show_default=True, help="Max stream frame rate")
 @click.option("--stream-log", type=click.Path(), default=None, help="Append stream stats (JSON lines)")
-def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, legacy_brain, engineered_looming_residual, stream_port, stream_hz, stream_log):
+@click.option(
+    "--stream-record",
+    type=click.Path(),
+    default=None,
+    help="Write protocol-v1 recording (HELLO+FRAMEs) while streaming; works with 0 clients",
+)
+def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, port, max_collisions, no_soft_recovery, legacy_brain, engineered_looming_residual, stream_port, stream_hz, stream_log, stream_record):
     """Run 3dfly with unified interactive web interface.
     
     Single-page interface with:
@@ -483,6 +489,7 @@ def run_interactive(subgraph, steps, save_output, simulator_type, seed, host, po
             stream_port=stream_port,
             stream_hz=stream_hz,
             stream_log=stream_log,
+            stream_record=stream_record,
         )
     except Exception as e:
         click.echo(f"\nError running interactive simulation: {e}", err=True)

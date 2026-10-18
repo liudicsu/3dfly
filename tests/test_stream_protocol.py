@@ -281,3 +281,68 @@ def test_dashboard_panels_js_hex_and_flow_constants():
     assert "DN_SERIES" in js and "HEAT_GROUPS" in js
     assert "drawEye" in js and "drawFlow" in js and "drawDN" in js
     assert "drawHeat" in js and "drawTimeline" in js
+
+
+def test_demo_and_recording_js_routes(tmp_path):
+    """PR6: /demo page, recording.js, and /recording.bin for browser replay."""
+    import struct
+    import urllib.request
+
+    from threedfly.stream.builder import FrameBuilder
+    from threedfly.stream.client import write_recording
+    from threedfly.stream.server import BrainStreamServer
+
+    fb = FrameBuilder(n_neurons=8, include_eye_layout=False)
+    hello = fb.hello()
+    frames = [fb.build(0.02 * i, rates=np.full(8, float(i + 1), np.float32)) for i in range(3)]
+    rec = tmp_path / "sample.bin"
+    write_recording(rec, hello, frames)
+
+    srv = BrainStreamServer(
+        host="127.0.0.1", port=0, max_hz=30, recording_path=rec
+    ).start()
+    try:
+        srv.set_hello(hello)
+        base = f"http://127.0.0.1:{srv.port}"
+        demo = urllib.request.urlopen(base + "/demo", timeout=5).read()
+        assert b"local demo" in demo.lower() or b"PR6" in demo
+        assert b"recording.js" in demo
+        js = urllib.request.urlopen(base + "/recording.js", timeout=5).read()
+        assert b"parseRecording" in js and b"RecordingPlayer" in js
+        raw = urllib.request.urlopen(base + "/recording.bin", timeout=5).read()
+        assert raw == rec.read_bytes()
+        # length-prefixed: first u32 is hello length
+        (n,) = struct.unpack_from("<I", raw, 0)
+        assert n == len(hello)
+        brain = urllib.request.urlopen(base + "/brain", timeout=5).read()
+        assert b"recording.js" in brain
+        assert b"REC_URL" in brain or b"recFile" in brain
+    finally:
+        srv.stop()
+
+
+def test_stream_record_write_roundtrip(tmp_path):
+    """write_recording format is what browser parseRecording expects."""
+    import struct
+
+    from threedfly.stream.builder import FrameBuilder
+    from threedfly.stream.client import read_recording, write_recording
+
+    fb = FrameBuilder(n_neurons=4, include_eye_layout=False)
+    hello = fb.hello()
+    frames = [fb.build(0.1 * i, rates=np.arange(4, dtype=np.float32) + i) for i in range(5)]
+    path = tmp_path / "out.bin"
+    write_recording(path, hello, frames)
+    data = path.read_bytes()
+    # Browser parseRecording walks u32 lengths
+    off, msgs = 0, []
+    while off + 4 <= len(data):
+        (n,) = struct.unpack_from("<I", data, off)
+        off += 4
+        msgs.append(data[off : off + n])
+        off += n
+    assert len(msgs) == 1 + len(frames)
+    assert msgs[0] == hello
+    assert msgs[1:] == frames
+    h2, f2 = read_recording(path)
+    assert h2 == hello and f2 == frames
