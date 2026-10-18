@@ -1,0 +1,29 @@
+{
+  "url": "http://127.0.0.1:8767/brain?shells=0",
+  "hashOk": true,
+  "hello": {
+    "n": 45434,
+    "sha": "38b9c6e5d522d1b77899907621d0484336d4511b"
+  },
+  "last": {
+    "frameIndex": 229,
+    "simTime": 14.96,
+    "nActive": 18821,
+    "maxRate": 150,
+    "nonzeroCodes": 20045,
+    "hashOk": true,
+    "meanRate": 0.133829357781097
+  },
+  "status": "HELLO ok \u00b7 n=45434 \u00b7 hash match",
+  "nshow": "45,434 neurons \u00b7 44,788 with soma",
+  "hud": "coreTplus brain panel \u00b7 45,434 neurons \u00b7 44,788 with soma\nstream: ws://127.0.0.1:8767 \u00b7 181.8 fps \u00b7 16787 KiB/s\nasset hash: 38b9c6e5d522d1b77899907621d0484336d4511b\nhello hash: \u2713 38b9c6e5d522d1b77899907621d0484336d4511b\nframe 229 \u00b7 t=14.96s \u00b7 active 18821 (41.4%) \u00b7 max 150.0 Hz",
+  "note": "WebGL SwiftShader readback is blank; activity image is Python projection of the same recording frames the panel streams. HUD/controls screenshots from live headless Chromium.",
+  "files": {
+    "brain_panel.png": "composed activity + live controls",
+    "brain_panel_crop.png": "activity projection",
+    "brain_points_activity.png": "same as crop",
+    "brain_panel_hud.png": "live HUD",
+    "brain_panel_controls.png": "live side panel",
+    "brain_panel_page.png": "full page HTML (canvas hidden)"
+  }
+}

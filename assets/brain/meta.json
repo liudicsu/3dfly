@@ -14493,5 +14493,11 @@
     "CB": "shell_CB.glb",
     "OL(L)": "shell_OL_L.glb",
     "OL(R)": "shell_OL_R.glb"
+  },
+  "bins": {
+    "positions_u16": "positions_u16.bin",
+    "type_codes": "type_codes.bin",
+    "has_soma": "has_soma.bin",
+    "sides": "sides.bin"
   }
 }

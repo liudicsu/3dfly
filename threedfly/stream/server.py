@@ -27,7 +27,17 @@ from threedfly.stream.protocol import decode_message
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-_ROUTES = {"/": "inspector.html", "/index.html": "inspector.html"}
+_ROUTES = {
+    "/": "inspector.html",
+    "/index.html": "inspector.html",
+    "/brain": "brain_panel.html",
+    "/brain_panel.html": "brain_panel.html",
+    "/panel": "brain_panel.html",
+}
+
+def _default_brain_asset_dir() -> Path:
+    # threedfly/stream/server.py → repo root / assets / brain
+    return Path(__file__).resolve().parents[2] / "assets" / "brain"
 
 
 class BrainStreamServer:
@@ -38,12 +48,14 @@ class BrainStreamServer:
         max_hz: float = 30.0,
         compression: Optional[str] = "deflate",
         static_dir: Path = STATIC_DIR,
+        asset_dir: Optional[Path] = None,
     ):
         self.host = host
         self.port = int(port)
         self.max_hz = float(max_hz)
         self.compression = compression
         self.static_dir = Path(static_dir)
+        self.asset_dir = Path(asset_dir) if asset_dir is not None else _default_brain_asset_dir()
         self._hello: Optional[bytes] = None
         self._latest: Optional[bytes] = None
         self._seq = 0
@@ -180,6 +192,23 @@ class BrainStreamServer:
             return _response(200, json.dumps(meta).encode(), "application/json")
         if path == "/stats.json":
             return _response(200, json.dumps(self.stats()).encode(), "application/json")
+        # Brain-panel static assets (PR3): /brain-assets/<file>
+        if path.startswith("/brain-assets/"):
+            rel = path[len("/brain-assets/"):]
+            f = (self.asset_dir / rel).resolve()
+            if self.asset_dir.resolve() not in f.parents and f != self.asset_dir.resolve():
+                return _response(404, b"not found", "text/plain")
+            if not f.is_file():
+                return _response(404, b"not found", "text/plain")
+            ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+            if f.suffix == ".js":
+                ctype = "text/javascript"
+            elif f.suffix == ".bin":
+                ctype = "application/octet-stream"
+            elif f.suffix == ".npz":
+                ctype = "application/octet-stream"
+            return _response(200, f.read_bytes(), ctype)
+
         name = _ROUTES.get(path, path.lstrip("/"))
         f = (self.static_dir / name).resolve()
         if self.static_dir.resolve() not in f.parents or not f.is_file():

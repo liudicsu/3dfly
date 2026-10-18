@@ -61,7 +61,7 @@ include = ["threedfly*"]
 
 [tool.setuptools.package-data]
 "threedfly.brain.data" = ["*.txt.gz"]
-"threedfly.stream" = ["static/*"]
+"threedfly.stream" = ["static/*", "static/vendor/*", "static/vendor/utils/*"]
 
 [tool.black]
 line-length = 100

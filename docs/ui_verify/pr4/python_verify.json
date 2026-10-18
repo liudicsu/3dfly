@@ -1,0 +1,11 @@
+{
+  "method": "python_projection_from_recording",
+  "frame_index": 196,
+  "sim_time": 14.3,
+  "nonzero_codes": 23594,
+  "max_rate_hz": 150.07180786132812,
+  "mean_rate_hz": 8.033675193786621,
+  "body_ids_sha1": "38b9c6e5d522d1b77899907621d0484336d4511b",
+  "hello_sha1": "38b9c6e5d522d1b77899907621d0484336d4511b",
+  "hash_match": true
+}
