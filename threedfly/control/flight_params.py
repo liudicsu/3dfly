@@ -191,7 +191,7 @@ class FlightParams:
             "overlap). flyvis-style luminance: p80 background → 0.5, then "
             "fixed contrast gain (ContrastBrightness). Matte-black loom "
             "(rgba 0, no spec/haze). 320 px so camera AA ≪ 5° FWHM. "
-            "1/f walls (RMS 0.08). Laterality is per-side DNp01 rise "
+            "1/f walls (RMS 0.05, gain 1.10). Laterality is per-side DNp01 rise "
             "(camera LC4 L−R can flip). Bilateral = both GF sides. "
             "Eye input is rendered pixels only — no sim object pose/radius. "
             "No U-flip, no 40° cant."

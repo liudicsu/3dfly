@@ -48,7 +48,9 @@ ACCEPT_N = 5
 # flyvis ContrastBrightness around a p80 background. 1.35 is within the
 # training log-normal (std 0.2). Higher (1.7) blackened still discs but
 # turned 1/f texels into open-space looms.
-FLYVIS_CONTRAST_GAIN = 1.35
+# Frozen p80 + 1.35 turned 1/f texels into 6/6 open-space looms
+# (TTC 10–13 s). Disc is now truly black; flyvis default c=1 is enough.
+FLYVIS_CONTRAST_GAIN = 1.10
 
 
 def _sample_image_hex(image: np.ndarray, uv: np.ndarray) -> np.ndarray:
