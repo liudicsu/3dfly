@@ -16,8 +16,16 @@ from threedfly.brain.eyes import (
     hex_coverage,
     hex_in_bio_envelope,
     image_to_hex,
+    reset_luminance_rest,
     stereo_to_hex,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_luminance_rest():
+    reset_luminance_rest()
+    yield
+    reset_luminance_rest()
 
 
 def test_box_eye_has_721_cells():
