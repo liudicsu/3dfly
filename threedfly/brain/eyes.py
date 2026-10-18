@@ -244,20 +244,19 @@ def _sample_image_hex_weighted(
 
 
 def _luminance_to_gray(hex_frame: np.ndarray, valid: np.ndarray) -> np.ndarray:
-    """Map the rendered background to flyvis gray=0.5 (dark stays dark).
+    """Shift valid hexes so the background sits at flyvis gray=0.5.
 
-    Two-point histogram stretch: p80 → 0.5, p5 stays below it. A growing
-    dark object must not become the background (median would). Floor the
-    span so a flat field is not amplified. Generic — no object geometry.
+    Background is a high percentile, not the median: a growing dark
+    object must not lift the rest estimate. This is a shift, not a
+    contrast stretch — stretching p5→0 paints every dark wall checker
+    as a loom. Generic; no object geometry.
     """
     out = np.asarray(hex_frame, dtype=np.float32).copy()
     m = np.asarray(valid, dtype=bool)
     if np.count_nonzero(m) < 8:
         return out
-    lo = float(np.percentile(out[m], 5.0))
     bg = float(np.percentile(out[m], 80.0))
-    span = max(bg - lo, 0.12)
-    out[m] = np.clip((out[m] - bg) / span * UNSEEN_GRAY + UNSEEN_GRAY, 0.0, 1.0)
+    out[m] = np.clip(out[m] - bg + UNSEEN_GRAY, 0.0, 1.0)
     return out
 
 
