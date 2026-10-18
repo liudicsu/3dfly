@@ -2,12 +2,13 @@
 """Closed-loop M2–M4 acceptance.
 
 Official flight gate: frontolateral collision-course looms (|az0| 20–70°,
-both sides, several l/v). Pass if ≥80% miss the object (closest approach
-> 0.1 m) and turn it to the far side — GF fire is not required
-(Tammero & Dickinson 2002; Muijres et al. 2014). Report GF escapes vs
-pre-GF saccades and which DNs drove the turn. Pure frontal (|az0|<20°)
-must fire. Receding discs must not fire. Static 30–40° onset is
-report-only. Eccentric official L/R (|az|≈90–120°) are report-only.
+both sides, several l/v). Pass if ≥80% miss the object (surface
+clearance d_centre−0.58 > 0.1 m) and turn it to the far side — GF
+fire is not required (Tammero & Dickinson 2002; Muijres et al. 2014).
+Report GF escapes vs pre-GF saccades, DN drivers, peak yaw rate, and
+the fraction of turns exceeding no-object wander (mean+2 sd of yaw
+rate). Pure frontal (|az0|<20°) must fire. Receding discs must not
+fire. Static 30–40° onset is report-only.
 
     taskset -c 0,1 python scripts/closed_loop_acceptance.py --steps 2000 --output output/m2
 """
@@ -45,9 +46,11 @@ from threedfly.control.closed_loop_metrics import (
     flight_avoidance_ok,
     geometry_aware_frac,
     loom_geometry,
+    mean_abs_yaw_rate_rad_s,
     min_center_distance_m,
     min_surface_clearance_m,
     net_heading_delta,
+    peak_yaw_rate_rad_s,
     object_behind_fly,
     onset_azimuth_band,
     start_distance_for_angular_size,
@@ -681,6 +684,9 @@ def _run_scenario(
         "dnp01_rise_max": float(np.max(rises)) if rises else 0.0,
         "min_center_m": min_center,
         "min_surface_m": min_surface,
+        "peak_yaw_rate_rad_s": peak_yaw_rate_rad_s(headings_arr, float(env.control_dt)),
+        "mean_abs_yaw_rate_rad_s": mean_abs_yaw_rate_rad_s(headings_arr, float(env.control_dt)),
+        "control_dt_s": float(env.control_dt),
         "net_heading_rad": float(avoid["net_heading_rad"]),
         "heading_away": bool(avoid["heading_away"]),
         "passed_far_side": bool(avoid["passed_far_side"]),
@@ -738,40 +744,70 @@ def _noobj_heading_summary(scenarios: dict) -> dict:
 
 
 def _yaw_control_stats(scenarios: dict) -> dict:
-    """No-object |net yaw| vs frontolat away-yaw. Control for random course."""
-    noobj = []
+    """No-object yaw-rate wander vs frontolat. Control for random course."""
+    noobj_h, noobj_r, noobj_signed = [], [], []
     for name, sc in scenarios.items():
-        if name.startswith("ctrl_noobj_") or name == "open_space":
-            h = sc.get("net_heading_rad")
-            if h is not None:
-                noobj.append(abs(float(h)))
-    loom = []
+        if not (name.startswith("ctrl_noobj_") or name == "open_space"):
+            continue
+        h = sc.get("net_heading_rad")
+        r = sc.get("mean_abs_yaw_rate_rad_s")
+        if h is not None:
+            noobj_h.append(abs(float(h)))
+            noobj_signed.append(float(h))
+        if r is not None:
+            noobj_r.append(abs(float(r)))
+    loom_h, loom_r, n_ex = [], [], 0
+    thresh = None
+    if noobj_r:
+        thresh = float(np.mean(noobj_r)) + 2.0 * float(np.std(noobj_r))
     for name, sc in scenarios.items():
         if not _is_frontolat(name):
             continue
-        if sc.get("heading_away") or sc.get("flight_avoidance_ok"):
-            h = sc.get("net_heading_rad")
-            if h is not None:
-                loom.append(abs(float(h)))
-    no_mean = float(np.mean(noobj)) if noobj else None
-    no_std = float(np.std(noobj)) if noobj else None
-    loom_mean = float(np.mean(loom)) if loom else None
-    above = None
-    if no_mean is not None and loom_mean is not None:
-        thresh = no_mean + 2.0 * (no_std or 0.0)
-        above = bool(loom) and loom_mean > thresh
+        if not (sc.get("heading_away") or sc.get("flight_avoidance_ok")):
+            continue
+        h = sc.get("net_heading_rad")
+        r = sc.get("mean_abs_yaw_rate_rad_s")
+        if h is not None:
+            loom_h.append(abs(float(h)))
+        if r is not None:
+            loom_r.append(abs(float(r)))
+            if thresh is not None and abs(float(r)) > thresh:
+                n_ex += 1
+    no_mean = float(np.mean(noobj_h)) if noobj_h else None
+    no_std = float(np.std(noobj_h)) if noobj_h else None
+    rate_mean = float(np.mean(noobj_r)) if noobj_r else None
+    rate_std = float(np.std(noobj_r)) if noobj_r else None
+    signed_mean = float(np.mean(noobj_signed)) if noobj_signed else None
+    loom_mean = float(np.mean(loom_h)) if loom_h else None
+    loom_rate = float(np.mean(loom_r)) if loom_r else None
+    frac = (float(n_ex) / float(len(loom_r))) if loom_r else None
+    above = None if thresh is None or loom_rate is None else bool(loom_rate > thresh)
     return {
         "noobj_abs_net_heading": {
-            "n": int(len(noobj)),
+            "n": int(len(noobj_h)),
             "mean": no_mean,
             "std": no_std,
-            "max": float(max(noobj)) if noobj else None,
+            "max": float(max(noobj_h)) if noobj_h else None,
+            "signed_mean": signed_mean,
+        },
+        "noobj_abs_yaw_rate": {
+            "n": int(len(noobj_r)),
+            "mean": rate_mean,
+            "std": rate_std,
+            "mean_plus_2std": thresh,
         },
         "frontolat_away_abs_net_heading": {
-            "n": int(len(loom)),
+            "n": int(len(loom_h)),
             "mean": loom_mean,
-            "std": float(np.std(loom)) if loom else None,
+            "std": float(np.std(loom_h)) if loom_h else None,
         },
+        "frontolat_away_abs_yaw_rate": {
+            "n": int(len(loom_r)),
+            "mean": loom_rate,
+            "std": float(np.std(loom_r)) if loom_r else None,
+        },
+        "fraction_exceeding_noobj_rate_mean_plus_2std": frac,
+        "n_exceeding_noobj_wander": int(n_ex),
         "frontolat_mean_exceeds_noobj_mean_plus_2std": above,
     }
 
@@ -876,6 +912,8 @@ def _frontolat_gate(scenarios: dict) -> dict:
             "fire_diag": sc.get("fire_diag"),
             "min_center_m": sc.get("min_center_m"),
             "min_surface_m": sc.get("min_surface_m"),
+            "peak_yaw_rate_rad_s": sc.get("peak_yaw_rate_rad_s"),
+            "mean_abs_yaw_rate_rad_s": sc.get("mean_abs_yaw_rate_rad_s"),
             "net_heading_rad": sc.get("net_heading_rad"),
             "heading_away": sc.get("heading_away"),
             "passed_far_side": sc.get("passed_far_side"),
@@ -1536,13 +1574,16 @@ def main(argv=None) -> int:
                 "field. Receding large discs stay visible and skip that "
                 "initialisation so the standing disc is not an onset. "
                 "GF readout is frozen (calibrate_gf_readout.py; von "
-                "Reyn 2014/2017). Frontolat flight gate is miss + "
-                "far-side/heading-away (Tammero 2002; Muijres 2014), "
-                "not GF fire. Static 30–40° onset is report-only. "
-                "Recede must be 0 fires. Frontal both-GF takeoff. "
-                "Rear 75–165° has no flyvis cells. Eccentric looms "
-                "are late or silent. No-object yaw is the control for "
-                "whether frontolat turns exceed random course. "
+                "Reyn 2014/2017). Frontolat flight gate is surface "
+                "clearance d−0.58 > 0.1 m + far-side/heading-away "
+                "(Tammero 2002; Muijres 2014), not GF fire. Static "
+                "30–40° onset is report-only. Recede must be 0 fires. "
+                "Frontal both-GF takeoff. DN→yaw plant is frozen "
+                "(calibrate_saccade_plant.py; Fry 2003). 1/f walls "
+                "and obstacles are L/R-even so open-space drift is "
+                "not a body-frame texture bias. Rear 75–165° has no "
+                "flyvis cells. Eccentric looms are late or silent. "
+                "No-object yaw rate is the wander control. "
                 "brain+flyvis is the 25 ms bar; full-loop need not."
             ),
             "no_object_state_in_eye_or_controller": True,
@@ -1579,20 +1620,21 @@ def _print_variant_tables(summary: dict) -> None:
     fl = summary.get("frontolat_gate") or {}
     if fl.get("details"):
         print(
-            "\nFrontolateral flight GATE (|az0| 20–70°, miss >0.1 m + far-side/heading-away; GF optional):",
+            "\nFrontolateral flight GATE (|az0| 20–70°, surface d−0.58 >0.1 m + far-side/heading-away; GF optional):",
             flush=True,
         )
         print(
-            f"{'scenario':<28} {'ok':>4} {'dmin':>6} {'dhd':>6} {'away':>4} {'far':>4} "
-            f"{'mode':>14} {'drv':>7} {'esc':>4} {'rise':>6}",
+            f"{'scenario':<28} {'ok':>4} {'dsrf':>6} {'dhd':>6} {'away':>4} {'far':>4} "
+            f"{'pk°/s':>6} {'mode':>14} {'drv':>7} {'esc':>4} {'rise':>6}",
             flush=True,
         )
         for name, d in fl["details"].items():
             print(
-                f"{name:<28} {_fmt(d.get('ok')):>4} {_fmt(d.get('min_center_m')):>6} "
+                f"{name:<28} {_fmt(d.get('ok')):>4} {_fmt(d.get('min_surface_m')):>6} "
                 f"{_fmt(d.get('net_heading_rad')):>6} "
                 f"{_fmt(1 if d.get('heading_away') else 0):>4} "
                 f"{_fmt(1 if d.get('passed_far_side') else 0):>4} "
+                f"{_fmt(None if d.get('peak_yaw_rate_rad_s') is None else 180.0/np.pi*float(d.get('peak_yaw_rate_rad_s'))):>6} "
                 f"{str(d.get('avoidance_mode') or '-'):>14} "
                 f"{str(d.get('yaw_driver') or '-'):>7} "
                 f"{str(d.get('brain_escapes')):>4} {_fmt(d.get('dnp01_rise_max')):>6}",
@@ -1721,11 +1763,16 @@ def _print_variant_tables(summary: dict) -> None:
     if yc:
         no = yc.get("noobj_abs_net_heading") or {}
         lm = yc.get("frontolat_away_abs_net_heading") or {}
+        nr = yc.get("noobj_abs_yaw_rate") or {}
+        lr = yc.get("frontolat_away_abs_yaw_rate") or {}
         print(
-            f"\nYaw control (no-object |net heading| vs frontolat away): "
-            f"noobj n={no.get('n')} mean={_fmt(no.get('mean'))} std={_fmt(no.get('std'))} "
-            f"max={_fmt(no.get('max'))} | frontolat n={lm.get('n')} mean={_fmt(lm.get('mean'))} "
-            f"exceeds_noobj+2sd={yc.get('frontolat_mean_exceeds_noobj_mean_plus_2std')}",
+            f"\nYaw control (no-object wander vs frontolat): "
+            f"noobj |Δh| n={no.get('n')} mean={_fmt(no.get('mean'))} "
+            f"signed={_fmt(no.get('signed_mean'))} | "
+            f"|ω| mean={_fmt(nr.get('mean'))} +2sd={_fmt(nr.get('mean_plus_2std'))} | "
+            f"frontolat n={lm.get('n')} |ω|={_fmt(lr.get('mean'))} "
+            f"frac>wander={_fmt(yc.get('fraction_exceeding_noobj_rate_mean_plus_2std'))} "
+            f"n_ex={yc.get('n_exceeding_noobj_wander')}",
             flush=True,
         )
     print(

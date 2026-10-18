@@ -35,6 +35,11 @@ def write_one_over_f_png(path: Path, n: int = 256, contrast: float = 0.05, seed:
     freq[0, 0] = 1.0
     img = np.fft.ifft2(spec / freq).real
     img = (img - float(img.mean())) / max(float(img.std()), 1e-9)
+    # L/R- and U/D-even so every inward wall face is camera-symmetric.
+    # An unsymmetric 1/f made the left half of every view brighter and
+    # produced a body-frame rightward HS/DNa02 bias at every heading.
+    img = 0.5 * (img + np.fliplr(img))
+    img = 0.5 * (img + np.flipud(img))
     img = np.clip(0.5 + float(contrast) * img, 0.0, 1.0)
     u8 = (img * 255.0).astype(np.uint8)
 
@@ -122,17 +127,26 @@ FLY_MJCF = """
       <geom type="box" size="5 0.1 2" material="wall_mat"/>
     </body>
     
-    <!-- Some obstacles for exploration -->
+    <!-- Obstacles in L/R-mirrored pairs so open-space optic flow is even. -->
     <body name="obstacle_1" pos="2 2 0.5">
       <geom type="box" size="0.3 0.3 0.5" material="obs_mat"/>
     </body>
+    <body name="obstacle_1m" pos="2 -2 0.5">
+      <geom type="box" size="0.3 0.3 0.5" material="obs_mat"/>
+    </body>
     <body name="obstacle_2" pos="-2 -2 0.3">
+      <geom type="cylinder" size="0.2 0.3" material="obs_mat"/>
+    </body>
+    <body name="obstacle_2m" pos="-2 2 0.3">
       <geom type="cylinder" size="0.2 0.3" material="obs_mat"/>
     </body>
     <body name="sky" pos="0 0 4.2">
       <geom type="box" size="6 6 0.05" rgba="0.70 0.80 0.92 1" contype="0" conaffinity="0"/>
     </body>
     <body name="obstacle_3" pos="-1 3 0.4">
+      <geom type="sphere" size="0.4" material="obs_mat"/>
+    </body>
+    <body name="obstacle_3m" pos="-1 -3 0.4">
       <geom type="sphere" size="0.4" material="obs_mat"/>
     </body>
     <!-- Compact solid-dark loom (mocap). Hidden at z=−8 until a scenario
@@ -292,12 +306,36 @@ FLY_MJCF = """
 """
 
 
-def get_fly_mjcf() -> str:
-    """Get MJCF XML string for fly environment."""
+def _flip_world_y_xml(xml: str) -> str:
+    """Negate world-Y of named obstacle / wall bodies (mirrored-scene test)."""
+    import re
+
+    def _flip(m):
+        name, x, y, z = m.group(1), m.group(2), m.group(3), m.group(4)
+        return f'<body name="{name}" pos="{x} {-float(y):g} {z}">'
+
+    return re.sub(
+        r'<body name="((?:obstacle|wall)[^"]*)" pos="([^\s"]+) ([^\s"]+) ([^\s"]+)">',
+        _flip,
+        xml,
+    )
+
+
+def get_fly_mjcf(*, mirror_y: bool = False) -> str:
+    """Get MJCF XML string for fly environment.
+
+    ``mirror_y`` flips obstacle/wall world-Y for the open-space bias test.
+    The official room is already L/R-paired; the flip is the control.
+    """
     meshdir = str(ASSETS_DIR.absolute())
     texdir = str(ASSETS_ROOT.absolute())
-    wall = write_one_over_f_png(ASSETS_ROOT / "room_natural.png")
-    return FLY_MJCF.format(meshdir=meshdir, texturedir=texdir, wall_tex=wall.name)
+    wall = write_one_over_f_png(
+        ASSETS_ROOT / ("room_natural_my.png" if mirror_y else "room_natural.png")
+    )
+    xml = FLY_MJCF.format(meshdir=meshdir, texturedir=texdir, wall_tex=wall.name)
+    if mirror_y:
+        xml = _flip_world_y_xml(xml)
+    return xml
 
 
 # Forward + ipsilateral side cameras. Hex rays set laterality.

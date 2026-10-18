@@ -31,11 +31,10 @@ LATERAL_AZ_DEG = 30.0
 FRONTAL_AZ_MAX_DEG = 20.0
 FRONTOLAT_AZ_MIN_DEG = 20.0
 FRONTOLAT_AZ_MAX_DEG = 70.0
-# Closed-loop flight miss: fly-body envelope, not the 0.58 m visual disc.
-# That radius sets l/v; treating it as a solid sphere would fail any
-# 30° banked saccade (L5 still clips the visual sphere). 0.1 m is a
-# clear closest-approach gap (Tammero / Muijres evasive miss).
-MISS_CENTER_M = 0.1
+# Closed-loop flight miss: surface clearance of the 0.58 m visual disc.
+# d_centre − 0.58 > 0.1 m. A 0.1 m centre miss is still a collision.
+MISS_SURFACE_M = 0.1
+MISS_CENTER_M = LOOM_RADIUS_M + MISS_SURFACE_M  # 0.68 m; kept as the equivalent centre
 # Net heading away from the true side. ~4.6°; no-object wander is the control.
 NET_HEADING_AWAY_RAD = 0.08
 # Object stayed ipsilateral at closest approach (did not cross in front).
@@ -443,6 +442,25 @@ def passed_far_side(
     return False
 
 
+def yaw_rates(headings, dt: float) -> np.ndarray:
+    """Wrapped heading derivative (rad/s)."""
+    h = np.asarray(list(headings), dtype=float)
+    if h.size < 2:
+        return np.zeros(0, dtype=float)
+    dh = np.arctan2(np.sin(np.diff(h)), np.cos(np.diff(h)))
+    return dh / max(float(dt), 1e-9)
+
+
+def peak_yaw_rate_rad_s(headings, dt: float) -> float:
+    w = yaw_rates(headings, dt)
+    return 0.0 if w.size == 0 else float(np.max(np.abs(w)))
+
+
+def mean_abs_yaw_rate_rad_s(headings, dt: float) -> float:
+    w = yaw_rates(headings, dt)
+    return 0.0 if w.size == 0 else float(np.mean(np.abs(w)))
+
+
 def flight_avoidance_ok(
     *,
     min_center_m: Optional[float],
@@ -450,16 +468,18 @@ def flight_avoidance_ok(
     threat_side: str,
     azimuths=None,
     ca_step: Optional[int] = None,
-    miss_m: float = MISS_CENTER_M,
+    miss_m: float = MISS_SURFACE_M,
+    radius: float = LOOM_RADIUS_M,
 ) -> dict:
-    """Flight success: miss the object and turn it to the far side.
+    """Flight success: surface miss and turn the object to the far side.
 
     GF fire is not required (Tammero & Dickinson 2002; Muijres et al. 2014:
     flying Drosophila mostly bank away; GF takeoff is primarily from
-    standing). ``missed`` is a 0.1 m closest-approach envelope around the
-    fly, not clearance of the 0.58 m visual-equivalent sphere.
+    standing). ``missed`` is ``d_centre − 0.58 > 0.1 m``. A 0.1 m centre
+    miss is still a collision with the visual disc.
     """
-    missed = min_center_m is not None and float(min_center_m) > float(miss_m)
+    surface = None if min_center_m is None else float(min_center_m) - float(radius)
+    missed = surface is not None and float(surface) > float(miss_m)
     dhead = net_heading_delta(headings)
     away = heading_away_from_side(dhead, threat_side)
     far = passed_far_side(azimuths or [], threat_side, ca_step=ca_step)
@@ -467,6 +487,7 @@ def flight_avoidance_ok(
         "ok": bool(missed and (away or far)),
         "missed": bool(missed),
         "min_center_m": None if min_center_m is None else float(min_center_m),
+        "min_surface_m": None if surface is None else float(surface),
         "net_heading_rad": float(dhead),
         "heading_away": bool(away),
         "passed_far_side": bool(far),

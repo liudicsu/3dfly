@@ -109,7 +109,11 @@ class FlightParams:
     escape_yaw_kick: float = 0.55
     # Map DN yaw onto the existing L−R stroke actuator (not DNg02 L−R).
     # +yaw = left turn = more left stroke. Residual action[4] torque stays.
+    # Plant (stroke→N·m and residual torque_max) is frozen at ×12 vs the
+    # torque-limited 8e-6 / 5e-6 gains: unit DNa02 L−R → 90° in 50–80 ms,
+    # peak 1000–5000 °/s (scripts/calibrate_saccade_plant.py).
     yaw_stroke_gain: float = 0.45
+    saccade_plant_scale: float = 12.0
 
     # --- Looming dodge (DNp03 + optic-lobe VPNs) ---
     dnp03_yaw_gain: float = 1.15
@@ -123,7 +127,16 @@ class FlightParams:
     # into a frontal-right object (offset_x+0.8) or spin in open space.
     loom_yaw_deadzone: float = 0.14
     # Residual DNa02/HSE also spin the fly in open space onto a wall.
+    # Total-yaw deadzone stays off; course-only deadzone is the plant
+    # threshold (unit DNa02 term ≈ 0.53; post-baseline residual ≪ 0.1).
+    # Documented with the saccade plant; not a gate retune.
     steer_deadzone: float = 0.0
+    course_deadzone: float = 0.15
+    # Slow rest on course L−R (DNa02 / DNp15 only). Scene/connectome DC
+    # after baseline is subtracted; a 50–80 ms saccade is a transient
+    # and is passed. HSE is not rested — it is the optomotor damp.
+    # Not a brain-weight retune. Plant calibration disables this.
+    course_rest_tau_steps: float = 40.0
     # LPLC2 / LPLC1 / LC4 are ipsilateral looming VPNs (hex-swap / L-only).
     # Use baseline-subtracted L−R, not a contralateral wall-DC hack.
     lplc2_threat_gain: float = 0.45
@@ -202,7 +215,13 @@ class FlightParams:
             "AND L−R stroke; DNg02 stays bilateral"
         ),
         "normalisation": "DN L−R / M1 peak-delta scales before tanh, after baseline",
-        "hse": "compensatory yaw -= tanh((L−R)/20)",
+        "hse": (
+            "compensatory: left turn raises HSE_R (progressive on the "
+            "right eye) → yaw += tanh((L−R)/20) is negative. The old "
+            "minus sign was positive feedback (open-space ωz/HSE trace). "
+            "Torque is divided by saccade_plant_scale so HS stays damp "
+            "and does not ride the DN saccade plant."
+        ),
         "camera": (
             "Forward 150° + ipsilateral 150° side camera per eye so the "
             "flyvis ±75° lattice (1:1 deg, centre = frontal) is fully "
@@ -211,18 +230,28 @@ class FlightParams:
             "no-object prewarm initialises rest to that frame (τ→∞ "
             "equivalent). Recede skips that initialisation. "
             "BoxEye hex-box at the scaled spacing. Matte-black loom. "
-            "320 px. 1/f RMS 0.05, gain 1.10. Laterality is per-side "
+            "320 px. 1/f RMS 0.05 (L/R-even), gain 1.10. Laterality is per-side "
             "DNp01 rise. LPi (Glu/−) T4/T5→LPi→LPLC2 is in coreTplus. "
             "Eye input is rendered pixels only — no sim object pose/radius. "
             "No U-flip, no 40° cant."
         ),
         "geometry": (
-            "Frontolat |az0| 20–70° flight: miss >0.1 m and "
-            "far-side/heading-away (≥80%); GF fire is reported, not "
-            "required. Frontal GF takeoff when both sides cross the "
-            "calibrated score. Official looms start ≤5°. Receding "
-            "discs must not fire. Static 30–40° onset is report-only. "
-            "Eccentric |az|≈90–120° are report-only."
+            "Frontolat |az0| 20–70° flight: surface clearance "
+            "d_centre−0.58 > 0.1 m and far-side/heading-away (≥80%); "
+            "GF fire is reported, not required. Frontal GF takeoff "
+            "when both sides cross the calibrated score. Official "
+            "looms start ≤5°. Receding discs must not fire. Static "
+            "30–40° onset is report-only. Eccentric |az|≈90–120° "
+            "are report-only."
+        ),
+        "saccade_plant": (
+            "DN→yaw/roll plant frozen ×12 (WING_YAW_GAIN 9.6e-5, "
+            "torque_max 6e-5): unit DNa02 L−R step, 90° in 50–80 ms, "
+            "peak 1000–5000 °/s. Fry, Sayaman & Dickinson 2003; "
+            "Tammero & Dickinson 2002; Muijres et al. 2014. "
+            "scripts/calibrate_saccade_plant.py. Izz ~1e-8, "
+            "τ=I/kd ~4 ms — not inertia-limited. Course deadzone "
+            "0.15 (unit DNa02 ≈ 0.53). HSE torque ÷12."
         ),
         "hover_up": "copied from FlyEnvironment.hover_action at bind time",
     })

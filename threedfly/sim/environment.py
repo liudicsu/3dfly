@@ -22,9 +22,11 @@ ROOM_Z_MIN = 0.25
 ROOM_Z_MAX = 3.70
 # Visual-only wingbeat (stroke-averaged forces, not a 200 Hz aero sim).
 WINGBEAT_HZ = 200.0
-# Stroke-difference torques sized for the ~1.5 g, 2.5 cm scaled body.
-WING_YAW_GAIN = 8e-6      # N·m per unit (L−R) stroke
-WING_ROLL_GAIN = 3e-6     # N·m per unit (L−R) stroke
+# Stroke-difference torques. Frozen by scripts/calibrate_saccade_plant.py
+# (unit DNa02 L−R → 90° in 50–80 ms, peak 1000–5000 °/s; ×12 vs the
+# torque-limited 8e-6 / 3e-6 / 5e-6 plant). Izz is not the limiter.
+WING_YAW_GAIN = 9.6e-5    # N·m per unit (L−R) stroke
+WING_ROLL_GAIN = 3.6e-5   # N·m per unit (L−R) stroke
 # Minimal engineered angular-rate damping kept as a safety net. Primary
 # haltere path is the connectome mapping (see select_haltere_afferent_neurons).
 SAFETY_HALTERE_KD = 2e-6  # N·m / (rad/s)
@@ -43,6 +45,7 @@ class FlyEnvironment:
         render_mode: Optional[str] = "rgb_array",
         camera_width: Optional[int] = None,
         camera_height: Optional[int] = None,
+        mjcf_xml: Optional[str] = None,
     ):
         """
         Initialize environment.
@@ -57,7 +60,7 @@ class FlyEnvironment:
         self.camera_height = int(camera_height) if camera_height else int(EYE_PIXELS)
         
         # Load MJCF model
-        mjcf_xml = get_fly_mjcf()
+        mjcf_xml = get_fly_mjcf() if mjcf_xml is None else mjcf_xml
         self.model = mujoco.MjModel.from_xml_string(mjcf_xml)
         self.data = mujoco.MjData(self.model)
         
@@ -97,7 +100,7 @@ class FlyEnvironment:
         
         # Control bounds in SI units (gainprm=1). Max lift ~3x body weight (~0.016 N).
         self.thrust_max = 0.05
-        self.torque_max = 5e-6
+        self.torque_max = 6.0e-5
         self.lift_max = self.thrust_max  # peak combined wing lift; hover = weight/lift_max
         # Minimal engineered damping (safety). Brain haltere afferents are the primary path.
         self.haltere_kd = SAFETY_HALTERE_KD

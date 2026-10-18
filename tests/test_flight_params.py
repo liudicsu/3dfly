@@ -46,3 +46,10 @@ def test_escape_threshold_sits_between_m1_rotation_and_loom():
     assert "von Reyn" in p.notes["escape"]
     assert "calibrate_gf_readout" in p.notes["escape"]
     assert "20" in p.notes["geometry"] and "70" in p.notes["geometry"]
+    assert "0.58" in p.notes["geometry"]
+    assert p.saccade_plant_scale == 12.0
+    assert p.course_rest_tau_steps == 40.0
+    assert p.course_deadzone == 0.15
+    assert p.steer_deadzone == 0.0
+    assert "Fry" in p.notes["saccade_plant"]
+    assert "calibrate_saccade_plant" in p.notes["saccade_plant"]

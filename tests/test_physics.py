@@ -177,11 +177,12 @@ def test_positive_yaw_command_increases_heading():
     env.set_pose((0.0, 0.0, 1.5), yaw=0.0)
     hover = env.hover_action
     h0 = heading_from_quaternion(env.get_fly_orientation())
-    for _ in range(25):
-        env.step(np.array([0.0, hover, 0.0, 0.0, 1.0]))
+    env.step(np.array([0.0, hover, 0.0, 0.0, 1.0]))
+    wz = float(env.get_fly_angular_velocity()[2])
     h1 = heading_from_quaternion(env.get_fly_orientation())
     env.close()
     d = float(np.arctan2(np.sin(h1 - h0), np.cos(h1 - h0)))
+    assert wz > 0.5, f"+yaw should give +ωz (left), got ωz={wz:.3f}"
     assert d > 0.05, f"+yaw should increase heading (left), got Δ={d:.3f}"
 
 
@@ -193,9 +194,10 @@ def test_left_minus_right_stroke_increases_heading():
     env.set_pose((0.0, 0.0, 1.5), yaw=0.0)
     hover = env.hover_action
     h0 = heading_from_quaternion(env.get_fly_orientation())
-    for _ in range(25):
-        env.step(np.array([0.0, hover, 0.0, 0.0, 0.0]), wing_strokes=(0.85, 0.15))
+    env.step(np.array([0.0, hover, 0.0, 0.0, 0.0]), wing_strokes=(0.85, 0.15))
+    wz = float(env.get_fly_angular_velocity()[2])
     h1 = heading_from_quaternion(env.get_fly_orientation())
     env.close()
     d = float(np.arctan2(np.sin(h1 - h0), np.cos(h1 - h0)))
+    assert wz > 0.5, f"L>R stroke should give +ωz, got ωz={wz:.3f}"
     assert d > 0.05, f"L>R stroke should increase heading, got Δ={d:.3f}"

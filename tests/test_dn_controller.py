@@ -185,6 +185,55 @@ def test_dna02_normalised_to_m1_lr_scale():
     assert yaw > 0.20
 
 
+def test_course_rest_eats_standing_dc_and_passes_transient():
+    """Open-space DNa02 DC → 0; a 50–80 ms step still yaws. HSE is not eaten."""
+    c = _ctl(course_rest_tau_steps=40.0)
+    dc = DNReadout(dna02_L=0.20, dna02_R=0.0, dng02_amp=5.0)
+    last = 0.0
+    for _ in range(160):
+        last = float(c.compute(dc)[4])
+    assert abs(last) < 0.05
+    c.reset()
+    pulse = DNReadout(dna02_L=0.54, dna02_R=0.0, dng02_amp=5.0)
+    y0 = float(c.compute(pulse)[4])
+    assert y0 > 0.20
+    # HSE optomotor damp must survive the rest and stay below saccade
+    # scale (÷ plant). Left-turn pattern is HSE_R > HSE_L → negative yaw.
+    c.reset()
+    hse = DNReadout(hse_L=0.0, hse_R=20.0, dng02_amp=5.0)
+    y_hse = [float(c.compute(hse)[4]) for _ in range(80)]
+    assert y_hse[0] < -0.01
+    assert y_hse[-1] < -0.01
+    assert abs(y_hse[0]) < 0.10
+    c.reset()
+    hse_l = DNReadout(hse_L=20.0, hse_R=0.0, dng02_amp=5.0)
+    y_l = float(c.compute(hse_l)[4])
+    assert y_l > 0.01
+    assert y_l < 0.10
+
+
+def test_course_deadzone_zeros_residual_and_passes_unit_step():
+    """Sub-threshold course DC does not yaw; a unit DNa02 step still does."""
+    c = _ctl(course_rest_tau_steps=0.0, course_deadzone=0.15)
+    residual = DNReadout(dna02_L=0.05, dna02_R=0.0, dng02_amp=5.0)
+    y_res = float(c.compute(residual)[4])
+    assert abs(y_res) < 0.05
+    c.reset()
+    pulse = DNReadout(dna02_L=0.54, dna02_R=0.0, dng02_amp=5.0)
+    y = float(c.compute(pulse)[4])
+    assert y > 0.20
+
+
+def test_capture_baseline_clears_course_rest():
+    c = _ctl(course_rest_tau_steps=40.0)
+    dc = DNReadout(dna02_L=0.54, dna02_R=0.0, dng02_amp=5.0)
+    for _ in range(80):
+        c.compute(dc)
+    c.capture_baseline(DNReadout())
+    assert c._course_rest["dna02"] == 0.0
+    assert c._course_rest["dnp15"] == 0.0
+
+
 def test_no_escapes_in_first_100_steps_of_open_flight():
     """Startup artifact: rest EMA at 0 vs flyvis settling 1.7 Hz must not fire."""
     c = _ctl(dnp01_warmup_steps=40)

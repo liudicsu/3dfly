@@ -271,7 +271,9 @@ def test_lateral_approaches_turn_away_from_threat():
     for side in ("L", "R"):
         heads, evs = _approach(side)
         assert evs, f"{side} approach produced no DNp01 escape"
-        frac = direction_correct_frac(heads, evs, side)
+        # 30 ms window: the calibrated saccade is 50–80 ms / 90°, so an
+        # 80 ms score window can wrap past π and look like the wrong way.
+        frac = direction_correct_frac(heads, evs, side, window=3)
         assert frac >= 0.8, f"{side} direction_correct={frac} events={[(e.step, e.yaw) for e in evs]}"
     env.close()
 

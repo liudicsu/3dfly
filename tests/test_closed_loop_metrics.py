@@ -10,7 +10,9 @@ import pytest
 
 from threedfly.control.closed_loop_metrics import (
     PR16_WALLS_PER_100,
+    MISS_SURFACE_M,
     body_azimuth_deg,
+    peak_yaw_rate_rad_s,
     classify_loom,
     closest_approach_step,
     collision_course_object,
@@ -414,10 +416,12 @@ def test_acceptance_script_metric_code_runs_on_numpy2():
 
 
 def test_flight_avoidance_miss_and_far_side():
-    """Miss + heading-away or far-side pass; GF is not required."""
+    """Surface clearance > 0.1 m + heading-away or far-side; GF is not required."""
     assert min_center_distance_m([2.0, 0.4, 1.1]) == pytest.approx(0.4)
+    assert MISS_SURFACE_M == pytest.approx(0.1)
+    assert peak_yaw_rate_rad_s([0.0, 0.1, 0.2], 0.01) == pytest.approx(10.0)
     rec = flight_avoidance_ok(
-        min_center_m=0.4,
+        min_center_m=0.80,
         headings=[0.0, -0.05, -0.15],
         threat_side="L",
         azimuths=[35.0, 50.0, 80.0],
@@ -425,8 +429,19 @@ def test_flight_avoidance_miss_and_far_side():
     )
     assert rec["ok"] is True
     assert rec["missed"] is True
+    assert rec["min_surface_m"] == pytest.approx(0.22)
     assert rec["heading_away"] is True
     assert rec["passed_far_side"] is True
+    # Centre 0.4 m clips the 0.58 m disc — that is a collision.
+    clip = flight_avoidance_ok(
+        min_center_m=0.40,
+        headings=[0.0, -0.2],
+        threat_side="L",
+        azimuths=[80.0, 90.0],
+        ca_step=1,
+    )
+    assert clip["ok"] is False
+    assert clip["missed"] is False
     hit = flight_avoidance_ok(
         min_center_m=0.05,
         headings=[0.0, -0.2],
@@ -438,7 +453,7 @@ def test_flight_avoidance_miss_and_far_side():
     assert hit["missed"] is False
     # Right threat, heading increase is away; object stays negative az.
     right = flight_avoidance_ok(
-        min_center_m=0.5,
+        min_center_m=0.80,
         headings=[0.0, 0.04, 0.12],
         threat_side="R",
         azimuths=[-35.0, -55.0, -90.0],

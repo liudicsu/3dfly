@@ -87,6 +87,7 @@ class DNFlightController:
         self._vpn_rising = False
         self.last_lock_step: Optional[int] = None
         self.last_yaw_terms: Dict[str, float] = {}
+        self._course_rest = {"dna02": 0.0, "dnp15": 0.0, "hse": 0.0}
         self.last_gf_score = 0.0
         self._rise_hist: List[float] = []
         self._rise_L_hist: List[float] = []
@@ -144,6 +145,7 @@ class DNFlightController:
         self._vpn_rising = False
         self.last_lock_step = None
         self.last_yaw_terms = {}
+        self._course_rest = {"dna02": 0.0, "dnp15": 0.0, "hse": 0.0}
         self.last_gf_score = 0.0
         self._rise_hist = []
         self._rise_L_hist = []
@@ -195,6 +197,9 @@ class DNFlightController:
         self._gf_integ = 0.0
         self._gf_integ_L = 0.0
         self._gf_integ_R = 0.0
+        # Standing course DC is already in ``_base``; restart the rest
+        # so a pre-baseline compute cannot invert the L−R.
+        self._course_rest = {"dna02": 0.0, "dnp15": 0.0, "hse": 0.0}
         if self.params.use_engineered_eye_laterality:
             eye = float(readout.eye_L) - float(readout.eye_R)
             if abs(eye) >= float(self.params.eye_threat_min):
@@ -239,12 +244,43 @@ class DNFlightController:
     def _norm_lr(self, left: float, right: float, scale: float, gain: float) -> float:
         return gain * _tanh((float(left) - float(right)) / max(float(scale), 1e-6))
 
+    def _course_highpass(self, dna02: float, dnp15: float, tau: float) -> tuple[float, float]:
+        """Subtract standing DNa02/DNp15 DC; pass a 50–80 ms saccade."""
+        alpha = float(1.0 - np.exp(-1.0 / max(float(tau), 1e-6)))
+        out = []
+        for key, raw in (("dna02", dna02), ("dnp15", dnp15)):
+            rest = float(self._course_rest.get(key, 0.0))
+            rest = rest + alpha * (float(raw) - rest)
+            self._course_rest[key] = rest
+            out.append(float(raw) - rest)
+        return float(out[0]), float(out[1])
+
     def _steer_terms(self, ro: DNReadout) -> Dict[str, float]:
         """Per-source yaw before the escape burst. Official path has eye=0."""
         p = self.params
         dna02 = self._norm_lr(ro.dna02_L, ro.dna02_R, p.dna02_scale_hz, p.dna02_yaw_gain)
         dnp15 = self._norm_lr(ro.dnp15_L, ro.dnp15_R, p.dnp15_scale_hz, p.dnp15_yaw_gain)
-        hse = -self._norm_lr(ro.hse_L, ro.hse_R, p.hse_scale_hz, p.hse_yaw_damp)
+        # HSE_R > HSE_L during a left ( +ωz ) turn (progressive on the
+        # right eye). Compensatory yaw must be negative. The previous
+        # minus sign was positive feedback and, with the ×12 plant,
+        # turned residual rotation into open-space saccades.
+        # HS is optomotor damp, not a saccade DN: keep its torque at
+        # the pre-calibration scale when the plant is ×12.
+        hse = self._norm_lr(ro.hse_L, ro.hse_R, p.hse_scale_hz, p.hse_yaw_damp)
+        plant = float(getattr(p, "saccade_plant_scale", 1.0) or 1.0)
+        if plant > 1.0:
+            hse = float(hse) / plant
+        tau = float(getattr(p, "course_rest_tau_steps", 0.0) or 0.0)
+        if tau > 0.0:
+            # HS stays un-rested: it is the optomotor damp. Eating it
+            # would remove the restoring torque on a constant-rate turn.
+            dna02, dnp15 = self._course_highpass(dna02, dnp15, tau)
+        # Plant-side threshold: residual course after symmetry/baseline
+        # must not fire a saccade-scale torque. Loom terms are untouched.
+        dz = float(getattr(p, "course_deadzone", 0.0) or 0.0)
+        if dz > 0.0 and abs(float(dna02) + float(dnp15)) < dz:
+            dna02 = 0.0
+            dnp15 = 0.0
         d03, vpn = self._loom_yaw_parts(ro)
         eye = 0.0
         if p.use_engineered_eye_laterality:
