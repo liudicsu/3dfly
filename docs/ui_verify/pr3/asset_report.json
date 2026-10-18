@@ -1,0 +1,46 @@
+{
+  "asset_path": "/workspace/3dfly/assets/brain/coreTplus_v1.npz",
+  "asset_bytes": 347501,
+  "shell_bytes": {
+    "shell_CB.glb": 2015064,
+    "shell_OL_L.glb": 772708,
+    "shell_OL_R.glb": 754716
+  },
+  "n_neurons": 45434,
+  "n_with_soma": 44788,
+  "n_types": 304,
+  "body_ids_sha1_asset": "38b9c6e5d522d1b77899907621d0484336d4511b",
+  "body_ids_sha1_hello": "38b9c6e5d522d1b77899907621d0484336d4511b",
+  "hash_match": true,
+  "key_counts": {
+    "DNp01": 2,
+    "DNp03": 2,
+    "DNa02": 2,
+    "DNp15": 2,
+    "LPLC2": 185,
+    "LC4": 126,
+    "T4a": 1684,
+    "T4b": 1690,
+    "T4c": 1778,
+    "T4d": 1709,
+    "T5a": 1664,
+    "T5b": 1715,
+    "T5c": 1720,
+    "T5d": 1620,
+    "HSE": 2,
+    "TTMn": 2,
+    "PSI": 2,
+    "DNg02*": 29,
+    "SApp": 148
+  },
+  "lo_nm": [
+    19744.0,
+    84656.0,
+    98272.0
+  ],
+  "hi_nm": [
+    748800.0,
+    550976.0,
+    1049248.0
+  ]
+}
